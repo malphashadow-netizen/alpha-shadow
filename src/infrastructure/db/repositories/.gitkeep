@@ -1,0 +1,2 @@
+# Postgres repository implementations arrive in Phase 1/2.
+# Every repository receives a client from withTenantContext(); none may touch pg.Pool directly.

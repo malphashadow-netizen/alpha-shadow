@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# --- alpha-shadow project-specific ---
+# Embedded PostgreSQL clusters started by the test harness
+.embedded-postgres/
+# Local secrets / key material (never commit)
+*.pem
+*.key
