@@ -1,0 +1,1 @@
+# Phase 1+: entities (tenant, branch, user, ...). Pure TypeScript — no imports outside domain/ and shared/.

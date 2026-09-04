@@ -1,0 +1,9 @@
+# Placeholder — Phase 1 adds the first SQL migration here.
+# Template for EVERY table carrying tenant_id (checked by test/contract/rls-coverage.test.ts):
+#
+#   ALTER TABLE <t> ENABLE ROW LEVEL SECURITY;
+#   ALTER TABLE <t> FORCE  ROW LEVEL SECURITY;
+#   CREATE POLICY tenant_isolation ON <t>
+#     FOR ALL
+#     USING      (tenant_id = current_setting('app.current_tenant_id')::uuid)
+#     WITH CHECK (tenant_id = current_setting('app.current_tenant_id')::uuid);

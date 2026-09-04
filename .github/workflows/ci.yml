@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast static gates: typecheck + ESLint (incl. custom no-role-name-compare)
+  # + the ESLint-independent AST role-comparison guard (with its self-test).
+  # ---------------------------------------------------------------------------
+  static:
+    name: Typecheck · Lint · Role-compare guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: ESLint (incl. custom alpha-shadow/no-role-name-compare)
+        run: npm run lint:eslint
+      - name: Role-comparison guard — self-test (must flag role === 'ADMIN')
+        run: npm run check:roles:selftest
+      - name: Role-comparison guard — scan src/
+        run: npm run check:roles
+
+  # ---------------------------------------------------------------------------
+  # Build + unit tests (no database).
+  # ---------------------------------------------------------------------------
+  build-and-unit:
+    name: Build · Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:unit
+
+  # ---------------------------------------------------------------------------
+  # Integration + contract tests against a REAL PostgreSQL service container.
+  # The contract suite inspects pg_tables / pg_policies and fails the build if
+  # any tenant_id table lacks ENABLE+FORCE RLS or the dual USING/WITH CHECK
+  # policy. This job is a required check — it is not optional.
+  # ---------------------------------------------------------------------------
+  database-contracts:
+    name: Integration · Contract (real PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: alpha_shadow_ci
+          # CI-only throw-away credential for an ephemeral service container.
+          POSTGRES_PASSWORD: ci-ephemeral-not-a-secret
+          POSTGRES_DB: alpha_shadow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U alpha_shadow_ci -d alpha_shadow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://alpha_shadow_ci:ci-ephemeral-not-a-secret@127.0.0.1:5432/alpha_shadow_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Integration tests
+        run: npm run test:integration
+      - name: Contract tests (RLS coverage on every tenant_id table)
+        run: npm run test:contract

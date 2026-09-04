@@ -1,0 +1,26 @@
+# Throw-away PostgreSQL for local integration/contract test runs when you
+# prefer Docker over the embedded server that Vitest starts automatically.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   TEST_DATABASE_URL=postgresql://alpha_shadow_test:local-test-only@127.0.0.1:54329/alpha_shadow_test npm run test:contract
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Credentials below are for a loopback-only, data-less test container and are
+# not a secret. Never point TEST_DATABASE_URL at a real environment.
+services:
+  postgres-test:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: alpha_shadow_test
+      POSTGRES_PASSWORD: local-test-only
+      POSTGRES_DB: alpha_shadow_test
+    command: ['postgres', '-c', 'fsync=off', '-c', 'synchronous_commit=off', '-c', 'full_page_writes=off']
+    ports:
+      - '127.0.0.1:54329:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U alpha_shadow_test -d alpha_shadow_test']
+      interval: 5s
+      timeout: 5s
+      retries: 20
