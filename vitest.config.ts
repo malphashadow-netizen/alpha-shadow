@@ -22,6 +22,7 @@
  */
 import { defineConfig } from 'vitest/config';
 
+// Phase 1: tenant-safe DB access — pools are isolated per test file via DISCARD ALL
 const sharedTestOptions = {
   environment: 'node',
   clearMocks: true,

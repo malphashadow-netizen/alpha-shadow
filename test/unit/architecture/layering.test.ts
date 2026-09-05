@@ -1,6 +1,6 @@
 /**
  * Architectural guard tests — executed against the REAL ESLint configuration
- * (`eslint.config.ts`), so they fail if someone weakens the config rather than
+ * (`eslint.config.js`), so they fail if someone weakens the config rather than
  * the code.
  *
  * Verifies the hexagonal dependency rule (dependencies point inward only) and
@@ -17,7 +17,7 @@ const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 
 /**
  * Lints `code` as if it lived at `filePath` (a virtual path inside the layer
- * under test), using the REAL `eslint.config.ts`.
+ * under test), using the REAL `eslint.config.js`.
  *
  * The rules being verified here (`no-restricted-imports`, the custom
  * `alpha-shadow/no-role-name-compare`) are purely syntactic. Type-aware rules
@@ -30,7 +30,7 @@ const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 const lintAs = async (filePath: string, code: string): Promise<string[]> => {
   const eslint = new ESLint({
     cwd: REPO_ROOT,
-    overrideConfigFile: resolve(REPO_ROOT, 'eslint.config.ts'),
+    overrideConfigFile: resolve(REPO_ROOT, 'eslint.config.js'),
     overrideConfig: [{ ...tseslint.configs.disableTypeChecked, files: ['**/probe.ts', '**/probe.test.ts'] }],
   });
   const [result] = await eslint.lintText(code, { filePath: resolve(REPO_ROOT, filePath) });
@@ -39,7 +39,7 @@ const lintAs = async (filePath: string, code: string): Promise<string[]> => {
 
 const hasRule = (messages: string[], ruleId: string): boolean => messages.some((m) => m.startsWith(`${ruleId}:`));
 
-describe('hexagonal layering (eslint.config.ts)', () => {
+describe('hexagonal layering (eslint.config.js)', () => {
   it('domain may not import application, infrastructure, or presentation', async () => {
     for (const layer of ['application', 'infrastructure', 'presentation']) {
       const messages = await lintAs('src/domain/entities/probe.ts', `import { x } from '../../${layer}/x.ts';\nexport const y = x;\n`);
@@ -87,7 +87,7 @@ describe('hexagonal layering (eslint.config.ts)', () => {
   });
 });
 
-describe('governing principle: no hard-coded role checks (eslint.config.ts)', () => {
+describe('governing principle: no hard-coded role checks (eslint.config.js)', () => {
   it('the custom rule is active on product code', async () => {
     const messages = await lintAs('src/application/engines/rbac/probe.ts', "declare const role: string;\nexport const isAdmin = role === 'ADMIN';\n");
     expect(hasRule(messages, 'alpha-shadow/no-role-name-compare'), messages.join(' | ')).toBe(true);
@@ -96,5 +96,44 @@ describe('governing principle: no hard-coded role checks (eslint.config.ts)', ()
   it('the custom rule is active on tests and tooling too', async () => {
     const messages = await lintAs('test/unit/probe.test.ts', "declare const role: string;\nexport const isAdmin = role === 'ADMIN';\n");
     expect(hasRule(messages, 'alpha-shadow/no-role-name-compare'), messages.join(' | ')).toBe(true);
+  });
+});
+
+describe('pg import restriction (eslint.config.js)', () => {
+  it('src/presentation may not import pg directly', async () => {
+    const messages = await lintAs('src/presentation/routes/probe.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(true);
+  });
+
+  it('src/application may not import pg directly', async () => {
+    const messages = await lintAs('src/application/engines/orders/probe.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(true);
+  });
+
+  it('src/domain may not import pg directly (also pure core)', async () => {
+    const messages = await lintAs('src/domain/entities/probe.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(true);
+  });
+
+  it('src/infrastructure/db/pool.ts and tenant-context.ts ARE allowed to import pg', async () => {
+    for (const file of ['src/infrastructure/db/pool.ts', 'src/infrastructure/db/tenant-context.ts']) {
+      const messages = await lintAs(file, "import pg from 'pg';\nexport const x = pg;\n");
+      expect(hasRule(messages, 'no-restricted-imports'), `${file} should be allowed`).toBe(false);
+    }
+  });
+
+  it('tools/migrate.ts is allowed to import pg', async () => {
+    const messages = await lintAs('tools/migrate.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(false);
+  });
+
+  it('test files are exempt and may import pg freely', async () => {
+    const messages = await lintAs('test/support/database.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(false);
+  });
+
+  it('src/shared may not import pg', async () => {
+    const messages = await lintAs('src/shared/probe.ts', "import pg from 'pg';\nexport const x = pg;\n");
+    expect(hasRule(messages, 'no-restricted-imports')).toBe(true);
   });
 });

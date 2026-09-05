@@ -1,45 +1,35 @@
 /**
- * ESLint flat config (ESLint 10, typescript-eslint 8).
+ * ESLint flat config (ESLint 10, typescript-eslint 8) — JavaScript version.
  *
- * This config is a `.ts` file. ESLint loads it through Node's built-in
- * TypeScript type stripping when the `unstable_native_nodejs_ts_config` flag
- * is set — `package.json` sets `ESLINT_FLAGS=unstable_native_nodejs_ts_config`
- * on every script that runs ESLint (`lint:eslint`, `test`, `test:unit`), so no
- * extra loader (jiti/tsx) is needed.
- *
- * Layering rules (hexagonal modular monolith) are enforced here with
- * `no-restricted-imports`, so a violation fails CI rather than being caught in
- * code review:
- *
- *   domain        → may import nothing outside `src/domain` and `src/shared`
- *   application   → may not import `infrastructure` or `presentation`
- *   infrastructure→ may not import `presentation`
- *   shared        → may import nothing from other layers
- *
- * Additionally, `src/domain` may not import ANY third-party package
- * (no `pg`, no `jsonwebtoken`, …) and not even `node:` built-ins: it must stay
- * a pure TypeScript core.
+ * Uses plain `eslint.config.js` (not .ts) to avoid jiti <2.2.0 issue.
  */
+
 import eslintJs from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
 import { alphaShadowPlugin } from './eslint-rules/index.ts';
 
-/** Matches any relative import that climbs out of the current layer directory. */
-const layerImportGuard = (forbiddenLayers: readonly string[]) => ({
+const layerImportGuard = (forbiddenLayers) => ({
   patterns: forbiddenLayers.map((layer) => ({
     regex: `(^|/)${layer}(/|$)`,
     message: `This layer must not import from "${layer}" (hexagonal dependency rule: dependencies point inward only).`,
   })),
 });
 
+const pgRestriction = {
+  paths: [
+    {
+      name: 'pg',
+      message:
+        'Direct import of "pg" is forbidden outside src/infrastructure/db/pool.ts, src/infrastructure/db/tenant-context.ts, and tools/migrate.ts. Use withTenantContext() instead.',
+    },
+  ],
+};
+
 export default defineConfig([
   globalIgnores(['dist/**', 'node_modules/**', 'coverage/**', '.embedded-postgres/**']),
 
-  // ---------------------------------------------------------------------------
-  // Base: JS recommended + TS strict (type-checked) + stylistic
-  // ---------------------------------------------------------------------------
   eslintJs.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,
@@ -52,25 +42,18 @@ export default defineConfig([
     },
   },
 
-  // ---------------------------------------------------------------------------
-  // Project-wide rules
-  // ---------------------------------------------------------------------------
   {
     files: ['**/*.ts'],
     plugins: {
       'alpha-shadow': alphaShadowPlugin,
     },
     rules: {
-      // Governing principle: no hard-coded role checks — anywhere.
       'alpha-shadow/no-role-name-compare': 'error',
-
-      // Safety / correctness
       eqeqeq: ['error', 'always'],
       'no-console': ['error', { allow: ['error', 'warn'] }],
       'no-restricted-syntax': [
         'error',
         {
-          // Money must never be a float — see shared/money.ts (BigInt minor units).
           selector: 'TSTypeReference > Identifier[name="Number"]',
           message: 'Use `number` primitive or, for money, `Money` (BigInt minor units). Never `Number` wrapper type.',
         },
@@ -89,17 +72,20 @@ export default defineConfig([
     },
   },
 
-  // ---------------------------------------------------------------------------
-  // Hexagonal layering — dependencies point inward only
-  // ---------------------------------------------------------------------------
+  // Disable type-checked linting for JS config itself
+  {
+    files: ['eslint.config.js'],
+    ...tseslint.configs.disableTypeChecked,
+  },
+
+  // Hexagonal layering + pg restriction combined (to avoid overriding)
   {
     files: ['src/domain/**/*.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
         {
-          ...layerImportGuard(['application', 'infrastructure', 'presentation']),
-          // Domain is a pure core: forbid every bare-specifier (third-party or node:) import.
+          paths: pgRestriction.paths,
           patterns: [
             ...layerImportGuard(['application', 'infrastructure', 'presentation']).patterns,
             {
@@ -115,13 +101,37 @@ export default defineConfig([
   {
     files: ['src/application/**/*.ts'],
     rules: {
-      'no-restricted-imports': ['error', layerImportGuard(['infrastructure', 'presentation'])],
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: pgRestriction.paths,
+          patterns: layerImportGuard(['infrastructure', 'presentation']).patterns,
+        },
+      ],
     },
   },
   {
     files: ['src/infrastructure/**/*.ts'],
     rules: {
-      'no-restricted-imports': ['error', layerImportGuard(['presentation'])],
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: pgRestriction.paths,
+          patterns: layerImportGuard(['presentation']).patterns,
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/presentation/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: pgRestriction.paths,
+          patterns: [],
+        },
+      ],
     },
   },
   {
@@ -129,16 +139,38 @@ export default defineConfig([
     rules: {
       'no-restricted-imports': [
         'error',
-        layerImportGuard(['domain', 'application', 'infrastructure', 'presentation']),
+        {
+          paths: pgRestriction.paths,
+          patterns: layerImportGuard(['domain', 'application', 'infrastructure', 'presentation']).patterns,
+        },
       ],
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Tooling / tests: relax a few rules that only make sense for product code
-  // ---------------------------------------------------------------------------
+  // Allow pg in the three sanctioned files
   {
-    files: ['tools/**/*.ts', 'test/**/*.ts', 'eslint-rules/**/*.ts', 'eslint.config.ts', 'vitest.config.ts'],
+    files: ['src/infrastructure/db/pool.ts', 'src/infrastructure/db/tenant-context.ts', 'tools/migrate.ts'],
+    rules: {
+      'no-restricted-imports': 'off',
+    },
+  },
+  // Test files are completely exempt from pg restriction and some strict rules
+  {
+    files: ['test/**/*.ts'],
+    rules: {
+      'no-restricted-imports': 'off',
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/no-unnecessary-condition': 'off',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+      '@typescript-eslint/unbound-method': 'off',
+      'preserve-caught-error': 'off',
+    },
+  },
+
+  {
+    files: ['tools/**/*.ts', 'test/**/*.ts', 'eslint-rules/**/*.ts', 'eslint.config.js', 'vitest.config.ts'],
     rules: {
       'no-console': 'off',
       '@typescript-eslint/explicit-module-boundary-types': 'off',

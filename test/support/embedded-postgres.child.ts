@@ -19,6 +19,7 @@
  *   - the child stops the cluster and exits when: stdin closes, SIGTERM/SIGINT
  *     arrives, or its parent process disappears (ppid changes — orphan guard).
  *
+ * Phase 1: tenant isolation probe — this child process must remain free of async-exit-hook side effects
  * Only erasable TypeScript syntax is used so Node can run this file directly
  * with its built-in type stripping (no build step, no loader).
  */

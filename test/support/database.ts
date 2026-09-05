@@ -27,6 +27,10 @@ export async function connectTestClient(): Promise<pg.Client> {
 }
 
 /** Runs `fn` with a connected client and always closes it. */
+export function createTestPool(): pg.Pool {
+  return new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
+}
+
 export async function withTestClient<T>(fn: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = await connectTestClient();
   try {

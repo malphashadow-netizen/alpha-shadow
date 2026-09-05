@@ -9,20 +9,23 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint:eslint": "ESLINT_FLAGS=unstable_native_nodejs_ts_config eslint .",
+    "lint:eslint": "eslint .",
     "lint": "npm run typecheck && npm run lint:eslint && npm run check:roles",
     "check:roles": "node tools/check-role-compare.ts",
     "check:roles:selftest": "node tools/check-role-compare.ts --self-test",
     "build": "tsc -p tsconfig.build.json",
-    "test": "ESLINT_FLAGS=unstable_native_nodejs_ts_config vitest run",
-    "test:unit": "ESLINT_FLAGS=unstable_native_nodejs_ts_config vitest run --project unit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "test:contract": "vitest run --project contract"
+    "test:contract": "vitest run --project contract",
+    "migrate": "node tools/migrate.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "24.13.3",
     "@types/pg": "8.23.1",
+    "@typescript-eslint/parser": "8.69.0",
+    "@typescript-eslint/eslint-plugin": "8.69.0",
     "@typescript-eslint/rule-tester": "8.69.0",
     "@typescript-eslint/utils": "8.69.0",
     "embedded-postgres": "18.4.0-beta.17",
