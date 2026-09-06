@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { ValidationError } from '../../../src/shared/errors.ts';
-import { createWithTenantContext, TENANT_ID_SETTING } from '../../../src/infrastructure/db/tenant-context.ts';
+import { NotFoundError, ValidationError } from '../../../src/shared/errors.ts';
+import {
+  createWithTenantContext,
+  TENANT_ID_SETTING,
+  withTenantContext,
+} from '../../../src/infrastructure/db/tenant-context.ts';
 import type { TenantClient, TenantPool } from '../../../src/infrastructure/db/tenant-context.ts';
 
 const VALID_TENANT = '123e4567-e89b-4123-a456-426614174000'; // v4, variant a
@@ -270,5 +274,104 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
       expect(setConfigCall?.[0]).toBe('SELECT set_config($1, $2, true)');
       expect(setConfigCall?.[1]).toEqual([TENANT_ID_SETTING, VALID_TENANT]);
     });
+  });
+
+  it('14. invalid tenantId is recorded as an audit event and still never connects', async () => {
+    const { client } = createMockClient();
+    const pool = createMockPool(client);
+    const events: string[] = [];
+    const w = createWithTenantContext(pool, {
+      audit: (e) => {
+        events.push(`${e.event}:${e.rawTenantId}:${e.reason}`);
+      },
+    });
+
+    await expect(w('not-a-uuid', async () => 1)).rejects.toBeInstanceOf(ValidationError);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toContain('invalid_tenant_id:not-a-uuid');
+    expect(pool.connectCalls).toBe(0);
+  });
+
+  it('15. statementTimeoutMs binds a transaction-scoped statement_timeout before tenant binding', async () => {
+    const { client, calls, queryMock } = createMockClient();
+    const pool = createMockPool(client);
+    const w = createWithTenantContext(pool, { statementTimeoutMs: 1234 });
+
+    await w(VALID_TENANT, async () => 1);
+
+    expect(calls).toEqual(['BEGIN', `SELECT set_config($1, $2, true)`, `SELECT set_config($1, $2, true)`, 'COMMIT', 'DISCARD ALL']);
+    const setConfigCalls = (queryMock.mock.calls as unknown as [string, unknown[]][]).filter((c) => c[0].includes('set_config'));
+    expect(setConfigCalls[0]?.[1]).toEqual(['statement_timeout', '1234']);
+    expect(setConfigCalls[1]?.[1]).toEqual([TENANT_ID_SETTING, VALID_TENANT]);
+  });
+
+  it('16. verifyTenantExists throws NotFoundError for an unregistered tenant and never calls fn', async () => {
+    const existsMock = vi.fn(async () => ({ rows: [{ exists: false }] }));
+    const queryMock = vi.fn(async (text: string) => {
+      if (text.startsWith('SELECT EXISTS')) {
+        return (await existsMock()) as never;
+      }
+      return { rows: [], rowCount: 0 } as never;
+    });
+    const client: TenantClient = {
+      query: queryMock as TenantClient['query'],
+      release: vi.fn() as TenantClient['release'],
+    };
+    const pool = createMockPool(client);
+    const w = createWithTenantContext(pool, { verifyTenantExists: true });
+
+    let callbackRan = false;
+    await expect(
+      w(VALID_TENANT, async () => {
+        callbackRan = true;
+        return 1;
+      }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(callbackRan).toBe(false);
+    expect(existsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('17. call-level options can inject a replacement pool without touching the factory pool', async () => {
+    const { client: factoryClient } = createMockClient();
+    const factoryPool = createMockPool(factoryClient);
+    const { client: injectedClient, calls: injectedCalls } = createMockClient();
+    const injectedPool = createMockPool(injectedClient);
+    const w = createWithTenantContext(factoryPool);
+
+    await w(VALID_TENANT, async () => 7, { pool: injectedPool });
+
+    expect(injectedCalls).toEqual(['BEGIN', `SELECT set_config($1, $2, true)`, 'COMMIT', 'DISCARD ALL']);
+    expect(factoryPool.connectCalls).toBe(0);
+  });
+
+  it('18. exported withTenantContext applies production defaults (timeout + tenant check) with a safe pool override', async () => {
+    const existsRows = { rows: [{ exists: true }] };
+    const queryMock = vi.fn(async (text: string) => {
+      if (text.startsWith('SELECT EXISTS')) return existsRows as never;
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'DISCARD ALL' || text.startsWith('SELECT set_config')) {
+        return { rows: [], rowCount: 0 } as never;
+      }
+      return { rows: [], rowCount: 0 } as never;
+    });
+    const client: TenantClient = {
+      query: queryMock as TenantClient['query'],
+      release: vi.fn() as TenantClient['release'],
+    };
+    const injectedPool = createMockPool(client);
+
+    const result = await withTenantContext(VALID_TENANT, async () => 42, { pool: injectedPool });
+    expect(result).toBe(42);
+
+    const texts = (queryMock.mock.calls as unknown as [string][]).map((c) => c[0]);
+    expect(texts).toEqual([
+      'BEGIN',
+      `SELECT set_config($1, $2, true)`,
+      `SELECT set_config($1, $2, true)`,
+      'SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1) AS exists',
+      'COMMIT',
+      'DISCARD ALL',
+    ]);
+    const timeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'statement_timeout');
+    expect(timeoutCall?.[1]?.[1]).toBe('30000');
   });
 });

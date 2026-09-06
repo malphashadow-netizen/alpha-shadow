@@ -3,7 +3,20 @@
  * tools/migrate.ts — applies SQL migrations in `migrations/` to the database.
  *
  * This file is the ONLY tool allowed to import `pg` directly (along with
- * src/infrastructure/db/pool.ts and src/infrastructure/db/tenant-context.ts).
+ * src/infrastructure/db/pool.ts and src/infrastructure/db/tenant-context.ts —
+ * see eslint-rules/pg-import-policy.ts).
+ *
+ * Fail-closed security (enforced by tools/lib/migrate-env.ts, unit-tested):
+ *   - MIGRATION_DATABASE_URL is REQUIRED and used exclusively. There is NO
+ *     fallback to DATABASE_URL: the app connection string must never be used
+ *     for schema changes (the app role must not be the schema owner).
+ *   - SEED_TEST_DATA=true is refused: test/probe tenants live in
+ *     test/support/seed.test.sql and are applied ONLY by the Vitest harness.
+ *     This file performs zero data seeding.
+ *   - The URL must be a valid postgres:// | postgresql:// URL.
+ *   - Before any statement runs, every migration is checked by the migration
+ *     security guard (tools/lib/migration-security.ts): no unapproved
+ *     DROP … CASCADE, mandatory RLS template. A violation aborts the run.
  */
 
 import { readdir, readFile } from 'node:fs/promises';
@@ -11,6 +24,9 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
+
+import { assertMigrationUrl, assertMigrationEnvironment, MIGRATION_DATABASE_URL_KEY } from './lib/migrate-env.ts';
+import { checkMigrationFile, parseApprovals } from './lib/migration-security.ts';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
@@ -23,14 +39,33 @@ async function getMigrationFiles(): Promise<string[]> {
     .sort();
 }
 
-async function migrate(): Promise<void> {
-  const databaseUrl = process.env['DATABASE_URL'];
-  if (typeof databaseUrl !== 'string' || databaseUrl.trim() === '') {
-    console.error('DATABASE_URL is not set; refusing to migrate.');
-    process.exit(1);
+async function assertMigrationsAreSecure(files: string[]): Promise<void> {
+  let approvals: Record<string, string> = {};
+  try {
+    const raw = await readFile(join(MIGRATIONS_DIR, '.cascade-approvals.json'), 'utf8');
+    approvals = parseApprovals(raw).approvals;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') throw error;
   }
 
-  const migrationUrl = process.env['MIGRATION_DATABASE_URL'] ?? databaseUrl;
+  for (const file of files) {
+    const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+    const violations = checkMigrationFile({ fileName: file, sql, approvals });
+    if (violations.length > 0) {
+      const messages = violations.map((v) => `${v.file}: ${v.message}`).join('; ');
+      throw new Error(`Migration security guard rejected the run: ${messages}`);
+    }
+  }
+}
+
+async function migrate(): Promise<void> {
+  // Single environment decision point — throws (never process.exit) so the
+  // CLI catch below and any programmatic caller share the exact same error.
+  const migrationUrl = assertMigrationEnvironment(process.env);
+
+  const files = await getMigrationFiles();
+  await assertMigrationsAreSecure(files);
 
   const client = new pg.Client({ connectionString: migrationUrl });
 
@@ -44,7 +79,6 @@ async function migrate(): Promise<void> {
       );
     `);
 
-    const files = await getMigrationFiles();
     const applied = await client.query<{ filename: string }>('SELECT filename FROM schema_migrations ORDER BY filename');
     const appliedSet = new Set(applied.rows.map((r) => r.filename));
 
@@ -83,4 +117,4 @@ if (isMain) {
   });
 }
 
-export { migrate, getMigrationFiles };
+export { migrate, getMigrationFiles, assertMigrationUrl, assertMigrationEnvironment, MIGRATION_DATABASE_URL_KEY };

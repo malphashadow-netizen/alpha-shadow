@@ -55,6 +55,15 @@ describe('integration: withTenantContext tenant isolation (real PostgreSQL)', ()
           END IF;
         END $$;
 
+        -- Tenant registry (global, not tenant-scoped): withTenantContext's
+        -- verifyTenantExists guard reads it (SELECT only for the app role).
+        CREATE TABLE IF NOT EXISTS tenants (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          name text NOT NULL,
+          status text NOT NULL DEFAULT 'active',
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+
         -- Create a non-superuser role for RLS testing if not exists
         DO $$ BEGIN
           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app_login_test') THEN
@@ -63,6 +72,7 @@ describe('integration: withTenantContext tenant isolation (real PostgreSQL)', ()
         END $$;
         GRANT ALL ON TABLE tenant_probe TO app_login_test;
         GRANT ALL ON TABLE branch_probe TO app_login_test;
+        GRANT SELECT ON TABLE tenants TO app_login_test;
         GRANT USAGE ON SCHEMA public TO app_login_test;
       `);
     } finally {
@@ -209,5 +219,27 @@ describe('integration: withTenantContext tenant isolation (real PostgreSQL)', ()
     const withTenantContext = createWithTenantContext(appPool);
     await expect(withTenantContext('invalid-uuid', async () => 1)).rejects.toThrow();
     await expect(withTenantContext('00000000-0000-0000-0000-000000000000', async () => 1)).rejects.toThrow();
+  });
+
+  it('verifyTenantExists: registered tenant passes, missing tenant fails before fn runs', async () => {
+    const withTenantContextVerified = createWithTenantContext(appPool, { verifyTenantExists: true });
+    const owner = await pool.connect();
+    try {
+      await owner.query('INSERT INTO tenants (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [TENANT_A, 'Tenant A']);
+    } finally {
+      owner.release();
+    }
+
+    await expect(withTenantContextVerified(TENANT_A, async () => 42)).resolves.toBe(42);
+
+    const missing = '44444444-4444-4444-8444-444444444444';
+    let callbackRan = false;
+    await expect(
+      withTenantContextVerified(missing, async () => {
+        callbackRan = true;
+        return 1;
+      }),
+    ).rejects.toThrow();
+    expect(callbackRan).toBe(false);
   });
 });
