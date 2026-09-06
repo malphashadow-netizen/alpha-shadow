@@ -46,6 +46,36 @@ bucket gets `trunc(total / parts)` and the leading `|remainder|` buckets get
 ±1). It deliberately does **not** perform per-bucket banker's rounding; the
 remainder is distributed as whole minor units so the total is always exact.
 
+## Roles & grants (Phase 1)
+
+### app_login grants decision (2026-09-07) — tenants is SELECT-only
+`migrations/roles/001_app_login.sql` is a manual, one-time DBA script (never
+run by `tools/migrate.ts`: role creation is cluster-global and the password
+belongs to the environment's secret manager — see `migrations/README.md`).
+
+Decision recorded per migration 0002's security note: `app_login` receives
+**SELECT only** on `tenants` (registry reads for
+`withTenantContext`'s `verifyTenantExists` probe) and
+`SELECT/INSERT/UPDATE/DELETE` on the tenant-scoped row tables `branches` and
+`users`, bounded by RLS (`FORCE` + `tenant_isolation`) — the role is created
+`NOBYPASSRLS`. **Tenant INSERT/UPDATE/DELETE is deliberately NOT granted**:
+tenant lifecycle is a cross-cutting super-admin / schema-owner operation.
+Revisit only if a first-class self-service tenant-creation flow lands in a
+later phase; any revisit must also re-review the ownership model.
+
+### app_batch role (NOT implemented)
+README.md's "non-negotiable constraints" already anticipates a separate
+`app_batch` role for cross-tenant batch jobs. It does not exist yet: no batch
+job exists in Phase 1, and a cross-tenant role must NOT bypass RLS through the
+normal `withTenantContext()` path. When batch jobs arrive, design the
+role + its approved cross-tenant queries here first.
+
+### Future tables need grants + roles/ entries
+Every new tenant-scoped table added in later phases must be granted to
+`app_login` in `migrations/roles/001_app_login.sql` (or a new `roles/00N_*.sql`)
+for each environment — grants are per-table and are NOT carried by the schema
+migration itself.
+
 ## Tooling debt
 
 ### ESLint config: migrate to `.ts`

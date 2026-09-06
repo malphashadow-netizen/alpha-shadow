@@ -60,6 +60,27 @@ function createMockPool(client: TenantClient): TenantPool & { connectCalls: numb
   } as TenantPool & { connectCalls: number };
 }
 
+/**
+ * A pool client (same structural seam as a real pg.PoolClient handed out by
+ * the pool) whose query and release both append to ONE shared event log, so a
+ * test can assert the exact interleaving of statements vs. release — i.e. that
+ * `DISCARD ALL` runs BEFORE the client is returned to the pool, not after it
+ * and not instead of it.
+ */
+function createEventLoggingClient(): { client: TenantClient; events: string[] } {
+  const events: string[] = [];
+  const client: TenantClient = {
+    query: vi.fn(async (text: string) => {
+      events.push(`query:${text}`);
+      return { rows: [], rowCount: 0 } as never;
+    }) as TenantClient['query'],
+    release: vi.fn(() => {
+      events.push('release');
+    }) as TenantClient['release'],
+  };
+  return { client, events };
+}
+
 describe('infrastructure/tenant-context — withTenantContext', () => {
   it('1. success: BEGIN → set_config → callback → COMMIT → DISCARD → release normal and return value', async () => {
     const { client, calls, releaseArgs } = createMockClient();
@@ -373,5 +394,49 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
     ]);
     const timeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'statement_timeout');
     expect(timeoutCall?.[1]?.[1]).toBe('30000');
+  });
+});
+
+describe('infrastructure/tenant-context — DISCARD ALL runs BEFORE the client is returned to the pool', () => {
+  it('success path: COMMIT → DISCARD ALL → release (release is never skipped and never precedes DISCARD)', async () => {
+    const { client, events } = createEventLoggingClient();
+    const pool = createMockPool(client);
+    const withTenantContext = createWithTenantContext(pool);
+
+    const result = await withTenantContext(VALID_TENANT, async () => 42);
+    expect(result).toBe(42);
+
+    // A single shared log proves ordering: the DISCARD ALL statement is issued
+    // before the pool client is handed back (release). If a refactor dropped
+    // DISCARD ALL, or moved it after release, these assertions fail (RED) — the
+    // test is not a placebo.
+    const discardIndex = events.indexOf('query:DISCARD ALL');
+    const releaseIndex = events.indexOf('release');
+    expect(discardIndex).toBeGreaterThanOrEqual(0);
+    expect(releaseIndex).toBeGreaterThan(discardIndex);
+    expect(events.filter((e) => e === 'query:DISCARD ALL')).toHaveLength(1);
+    expect(events.filter((e) => e === 'release')).toHaveLength(1);
+    expect(events[events.length - 1]).toBe('release');
+  });
+
+  it('failure path (fn throws, ROLLBACK succeeds): ROLLBACK → DISCARD ALL → release', async () => {
+    const { client, events } = createEventLoggingClient();
+    const pool = createMockPool(client);
+    const withTenantContext = createWithTenantContext(pool);
+
+    await expect(
+      withTenantContext(VALID_TENANT, async () => {
+        throw new Error('callback boom');
+      }),
+    ).rejects.toThrow('callback boom');
+
+    const discardIndex = events.indexOf('query:DISCARD ALL');
+    const rollbackIndex = events.indexOf('query:ROLLBACK');
+    const releaseIndex = events.indexOf('release');
+    expect(rollbackIndex).toBeGreaterThanOrEqual(0);
+    expect(discardIndex).toBeGreaterThan(rollbackIndex);
+    expect(releaseIndex).toBeGreaterThan(discardIndex);
+    expect(events.filter((e) => e === 'query:DISCARD ALL')).toHaveLength(1);
+    expect(events.filter((e) => e === 'release')).toHaveLength(1);
   });
 });
