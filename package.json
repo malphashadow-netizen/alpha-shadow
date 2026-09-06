@@ -10,9 +10,11 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:eslint": "eslint .",
-    "lint": "npm run typecheck && npm run lint:eslint && npm run check:roles",
+    "lint": "npm run typecheck && npm run lint:eslint && npm run check:roles && npm run check:migrations",
     "check:roles": "node tools/check-role-compare.ts",
     "check:roles:selftest": "node tools/check-role-compare.ts --self-test",
+    "check:migrations": "node tools/check-migrations.ts",
+    "check:migrations:selftest": "node tools/check-migrations.ts --self-test",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",

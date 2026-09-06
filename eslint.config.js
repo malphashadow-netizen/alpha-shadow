@@ -1,14 +1,24 @@
 /**
  * ESLint flat config (ESLint 10, typescript-eslint 8) — JavaScript version.
  *
- * Uses plain `eslint.config.js` (not .ts) to avoid jiti <2.2.0 issue.
+ * TECH DEBT (tracked in docs/backlog.md): we intentionally keep
+ * `eslint.config.js` as JavaScript (not .ts) while jiti < 2.2.0 is pinned by
+ * the ESLint 10 chain. The moment the toolchain can load `eslint.config.ts`
+ * safely, migrate this file and remove the JS-specific disable block below.
+ * All policy (incl. the pg allow-list) already lives in `eslint-rules/*.ts`
+ * so the migration is mechanical.
  */
 
 import eslintJs from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-import { alphaShadowPlugin } from './eslint-rules/index.ts';
+import {
+  alphaShadowPlugin,
+  PG_IMPORT_ALLOWLIST,
+  PG_IMPORT_RESTRICTION,
+  PG_IMPORT_TEST_EXEMPT_GLOB,
+} from './eslint-rules/index.ts';
 
 const layerImportGuard = (forbiddenLayers) => ({
   patterns: forbiddenLayers.map((layer) => ({
@@ -17,15 +27,9 @@ const layerImportGuard = (forbiddenLayers) => ({
   })),
 });
 
-const pgRestriction = {
-  paths: [
-    {
-      name: 'pg',
-      message:
-        'Direct import of "pg" is forbidden outside src/infrastructure/db/pool.ts, src/infrastructure/db/tenant-context.ts, and tools/migrate.ts. Use withTenantContext() instead.',
-    },
-  ],
-};
+// Single source of truth: eslint-rules/pg-import-policy.ts
+const pgRestriction = PG_IMPORT_RESTRICTION;
+const pgAllowGlobs = PG_IMPORT_ALLOWLIST; // same values as the policy module
 
 export default defineConfig([
   globalIgnores(['dist/**', 'node_modules/**', 'coverage/**', '.embedded-postgres/**']),
@@ -146,9 +150,9 @@ export default defineConfig([
       ],
     },
   },
-  // Allow pg in the three sanctioned files
+  // Allow pg in the three sanctioned files + test harness (single source of truth)
   {
-    files: ['src/infrastructure/db/pool.ts', 'src/infrastructure/db/tenant-context.ts', 'tools/migrate.ts'],
+    files: [...pgAllowGlobs, PG_IMPORT_TEST_EXEMPT_GLOB],
     rules: {
       'no-restricted-imports': 'off',
     },

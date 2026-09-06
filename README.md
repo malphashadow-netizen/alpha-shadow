@@ -41,6 +41,7 @@ violation.
 | `npm run test:contract`       | Architectural invariants against the real PostgreSQL catalog                  |
 | `npm run check:roles`         | Fails if any `src/` file compares a role name to a string literal             |
 | `npm run check:roles:selftest`| Proves the guard flags `role === 'ADMIN'` (runs in CI on every build)         |
+| `npm run check:migrations`    | Migration security guard: no unapproved `DROP … CASCADE`, RLS template enforced |
 
 ## Architecture
 
@@ -67,11 +68,14 @@ eslint-rules/      local ESLint plugin (alpha-shadow/no-role-name-compare)
   `alpha-shadow/no-role-name-compare` and `tools/check-role-compare.ts`
   (TypeScript compiler API, ignores `eslint-disable`). Both are CI steps.
 - **Tenant isolation.** Every DB access goes through `withTenantContext()`
-  (explicit `BEGIN` → `SET LOCAL app.current_tenant_id` → `COMMIT/ROLLBACK`;
-  `DISCARD ALL` on pool release). Every `tenant_id` table has RLS
-  `ENABLE` + `FORCE` and one `FOR ALL … USING … WITH CHECK …` policy —
-  verified by `test/contract/rls-coverage.test.ts` against a **real**
-  PostgreSQL catalog on every CI run. No mock path exists.
+  (explicit `BEGIN` → transaction-scoped, parameterized
+  `set_config('app.current_tenant_id', $1, true)` → tenant-existence check →
+  30s `statement_timeout` → `COMMIT/ROLLBACK`; `DISCARD ALL` on every pool
+  release). Every `tenant_id` table has RLS `ENABLE` + `FORCE` and one
+  `FOR ALL … USING … WITH CHECK …` policy — verified by
+  `test/contract/rls-coverage.test.ts` against a **real** PostgreSQL catalog
+  on every CI run. No mock path exists. Known gaps (rate limiting, kill
+  switch, FX conversion) are tracked in `docs/backlog.md`.
 - **Money is `BigInt` minor units**, never float. `NUMERIC(18,8)` for rates.
 - **Fail closed.** Missing secrets abort boot; audit-log write failure fails the
   login; unreachable test DB fails the test project instead of skipping it.
