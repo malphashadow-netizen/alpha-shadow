@@ -39,6 +39,10 @@ jobs:
         run: npm run check:roles:selftest
       - name: Role-comparison guard — scan src/
         run: npm run check:roles
+      - name: Migration guard — self-test (must flag CASCADE + missing RLS)
+        run: npm run check:migrations:selftest
+      - name: Migration guard — scan migrations/
+        run: npm run check:migrations
 
   # ---------------------------------------------------------------------------
   # Build + unit tests (no database).

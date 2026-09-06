@@ -7,6 +7,12 @@
 import type { ESLint } from 'eslint';
 
 import { noRoleNameCompare, RULE_NAME as NO_ROLE_NAME_COMPARE } from './no-role-name-compare.ts';
+export {
+  PG_IMPORT_ALLOWLIST,
+  PG_IMPORT_RESTRICTION,
+  PG_IMPORT_RESTRICTION_MESSAGE,
+  PG_IMPORT_TEST_EXEMPT_GLOB,
+} from './pg-import-policy.ts';
 
 export const alphaShadowPlugin: ESLint.Plugin = {
   meta: {

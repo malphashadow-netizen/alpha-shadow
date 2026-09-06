@@ -27,15 +27,17 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readdir, readFile } from 'node:fs/promises';
 import pg from 'pg';
 import type { TestProject } from 'vitest/node';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const EMBEDDED_ROOT = resolve(REPO_ROOT, '.embedded-postgres');
 const CHILD_SCRIPT = resolve(REPO_ROOT, 'test/support/embedded-postgres.child.ts');
+const TEST_SEED_FILE = resolve(REPO_ROOT, 'test/support/seed.test.sql');
 const CHILD_STARTUP_TIMEOUT_MS = 90_000;
 const CHILD_SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -67,6 +69,64 @@ async function findFreePort(): Promise<number> {
       });
     });
   });
+}
+
+async function applyMigrations(databaseUrl: string): Promise<void> {
+  const migrationsDir = join(REPO_ROOT, 'migrations');
+  let files: string[];
+  try {
+    const entries = await readdir(migrationsDir, { withFileTypes: true });
+    const filtered = entries.filter((e) => e.isFile() && e.name.endsWith('.sql')).map((e) => e.name).sort();
+    files = filtered;
+  } catch {
+    return;
+  }
+  if (files === undefined || files.length === 0) return;
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
+    const applied = await client.query<{ filename: string }>('SELECT filename FROM schema_migrations');
+    const appliedSet = new Set(applied.rows.map((r) => r.filename));
+    for (const file of files) {
+      if (appliedSet.has(file)) continue;
+      const sql = await readFile(join(migrationsDir, file), 'utf8');
+      await client.query('BEGIN');
+      try {
+        await client.query(sql);
+        await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      }
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Applies TEST-ONLY seed data (test/support/seed.test.sql) to the throw-away
+ * database. This is the ONLY place probe tenants are inserted: the file lives
+ * outside migrations/, so `tools/migrate.ts` can never apply it in production.
+ * The seed is idempotent (ON CONFLICT DO NOTHING) and may be re-run safely.
+ */
+async function applyTestSeed(databaseUrl: string): Promise<void> {
+  let sql: string;
+  try {
+    sql = await readFile(TEST_SEED_FILE, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await client.query(sql);
+  } finally {
+    await client.end();
+  }
 }
 
 async function assertReachable(databaseUrl: string, source: string): Promise<void> {
@@ -203,6 +263,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
   const fromEnv = process.env['TEST_DATABASE_URL'];
   if (fromEnv !== undefined && fromEnv.trim() !== '') {
     await assertReachable(fromEnv, 'TEST_DATABASE_URL');
+    await applyMigrations(fromEnv);
+    await applyTestSeed(fromEnv);
     project.provide('databaseUrl', fromEnv);
     project.provide('databaseSource', 'env');
     return async () => {
@@ -213,6 +275,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
   const embedded = await startEmbedded();
   try {
     await assertReachable(embedded.url, `embedded PostgreSQL at ${embedded.url.replace(/\/\/.*@/, '//***@')}`);
+    await applyMigrations(embedded.url);
+    await applyTestSeed(embedded.url);
   } catch (error) {
     await embedded.stop().catch(() => undefined);
     throw error;

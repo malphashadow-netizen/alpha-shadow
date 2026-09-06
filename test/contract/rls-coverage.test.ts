@@ -27,6 +27,7 @@ import { connectTestClient } from '../support/database.ts';
 
 /** Schemas that hold application tables. Extend here if a future phase adds one. */
 const APPLICATION_SCHEMAS = ['public'] as const;
+// Phase 1: tenant_probe and branch_probe are verified here via the dual USING/WITH CHECK policy
 
 interface TenantTable {
   schema: string;
