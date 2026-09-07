@@ -13,6 +13,7 @@ import {
   PostgresAuditLogRepository,
   PostgresCurrencyRepository,
   PostgresExchangeRateRepository,
+  PostgresReportingCurrencyRepository,
 } from '../../src/infrastructure/db/repositories/index.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { MissingExchangeRateError } from '../../src/shared/errors.ts';
@@ -58,7 +59,7 @@ describe('Phase 4 live acceptance: FX history, audit snapshots, and RLS', () => 
       await owner.query('GRANT SELECT, INSERT ON audit_log TO app_login');
       await owner.query('REVOKE UPDATE, DELETE ON exchange_rates, audit_log FROM app_login');
       await owner.query(
-        `INSERT INTO currencies (code, minor_unit_digits) VALUES ('USD', 2), ('EUR', 2), ('JPY', 0)
+        `INSERT INTO currencies (code, minor_unit_digits) VALUES ('USD', 2), ('EUR', 2), ('JPY', 0), ('SAR', 2)
          ON CONFLICT (code) DO UPDATE SET minor_unit_digits = EXCLUDED.minor_unit_digits`,
       );
     } finally {
@@ -76,7 +77,8 @@ describe('Phase 4 live acceptance: FX history, audit snapshots, and RLS', () => 
     rates = new PostgresExchangeRateRepository({ withTenantContext: withAppContext });
     currencies = new PostgresCurrencyRepository({ withTenantContext: withAppContext });
     audit = new PostgresAuditLogRepository({ withTenantContext: withAppContext });
-    engine = new CurrencyConversionEngine({ exchangeRates: rates, currencies });
+    const reportingCurrencies = new PostgresReportingCurrencyRepository({ withTenantContext: withAppContext });
+    engine = new CurrencyConversionEngine({ exchangeRates: rates, currencies, reportingCurrencies });
   });
 
   beforeEach(async () => {
@@ -103,6 +105,17 @@ describe('Phase 4 live acceptance: FX history, audit snapshots, and RLS', () => 
 
     expect(beforeCurrentRate.amountMinor).toBe(900n);
     expect(afterCurrentRate.amountMinor).toBe(900n);
+  });
+
+  it('converts only at report time to tenants.reporting_currency', async () => {
+    await rates.append(TENANT_A, USD, currencyCode('SAR'), '3.75000000', new Date('2025-01-01T00:00:00.000Z'));
+    const result = await engine.convertToReportingCurrency(
+      TENANT_A,
+      money(100n, USD),
+      new Date('2025-01-15T00:00:00.000Z'),
+    );
+    expect(result.currency).toBe('SAR');
+    expect(result.amountMinor).toBe(375n);
   });
 
   it('returns the same currency without any database query', async () => {
