@@ -111,6 +111,81 @@ export class ExciseConfirmationRequiredError extends ForbiddenError {
 }
 
 /**
+ * Phase 7 (orders) — a void was attempted on an order whose payment_status is
+ * not 'open'. FAIL-CLOSED: the real Void Payment → Reopen → Void Item →
+ * re-collection sequence needs the payments engine, which is a deliberately
+ * deferred future phase (same placeholder discipline as ZATCA). Until that
+ * phase exists the answer is NEVER an implicit zero or an unconditional
+ * allow — it is this explicit error, raised by the void engine and enforced
+ * again by the order_voids validation trigger at the database level.
+ */
+export class PaymentReversalRequiredError extends DomainError {
+  readonly code = 'order.payment_reversal_required' as const;
+  constructor(readonly paymentStatus: string) {
+    super(
+      `Void on an order with payment_status='${paymentStatus}' requires a payment reversal; the payments engine is not built yet (fail closed)`,
+    );
+  }
+}
+
+/** No station routing rule matched the item — routing is never defaulted. */
+export class NoMatchingRoutingRuleError extends NotFoundError {
+  constructor(readonly branchId: string, readonly menuItemId: string) {
+    super(`No enabled station routing rule matches menu item ${menuItemId} in branch ${branchId}; refusing the order item (fail closed)`);
+  }
+}
+
+/** The tenant has no usable workflow (or initial state) — orders are refused. */
+export class OrderWorkflowNotConfiguredError extends NotFoundError {
+  constructor(readonly tenantId: string) {
+    super(`Tenant ${tenantId} has no enabled order workflow with an initial top-level state`);
+  }
+}
+
+/** Transition outside the tenant's enabled workflow sequence (fail-closed). */
+export class WorkflowTransitionError extends ValidationError {}
+
+/**
+ * Hard-deleting a tenant_order_workflow_state that is referenced by ANY row
+ * (active or archived) in orders / order_items / order_item_status_events.
+ * Fail-closed: the audit trail is permanent — disable instead of delete.
+ */
+export class WorkflowStateInUseError extends ConflictError {
+  constructor(readonly stateId: string) {
+    super(`Workflow state ${stateId} is referenced by order evidence and cannot be deleted; disable it (is_enabled = false) instead`);
+  }
+}
+
+/** The selected void reason is disabled or its platform kind is disabled. */
+export class VoidReasonUnavailableError extends ValidationError {
+  constructor(readonly voidReasonId: string) {
+    super(`Void reason ${voidReasonId} is not enabled for this tenant`);
+  }
+}
+
+/** The optional tenant void time limit (from order_items.created_at) passed. */
+export class VoidTimeLimitExceededError extends ForbiddenError {
+  constructor(readonly itemCreatedAt: Date, readonly limitMinutes: number) {
+    super(`Void time limit of ${limitMinutes} minutes (counted from the item creation) has been exceeded`);
+  }
+}
+
+/** A manager override is required (actor tier < reason tier) and was not provided. */
+export class ManagerOverrideRequiredError extends ForbiddenError {
+  constructor(readonly requiredTier: string) {
+    super(`This void requires a manager override (reason requires tier '${requiredTier}'); no override was provided`);
+  }
+}
+
+/**
+ * The live manager-override PIN challenge failed (unknown/inactive/PIN-less
+ * manager, or wrong PIN). A manager override is NEVER a name picked from a
+ * list: the approving manager's own separate PIN must be verified at the
+ * exact moment of the void.
+ */
+export class ManagerOverrideAuthenticationError extends AuthorizationError {}
+
+/**
  * A tenant-isolation invariant was violated or a cross-tenant access attempt
  * was detected (e.g. tenant_id ≠ current_setting('app.current_tenant_id')).
  * Raised by the tenant-context layer and RLS-boundary guards; treated as a
@@ -215,6 +290,10 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     case 'not_found':
       return { status: 404, code: error.code, message: error.message };
     case 'conflict':
+      return { status: 409, code: error.code, message: error.message };
+    // Phase 7: fail-closed payments placeholder — a paid-order void needs the
+    // future payments engine; the client gets an explicit, retryable-later 409.
+    case 'order.payment_reversal_required':
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
