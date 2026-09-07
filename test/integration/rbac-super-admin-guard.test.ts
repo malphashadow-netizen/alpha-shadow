@@ -82,7 +82,7 @@ describe('integration: TENANT_SUPER_ADMIN protection (real PostgreSQL, concurren
   beforeEach(async () => {
     const owner = await ownerPool.connect();
     try {
-      await owner.query('TRUNCATE user_roles, role_permissions, roles, users');
+      await owner.query('TRUNCATE auth_refresh_tokens, user_roles, role_permissions, roles, users, branches CASCADE');
       // Seed ONE system role and TWO active super-admin users + assignments.
       await owner.query(
         "INSERT INTO roles (id, tenant_id, name, is_system) VALUES ($1, $2, 'TENANT_SUPER_ADMIN', true)",

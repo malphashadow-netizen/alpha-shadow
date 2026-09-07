@@ -16,6 +16,11 @@
 export const PG_IMPORT_ALLOWLIST: readonly string[] = Object.freeze([
   'src/infrastructure/db/pool.ts',
   'src/infrastructure/db/tenant-context.ts',
+  // The ONE documented exception: the global auth_audit_log table has no
+  // authenticated tenant context for unknown-tenant logins, so it cannot use
+  // withTenantContext(). It talks to the least-privilege app_audit role via
+  // two SECURITY DEFINER functions only — see src/infrastructure/db/auth-audit.ts.
+  'src/infrastructure/db/auth-audit.ts',
   'tools/migrate.ts',
 ]);
 

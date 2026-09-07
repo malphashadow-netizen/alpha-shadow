@@ -48,7 +48,7 @@ describe('pg import policy — single source of truth', () => {
     expect(config).toContain("PG_IMPORT_ALLOWLIST");
     expect(config).toContain("PG_IMPORT_RESTRICTION");
     expect(config).not.toContain('src/infrastructure/db/pool.ts, src/infrastructure/db/tenant-context.ts, and tools/migrate.ts');
-    expect(PG_IMPORT_ALLOWLIST).toHaveLength(3);
+    expect(PG_IMPORT_ALLOWLIST).toHaveLength(4);
   });
 
   it('every production/tool file importing pg is on the allow-list (strict scan)', () => {

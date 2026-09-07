@@ -103,6 +103,20 @@ test harness. Files under `migrations/roles/` are deliberately **different**:
 | File                         | Object      | Grants                                                                                     |
 | ---------------------------- | ----------- | ------------------------------------------------------------------------------------------ |
 | `roles/001_app_login.sql`    | role `app_login` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) | `USAGE` on `public`; `SELECT` on `tenants`; `SELECT, INSERT, UPDATE, DELETE` on `branches`, `users` |
+| `roles/002_app_login_rbac.sql` | role `app_login` | `SELECT` on `permissions_registry`; `SELECT, INSERT, UPDATE, DELETE` on `roles`, `role_permissions`, `user_roles` |
+| `roles/003_app_audit.sql`    | role `app_audit` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) — the ONE non-`withTenantContext` connection | `USAGE` on `public`; `EXECUTE` ONLY on `record_auth_attempt(...)` / `count_recent_auth_failures(...)` SECURITY DEFINER functions; `app_login` additionally gets `SELECT, INSERT, UPDATE` on `auth_refresh_tokens` |
+
+### The `app_audit` role and the `auth_audit_log` RLS exception (Phase 3)
+
+`auth_audit_log` is a **global** table (no `tenant_id`, no RLS) on purpose: a
+failed login for a non-existent tenant has no authenticated tenant context. The
+audited write/count path is therefore the single sanctioned exception to
+"all DB access goes through withTenantContext()". Least privilege is enforced
+through the dedicated `app_audit` role (see `roles/003_app_audit.sql`), which
+can ONLY call two `SECURITY DEFINER` functions and never touches a table
+directly — verified live by `test/contract/auth-audit-role.test.ts`. The full
+rationale is in `docs/backlog.md` ("auth_audit_log — the ONE documented
+exception").
 
 ### Grant decision: does `app_login` need INSERT/UPDATE/DELETE on `tenants`? (2026-09-07)
 

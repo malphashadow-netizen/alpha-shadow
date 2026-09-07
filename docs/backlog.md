@@ -7,13 +7,56 @@ silently.
 
 ## Security gaps — tenant isolation layer
 
-### Rate limiting (NOT implemented)
-`RateLimitError` exists in `src/shared/errors.ts` (stable code
-`rate_limit.exceeded`) but **no enforcement middleware exists yet**. There is
-no per-tenant, per-IP or per-account request budget; the error type is a
-contract for future engines to throw. A release that exposes authentication or
-any tenant-facing endpoint MUST not be marked "tenant isolation complete"
-until a rate-limiter (token bucket + distributed store) lands.
+### Rate limiting (IMPLEMENTED for authentication — Phase 3)
+`RateLimitError` (`rate_limit.exceeded`, → 429) is now enforced on the
+authentication path. Two INDEPENDENT sliding-window limiters run per login /
+refresh attempt — one on the caller IP, one on the targeted account identifier
+— and BOTH counters are derived from the global `auth_audit_log` table
+(`WHERE ip_address = … AND created_at > now() - interval …` and the same over
+`identifier_attempted`; supporting indexes `(ip_address, created_at)` and
+`(identifier_attempted, created_at)` from migration 0005). No Redis/external
+store is introduced in this phase by design — the audit table is the
+append-only source of attempt truth. Only FAILED attempts are counted, so a
+user who logs in successfully never locks themselves out by volume. Limits
+(`IP_RATE_LIMIT`, `ACCOUNT_RATE_LIMIT`) are constants on the engine and are
+injectable for tests. Per-tenant/endpoint rate limiting for engines OTHER than
+authentication is still future work and must reuse the same audit/counter
+pattern or an approved distributed store.
+
+### auth_audit_log — the ONE documented exception to withTenantContext() (Phase 3)
+Every tenant-scoped DB access goes through `withTenantContext()` **except** the
+global authentication audit table `auth_audit_log`, written/read ONLY by
+`src/infrastructure/db/auth-audit.ts` (the fourth entry in the `pg` import
+allow-list — `eslint-rules/pg-import-policy.ts`). The exception is deliberate
+and architecturally forced: a failed login against a NON-EXISTENT tenant (or an
+unknown user) carries no authenticated tenant context, while
+`withTenantContext()` requires a valid tenant id, sets
+`app.current_tenant_id`, and verifies the tenant row exists. Those attempts
+must STILL be audited and counted toward rate limiting. Consequences, all
+matching the `tenants` / `permissions_registry` global-table precedent:
+
+- `auth_audit_log` has **no `tenant_id` column and no RLS policy**. The claimed
+  tenant is the nullable, FK-free `tenant_id_attempted` — the value the caller
+  asserted, not an authenticated tenant boundary. Naming it
+  `tenant_id_attempted` (rather than `tenant_id`) keeps the generic, table-list
+  independent RLS-coverage guard (`test/contract/rls-coverage.test.ts`,
+  `tools/lib/migration-security.ts`) uniformly allow-list free: it keys on the
+  exact column name `tenant_id`, and the global table is therefore out of scope
+  by construction rather than by a maintained exception list.
+- Containment is by a DEDICATED, least-privilege login role, `app_audit`
+  (`migrations/roles/003_app_audit.sql`, NOBYPASSRLS, dormant NOLOGIN until the
+  DBA activates it). It is granted EXECUTE on only two SECURITY DEFINER
+  functions — `record_auth_attempt(...)` and
+  `count_recent_auth_failures(...)` (migration 0005, `search_path` pinned) —
+  and has NO direct SELECT/INSERT on the audit table and no privilege on any
+  tenant-scoped table (proven live by
+  `test/contract/auth-audit-role.test.ts`). The application reaches it via a
+  separate `AUDIT_DATABASE_URL` connection, fail-closed at boot.
+- All other auth tables (`auth_refresh_tokens`, and the `users` columns used by
+  login) remain fully tenant-scoped and RLS-bound through
+  `withTenantContext()`.
+
+### Kill switch (NOT implemented)
 
 ### Kill switch (NOT implemented)
 There is **no global kill switch** (e.g. disable a tenant / disable tenant

@@ -97,6 +97,30 @@ export class RateLimitError extends DomainError {
   readonly code = 'rate_limit.exceeded' as const;
 }
 
+/**
+ * Authentication failed for ANY reason (unknown user, wrong password/PIN,
+ * locked account, inactive account, wrong tenant for an existing email,
+ * invalid/expired/replayed refresh token). The security layer maps EVERY one
+ * of these to the SAME response shape, status and headers — a constant
+ * 401 `INVALID_CREDENTIALS` with no distinguishing detail — so neither the
+ * body nor the headers become an existence/state oracle.
+ */
+export class InvalidCredentialsError extends DomainError {
+  readonly code = 'INVALID_CREDENTIALS' as const;
+}
+
+/**
+ * The service is not in a safe state to serve the request — used exclusively
+ * by the fail-closed boot posture: a missing/invalid security secret
+ * (PIN_HASH_PEPPER, JWT signing/verifying key) or a missing audit connection
+ * maps to a 503 so the process never runs a partially-configured security
+ * layer. The message carries the offending VARIABLE NAME only, never the
+ * secret value.
+ */
+export class ServiceUnavailableError extends DomainError {
+  readonly code = 'service.unavailable' as const;
+}
+
 export function isDomainError(value: unknown): value is DomainError {
   return value instanceof DomainError;
 }
@@ -145,6 +169,10 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
       return { status: 400, code: error.code, message: error.message };
     case 'authorization.failed':
       return { status: 401, code: error.code, message: error.message };
+    // Security layer: EVERY authentication failure is the identical constant
+    // 401 INVALID_CREDENTIALS (see InvalidCredentialsError).
+    case 'INVALID_CREDENTIALS':
+      return { status: 401, code: error.code, message: 'Invalid credentials' };
     case 'forbidden':
     case 'tenant_isolation.violation':
       return { status: 403, code: error.code, message: error.message };
@@ -154,6 +182,12 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
+    // Fail-closed boot: missing/invalid security secret or audit connection.
+    // 503 (never 500) — the dependency is unavailable, and the generic message
+    // leaks no configuration detail; the real cause goes to the log sink only.
+    case 'service.unavailable':
+      logSink(error);
+      return { status: 503, code: error.code, message: 'Service temporarily unavailable' };
     case 'config.invalid':
       // 500-class: never echo the detailed message; log it server-side only.
       logSink(error);

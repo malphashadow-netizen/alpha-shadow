@@ -43,6 +43,10 @@ jobs:
         run: npm run check:migrations:selftest
       - name: Migration guard — scan migrations/
         run: npm run check:migrations
+      - name: Zero-plaintext secret scanner — self-test (must flag planted secrets)
+        run: npm run check:secrets:selftest
+      - name: Zero-plaintext secret scanner — scan tree
+        run: npm run check:secrets
 
   # ---------------------------------------------------------------------------
   # Build + unit tests (no database).
