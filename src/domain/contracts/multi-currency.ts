@@ -29,6 +29,10 @@ export interface CurrencyRepository {
   findMinorUnitDigits(tenantId: string, currency: CurrencyCode): Promise<number | null>;
 }
 
+export interface ReportingCurrencyRepository {
+  findReportingCurrency(tenantId: string): Promise<CurrencyCode | null>;
+}
+
 export interface CurrencyConversionService {
   convert(
     tenantId: string,

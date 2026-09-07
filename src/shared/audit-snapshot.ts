@@ -23,7 +23,7 @@ function isSensitiveKey(key: string): boolean {
 }
 
 function snapshotValue(value: unknown, ancestors: WeakSet<object>, path: string): AuditJsonValue {
-  if (value === null) return null;
+  if (value === undefined || value === null) return null;
   if (typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {

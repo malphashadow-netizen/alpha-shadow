@@ -2,6 +2,7 @@ import type {
   CurrencyConversionService,
   CurrencyRepository,
   ExchangeRateRepository,
+  ReportingCurrencyRepository,
 } from '../../../domain/contracts/multi-currency.ts';
 import { MissingExchangeRateError, NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import { convertMoneyAtRate, type CurrencyCode, type Money } from '../../../shared/money.ts';
@@ -9,6 +10,8 @@ import { convertMoneyAtRate, type CurrencyCode, type Money } from '../../../shar
 export interface CurrencyConversionEngineDependencies {
   readonly exchangeRates: ExchangeRateRepository;
   readonly currencies: CurrencyRepository;
+  /** Required only by convertToReportingCurrency(); direct convert() stays target-explicit. */
+  readonly reportingCurrencies?: ReportingCurrencyRepository;
 }
 
 /**
@@ -21,10 +24,12 @@ export interface CurrencyConversionEngineDependencies {
 export class CurrencyConversionEngine implements CurrencyConversionService {
   private readonly exchangeRates: ExchangeRateRepository;
   private readonly currencies: CurrencyRepository;
+  private readonly reportingCurrencies: ReportingCurrencyRepository | undefined;
 
   constructor(dependencies: CurrencyConversionEngineDependencies) {
     this.exchangeRates = dependencies.exchangeRates;
     this.currencies = dependencies.currencies;
+    this.reportingCurrencies = dependencies.reportingCurrencies;
   }
 
   async convert(
@@ -63,6 +68,18 @@ export class CurrencyConversionEngine implements CurrencyConversionService {
     // All Money × rate multiplication and all rounding happen in this one
     // shared function. The engine never parses, divides, floats, or rounds.
     return convertMoneyAtRate(amount, rate.rate, targetCurrency, targetDigits, sourceDigits);
+  }
+
+  /** Converts at report time to tenants.reporting_currency without changing storage. */
+  async convertToReportingCurrency(tenantId: string, amount: Money, transactionTime: Date): Promise<Money> {
+    if (this.reportingCurrencies === undefined) {
+      throw new ValidationError('reportingCurrencies repository is required for report conversion', 'reportingCurrency');
+    }
+    const targetCurrency = await this.reportingCurrencies.findReportingCurrency(tenantId);
+    if (targetCurrency === null) {
+      throw new NotFoundError(`Tenant ${tenantId} has no reporting currency`);
+    }
+    return this.convert(tenantId, amount, targetCurrency, transactionTime);
   }
 }
 

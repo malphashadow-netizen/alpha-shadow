@@ -9,12 +9,15 @@
 -- `audit_log` are tenant-scoped; their ENABLE + FORCE RLS policies still apply
 -- to app_login because the role is NOBYPASSRLS.
 
+-- Start from no table privileges so this script is safe to re-run after a
+-- previous/manual deployment that granted more than the Phase-4 contract.
+REVOKE ALL ON currencies, exchange_rates, audit_log FROM app_login;
+
 GRANT SELECT ON currencies TO app_login;
 GRANT SELECT, INSERT ON exchange_rates TO app_login;
 GRANT SELECT, INSERT ON audit_log TO app_login;
 
--- State the immutable/append-only privilege boundary explicitly. These REVOKEs
--- are intentional even though the grants above do not include UPDATE/DELETE:
--- they also remove a privilege inherited from an older/manual deployment.
+-- State the immutable/append-only privilege boundary explicitly as well. These
+-- REVOKEs are intentional and remain visible in catalog/audit review.
 REVOKE UPDATE, DELETE ON exchange_rates FROM app_login;
 REVOKE UPDATE, DELETE ON audit_log FROM app_login;

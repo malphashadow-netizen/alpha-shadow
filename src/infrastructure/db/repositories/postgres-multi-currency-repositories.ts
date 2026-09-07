@@ -9,8 +9,9 @@ import type {
   CurrencyRepository,
   ExchangeRateRecord,
   ExchangeRateRepository,
+  ReportingCurrencyRepository,
 } from '../../../domain/contracts/multi-currency.ts';
-import type { CurrencyCode } from '../../../shared/money.ts';
+import { currencyCode, type CurrencyCode } from '../../../shared/money.ts';
 import type { WithTenantContext } from '../tenant-context.ts';
 
 interface ExchangeRateRow {
@@ -63,7 +64,7 @@ export class PostgresExchangeRateRepository implements ExchangeRateRepository {
             AND from_currency = $2
             AND to_currency = $3
             AND effective_at <= $4
-          ORDER BY effective_at DESC
+          ORDER BY effective_at DESC, id DESC
           LIMIT 1`,
         [tenantId, fromCurrency, toCurrency, transactionTime],
       );
@@ -105,6 +106,25 @@ export class PostgresCurrencyRepository implements CurrencyRepository {
         [currency],
       );
       return result.rows[0]?.minor_unit_digits ?? null;
+    });
+  }
+}
+
+export class PostgresReportingCurrencyRepository implements ReportingCurrencyRepository {
+  private readonly withTenantContext: WithTenantContext;
+
+  constructor(dependencies: PostgresMultiCurrencyRepositoryDependencies) {
+    this.withTenantContext = dependencies.withTenantContext;
+  }
+
+  async findReportingCurrency(tenantId: string): Promise<CurrencyCode | null> {
+    return this.withTenantContext(tenantId, async (q) => {
+      const result = await q.query<{ reporting_currency: string }>(
+        'SELECT reporting_currency FROM tenants WHERE id = $1',
+        [tenantId],
+      );
+      const value = result.rows[0]?.reporting_currency;
+      return value === undefined ? null : currencyCode(value);
     });
   }
 }

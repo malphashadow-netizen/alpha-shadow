@@ -30,5 +30,6 @@ export {
 export {
   PostgresCurrencyRepository,
   PostgresExchangeRateRepository,
+  PostgresReportingCurrencyRepository,
   type PostgresMultiCurrencyRepositoryDependencies,
 } from './postgres-multi-currency-repositories.ts';
