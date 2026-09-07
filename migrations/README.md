@@ -132,6 +132,7 @@ test harness. Files under `migrations/roles/` are deliberately **different**:
 | `roles/002_app_login_rbac.sql` | role `app_login` | `SELECT` on `permissions_registry`; `SELECT, INSERT, UPDATE, DELETE` on `roles`, `role_permissions`, `user_roles` |
 | `roles/003_app_audit.sql`    | role `app_audit` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) — the ONE non-`withTenantContext` connection | `USAGE` on `public`; `EXECUTE` ONLY on `record_auth_attempt(...)` / `count_recent_auth_failures(...)` SECURITY DEFINER functions; `app_login` additionally gets `SELECT, INSERT, UPDATE` on `auth_refresh_tokens` |
 | `roles/004_app_login_phase4.sql` | role `app_login` | `SELECT` on `currencies`; `SELECT, INSERT` on `exchange_rates`; `SELECT, INSERT` on `audit_log`; explicit `REVOKE UPDATE, DELETE` on both append-only/immutable tables |
+| `roles/005_app_login_catalog.sql` | role `app_login` | `SELECT, INSERT, UPDATE, DELETE` on `menu_categories`, `menu_items`, `branch_menu_item_overrides`, `modifier_groups`, `modifiers`, `menu_item_modifier_groups` (RLS FORCE + `NOBYPASSRLS`) |
 
 ### Phase 4: multi-currency and commercial audit roles
 
@@ -146,6 +147,22 @@ UPDATE/DELETE. No currency or rate rows are seeded by production migrations.
 `audit_log` is the commercial/business audit trail. It is not
 `auth_audit_log`, which remains the separate global login-attempt/rate-limit
 ledger from Phase 3.
+
+### Phase 5: dynamic catalog (`0008_phase5_catalog.sql`)
+
+Six tenant-scoped tables (`menu_categories`, `menu_items`,
+`branch_menu_item_overrides`, `modifier_groups`, `modifiers`,
+`menu_item_modifier_groups`), each with ENABLE + FORCE RLS and the standard
+`tenant_isolation` policy. Amounts are `BIGINT` minor units. JSONB `name`
+objects accept any language key — there is no language allow-list.
+`menu_items.tax_rule_id` is an intentional Phase-6 hook **without** a FK
+(see `docs/backlog.md`). Referenced rows are archived (`is_active = false`);
+every catalog FK uses `ON DELETE RESTRICT`.
+
+The same migration seeds the global `permissions_registry` keys
+`catalog:read`, `catalog:write`, `catalog:archive` (`is_sensitive = false`,
+`ON CONFLICT (key) DO NOTHING`). Least-privilege grants for the six tables
+are in `roles/005_app_login_catalog.sql`.
 
 ### Phase 4b: the seeded `currencies` registry (`0007_seed_currencies.sql`)
 

@@ -8,8 +8,8 @@ Engines live under `engines/`. Every engine is a placeholder until its phase:
 | engine         | phase | status  |
 | -------------- | ----- | ------- |
 | `rbac/`        | 2     | planned |
-| `tax/`         | 5+    | FUTURE  |
-| `catalog/`     | 5+    | FUTURE  |
+| `tax/`         | 6     | FUTURE  |
+| `catalog/`     | 5     | implemented |
 | `orders/`      | 5+    | FUTURE  |
 | `payments/`    | 5+    | FUTURE  |
 | `inventory/`   | 5+    | FUTURE  |

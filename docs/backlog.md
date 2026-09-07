@@ -238,6 +238,33 @@ impact. The seeded digits are contracted to equal `ISO_4217_MINOR_UNITS` in
 `test/integration/phase4b-currency-seed.test.ts`. Adding a currency = a new
 seed migration + the matching entry in `ISO_4217_MINOR_UNITS`.
 
+## Catalog (Phase 5)
+
+### tax_rule_id is a Phase-6 hook (no FK yet)
+`menu_items.tax_rule_id` is `uuid NULL` with **no foreign-key constraint** in
+migration `0008_phase5_catalog.sql`. The column exists so catalog rows can
+already store a tax-rule identifier; the tax engine (Phase 6) will add:
+
+```sql
+ALTER TABLE menu_items
+  ADD CONSTRAINT menu_items_tax_rule_id_fkey
+  FOREIGN KEY (tax_rule_id) REFERENCES tax_rules (id);
+```
+
+Do not add that constraint before `tax_rules` exists. Until then the catalog
+engine treats the value as an opaque nullable UUID.
+
+### sku is a future inventory hook
+`menu_items.sku` is unique per tenant (`idx_menu_items_tenant_sku`, NULL
+allowed). Inventory (a later phase) will join on `(tenant_id, sku)` — the
+catalog engine does not track stock.
+
+### Catalog permissions are not sensitive
+`catalog:read`, `catalog:write`, `catalog:archive` are registered in
+`permissions_registry` with `is_sensitive = false`. Editing a menu is not live
+money movement; L1 cache applies. New money-moving permissions must still be
+`is_sensitive = true` from the moment they are created.
+
 ### KNOWN FLAKE (pre-existing, not Phase 4b): password truncated-record test
 `test/unit/shared/auth/password.test.ts` → "never throws on a
 malformed/truncated record" fails intermittently (measured ~1 in 20 runs on

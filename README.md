@@ -17,7 +17,8 @@ violation.
 | 2     | Dynamic RBAC/ABAC engine, `sec_v`, super-admin guards   | ⏳    |
 | 3     | Authentication (password + PIN), JWT, refresh tokens     | ⏳    |
 | 4     | Multi-currency, `audit_log`, foundation freeze          | ⏳    |
-| 5–14  | Tax, catalog, orders, payments, inventory, reporting, shifts, ZATCA, KDS, integrations | 📐 design only |
+| 5     | Dynamic catalog / menu engine                               | ✅    |
+| 6–14  | Tax, orders, payments, inventory, reporting, shifts, ZATCA, KDS, integrations | 📐 design only |
 
 ## Requirements
 

@@ -1,5 +1,5 @@
 /**
- * Permission repository implementations (Phase 2).
+ * Repository implementations.
  *
  * InMemory  — unit tests only; a runtime guard refuses them under
  *             NODE_ENV=production.
@@ -33,3 +33,8 @@ export {
   PostgresReportingCurrencyRepository,
   type PostgresMultiCurrencyRepositoryDependencies,
 } from './postgres-multi-currency-repositories.ts';
+export {
+  PostgresCatalogRepository,
+  type PostgresCatalogRepositoryDependencies,
+} from './postgres-catalog-repository.ts';
+export { InMemoryCatalogRepository, InMemoryCatalogStore } from './in-memory-catalog-repository.ts';
