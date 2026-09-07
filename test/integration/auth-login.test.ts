@@ -11,7 +11,7 @@
  *  - audit rows are written to auth_audit_log and rate-limit counters derive
  *    from it.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InvalidCredentialsError } from '../../src/shared/errors.ts';
 import { buildAuthHarness, seedRandomUser, seedUser, type Harness } from '../support/auth-harness.ts';
@@ -126,10 +126,25 @@ describe('auth login (real PostgreSQL)', () => {
     // Start at threshold-1 (4) failed attempts.
     await h.client.query('UPDATE users SET failed_login_attempts = 4 WHERE id = $1', [user.userId]);
 
+    // Synchronize AFTER both real account reads. With the deliberately fast
+    // test KDF, Promise.all alone can let one lookup happen after the other
+    // call locks the account; then 5 is correct and this test is flaky.
+    // The barrier does not fake verification or the PostgreSQL counter UPDATE.
+    const originalVerify = h.passwordHasher.verify.bind(h.passwordHasher);
+    let releaseBoth: () => void = () => undefined;
+    const bothReading = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    let readers = 0;
+    const verifyBarrier = vi.spyOn(h.passwordHasher, 'verify').mockImplementation(async (secret, record) => {
+      readers += 1;
+      if (readers === 2) releaseBoth();
+      await bothReading;
+      return originalVerify(secret, record);
+    });
     const results = await Promise.allSettled([
       h.login.login({ mode: 'password', tenantId: TENANT, email: user.email, password: generatePassword() }, ctx),
       h.login.login({ mode: 'password', tenantId: TENANT, email: user.email, password: generatePassword() }, ctx),
     ]);
+    verifyBarrier.mockRestore();
     expect(results.every((r) => r.status === 'rejected')).toBe(true);
 
     const state = await h.client.query<{ failed_login_attempts: number; locked_until: Date | null }>(

@@ -22,8 +22,9 @@ test database. Enforced by tests:
 
 A migration MAY seed a **global, non-tenant reference registry** whose contents
 are identical in every environment and are part of the schema contract rather
-than of anybody's data — today that is exactly `currencies` (ISO 4217 codes and
-their minor-unit digit counts). The rules for such a migration:
+than of anybody's data — this includes `currencies` (ISO 4217 codes and
+their minor-unit digit counts), permission keys, and the explicit Phase-6 tax
+launch registries (see the runbook below). The rules for such a migration:
 
 1. The table has **no `tenant_id`** column (so it is not tenant data and the
    RLS contract does not apply).
@@ -33,8 +34,10 @@ their minor-unit digit counts). The rules for such a migration:
    `DO UPDATE`**. Re-running the migration must be a no-op. An existing row may
    already be referenced by historical rows (e.g. `exchange_rates`) and by
    reports whose rounding scale came from it, so it is never silently rewritten.
-4. Correcting an already-seeded value is a **new, explicit migration** that
-   states the old value, the new value and the reporting impact.
+4. Correcting an already-seeded currency value is a **new, explicit migration**
+   that states the old value, the new value and the reporting impact. Tax rate
+   history instead uses the audited `closeAndSupersedeTaxRate` capability;
+   never overwrite a rate or reapply seed data to change it.
 5. `currencies.minor_unit_digits` must match `ISO_4217_MINOR_UNITS` in
    `src/shared/money.ts` exactly (the single source of truth for rounding
    scale — KWD is 3 digits, not 2). Enforced by
@@ -208,3 +211,44 @@ If a later phase adds a first-class *self-service tenant creation* flow, the
 grant must be revisited (and the RLS/ownership model re-reviewed) — until then,
 least privilege stands. Tracked in `docs/backlog.md`.
 
+
+## Phase 6: 0010–0017 and an explicit two-stage deployment
+
+[Full deployment/runbook and acceptance mapping](../docs/phase6-tax-engine.md).
+Migrations 0001–0009 are frozen and are not edited by this phase.
+
+| Migration | Purpose |
+| --- | --- |
+| 0010 | Global jurisdictions/categories/rates, GIST, no_vat, audited supersession; explicit launch seed |
+| 0011 | Channels/platforms/liability intervals, wildcard precedence; no invented marketplace liability rules |
+| 0012 | Add **nullable** branch country only; no inferred backfill |
+| 0013 | **Separate operator-confirmed** NOT NULL contraction, exclusive lock, fails on any NULL |
+| 0014 | Explicit tenant VAT registration state/number |
+| 0015 | Tenant-isolated, country/family-checked branch category overrides |
+| 0016 | Activate tax_rule_id FK, additional categories, protected excise confirmation and admin permissions |
+| 0017 | Immutable tax contexts and multi-row snapshots, parent RLS and completeness checks |
+
+Use `MIGRATION_THROUGH=0012 npm run migrate` for expansion. After a reviewed
+cross-tenant manual backfill and legacy tax UUID reconciliation, resume with
+`PHASE6_BRANCH_COUNTRY_BACKFILL_CONFIRMED=true npm run migrate`. The runner
+will otherwise stop before 0013. No flag can make a remaining NULL pass the
+PostgreSQL NOT NULL scan. Even an empty new database requires explicit opt-in;
+only the disposable test harness does that automatically.
+
+Run `roles/006_phase6_tax.sql` separately with DBA authority after 0017. It
+creates the dormant `platform_tax_admin` capability, grants it only audited
+functions for rate writes, and keeps app_login SELECT-only on all global tax
+registries. It adds tenant DML/immutable evidence grants and EXECUTE on narrow
+confirmed administrative functions. The app still cannot update `tenants`
+directly, even for VAT registration.
+
+The existing audit_log gains a scope/ownership CHECK: tenant evidence requires
+non-NULL ownership, platform evidence requires NULL ownership. Its tenant
+policy alone uses missing-safe equality so a global platform read/write has
+no need for a fake tenant GUC. The separate platform policy never exposes
+another tenant's rows. The RLS contract explicitly verifies that equality for
+this one mixed-scope ledger; the mandatory template stays unchanged elsewhere.
+
+Additional categories/snapshots have no duplicated tenant_id, but use ENABLE +
+FORCE RLS through their protected parent. The live Phase-6 contract additionally
+checks these tables, not just tables discovered by a tenant_id column.

@@ -68,7 +68,7 @@ describe('contract: phase-5 catalog schema', () => {
     expect(normalise(policy.rows[0]?.with_check ?? null)).toBe(EXPECTED_PREDICATE);
   });
 
-  it('menu_items.tax_rule_id exists without a foreign-key constraint', async () => {
+  it('menu_items.tax_rule_id keeps its name and Phase 6 activates its foreign key', async () => {
     const column = await client.query<{ data_type: string; is_nullable: string }>(
       `SELECT data_type, is_nullable FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'menu_items' AND column_name = 'tax_rule_id'`,
@@ -82,7 +82,7 @@ describe('contract: phase-5 catalog schema', () => {
         WHERE table_schema = 'public' AND table_name = 'menu_items'
           AND constraint_type = 'FOREIGN KEY' AND constraint_name ILIKE '%tax_rule%'`,
     );
-    expect(fks.rowCount).toBe(0);
+    expect(fks.rowCount).toBe(1);
   });
 
   it('JSONB name columns have no language-code check constraint', async () => {

@@ -38,3 +38,9 @@ export {
   type PostgresCatalogRepositoryDependencies,
 } from './postgres-catalog-repository.ts';
 export { InMemoryCatalogRepository, InMemoryCatalogStore } from './in-memory-catalog-repository.ts';
+export { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
+export { PostgresTaxSnapshotReader } from './postgres-tax-snapshot-reader.ts';
+export { PostgresOrderTaxUnitOfWork, type PostgresOrderTaxDependencies, type TransactionalOrderLineWriter } from './postgres-order-tax-unit-of-work.ts';
+export { PostgresTenantTaxAdminRepository } from './postgres-tenant-tax-admin-repository.ts';
+// Platform adapter intentionally imported directly by the isolated platform
+// composition root, not exported from the tenant-facing repository barrel.

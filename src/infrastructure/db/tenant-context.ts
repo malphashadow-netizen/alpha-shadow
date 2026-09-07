@@ -39,6 +39,8 @@ export interface TenantAuditEvent {
 export type TenantAuditLogger = (event: TenantAuditEvent) => void;
 
 export interface WithTenantContextOptions {
+  /** Chosen before any SELECT; tax/order work uses one consistent catalog view. */
+  readonly isolationLevel?: 'read committed' | 'repeatable read' | 'serializable';
   /**
    * Alternative pool — the ONLY sanctioned way to swap the production pool at
    * runtime (e.g. tests, read replicas, multi-tenant pool routers). It is
@@ -117,6 +119,12 @@ export function createWithTenantContext(pool: TenantPool, options: WithTenantCon
     const audit = effective.audit ?? (() => undefined);
     const verifyTenantExists = isEnabled(effective.verifyTenantExists);
     const statementTimeoutMs = effective.statementTimeoutMs;
+    const beginSql = effective.isolationLevel === undefined ? 'BEGIN' : {
+      'read committed': 'BEGIN ISOLATION LEVEL READ COMMITTED',
+      'repeatable read': 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+      serializable: 'BEGIN ISOLATION LEVEL SERIALIZABLE',
+    }[effective.isolationLevel];
+    if (typeof beginSql !== 'string') throw new ValidationError('Invalid transaction isolation level');
 
     // Validate BEFORE acquiring a connection: invalid tenant ids never touch
     // the pool, and every attempt is recorded as a security event.
@@ -136,7 +144,7 @@ export function createWithTenantContext(pool: TenantPool, options: WithTenantCon
     const client = await activePool.connect();
 
     try {
-      await client.query('BEGIN');
+      await client.query(beginSql);
     } catch (beginError) {
       try {
         await discardAndRelease(client);

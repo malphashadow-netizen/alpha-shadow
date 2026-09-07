@@ -8,7 +8,7 @@
  */
 import type { AuditLogEntry, AuditLogRepository } from '../../../domain/contracts/audit-log.ts';
 import { snapshotForAudit } from '../../../shared/audit-snapshot.ts';
-import type { WithTenantContext } from '../tenant-context.ts';
+import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
 
 export interface PostgresAuditLogRepositoryDependencies {
   readonly withTenantContext: WithTenantContext;
@@ -22,19 +22,18 @@ export class PostgresAuditLogRepository implements AuditLogRepository {
   }
 
   async append(entry: AuditLogEntry): Promise<void> {
-    // This is the only snapshot/redaction call site. No caller may provide a
-    // pre-redacted object or bypass this path when recording commercial audit.
-    const before = snapshotForAudit(entry.before);
-    const after = snapshotForAudit(entry.after);
-    const timestamp = entry.timestamp ?? new Date();
-
-    await this.withTenantContext(entry.tenantId, async (q) => {
-      await q.query(
-        `INSERT INTO audit_log
-           (tenant_id, user_id, action, resource, "before", "after", "timestamp")
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
-        [entry.tenantId, entry.userId, entry.action, entry.resource, JSON.stringify(before), JSON.stringify(after), timestamp],
-      );
-    });
+    await this.withTenantContext(entry.tenantId, async (q) => appendAuditLogInTransaction(q, entry));
   }
+}
+
+/** Bind audit to an existing business transaction; never open a nested TX. */
+export async function appendAuditLogInTransaction(q: TenantQuery, entry: AuditLogEntry): Promise<void> {
+  const before = snapshotForAudit(entry.before);
+  const after = snapshotForAudit(entry.after);
+  await q.query(
+    `INSERT INTO audit_log
+       (tenant_id, user_id, action, resource, "before", "after", "timestamp")
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
+    [entry.tenantId, entry.userId, entry.action, entry.resource, JSON.stringify(before), JSON.stringify(after), entry.timestamp ?? new Date()],
+  );
 }

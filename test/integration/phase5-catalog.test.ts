@@ -92,7 +92,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
     const owner = await ownerPool.connect();
     try {
       await owner.query(
-        `TRUNCATE menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
+        `TRUNCATE order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
       );
       await owner.query('DELETE FROM branches WHERE id = ANY($1::uuid[])', [[BRANCH_A1, BRANCH_A2, BRANCH_B1]]);
     } finally {
@@ -101,16 +101,16 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
 
     await withAppContext(TENANT_A, async (q) => {
       await q.query(
-        `INSERT INTO branches (id, tenant_id, name, base_currency, timezone)
-         VALUES ($1, $2, 'catalog-a1', 'SAR', 'Asia/Riyadh'),
-                ($3, $2, 'catalog-a2', 'SAR', 'Asia/Riyadh')`,
+        `INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code)
+         VALUES ($1, $2, 'catalog-a1', 'SAR', 'Asia/Riyadh', 'SA'),
+                ($3, $2, 'catalog-a2', 'SAR', 'Asia/Riyadh', 'SA')`,
         [BRANCH_A1, TENANT_A, BRANCH_A2],
       );
     });
     await withAppContext(TENANT_B, async (q) => {
       await q.query(
-        `INSERT INTO branches (id, tenant_id, name, base_currency, timezone)
-         VALUES ($1, $2, 'catalog-b1', 'SAR', 'Asia/Riyadh')`,
+        `INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code)
+         VALUES ($1, $2, 'catalog-b1', 'SAR', 'Asia/Riyadh', 'SA')`,
         [BRANCH_B1, TENANT_B],
       );
     });

@@ -27,6 +27,7 @@ import pg from 'pg';
 
 import { assertMigrationUrl, assertMigrationEnvironment, MIGRATION_DATABASE_URL_KEY } from './lib/migrate-env.ts';
 import { checkMigrationFile, parseApprovals } from './lib/migration-security.ts';
+import { planMigrations, assertBackfillConfirmed, BRANCH_COUNTRY_CONTRACT_MIGRATION, BRANCH_COUNTRY_CONFIRMATION_SETTING } from './lib/migration-plan.ts';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
@@ -64,7 +65,7 @@ async function migrate(): Promise<void> {
   // CLI catch below and any programmatic caller share the exact same error.
   const migrationUrl = assertMigrationEnvironment(process.env);
 
-  const files = await getMigrationFiles();
+  const files = planMigrations(await getMigrationFiles(), process.env);
   await assertMigrationsAreSecure(files);
 
   const client = new pg.Client({ connectionString: migrationUrl });
@@ -87,11 +88,15 @@ async function migrate(): Promise<void> {
         console.log(`Skipping already applied: ${file}`);
         continue;
       }
+      assertBackfillConfirmed(file, process.env);
       const fullPath = join(MIGRATIONS_DIR, file);
       const sql = await readFile(fullPath, 'utf8');
       console.log(`Applying migration: ${file}`);
       await client.query('BEGIN');
       try {
+        if (file === BRANCH_COUNTRY_CONTRACT_MIGRATION) {
+          await client.query('SELECT set_config($1, $2, true)', [BRANCH_COUNTRY_CONFIRMATION_SETTING, 'true']);
+        }
         await client.query(sql);
         await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
         await client.query('COMMIT');
