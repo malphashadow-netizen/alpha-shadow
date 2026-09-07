@@ -260,9 +260,29 @@ export interface VoidActor {
  * approving manager's own separate PIN against the existing credential store
  * at the moment of the void and return the authentication timestamp; picking
  * a name from a list is never an implementation of this port.
+ *
+ * Security patch (rate limiting): the challenge is bound to the INITIATING
+ * ACTOR (the employee requesting the override — the identity whose guessing
+ * budget must run out), and every attempt is counted + audited:
+ *   * per (tenant, target manager): 5 consecutive failures in a renewing
+ *     15-minute window → 15-minute hard lock;
+ *   * per (tenant, initiating actor) ACROSS ALL MANAGERS: 10 failures in the
+ *     window → 30-minute hard lock + a high-severity security audit event;
+ *   * attempts during an active lock are audited as rejected_locked but are
+ *     neither re-counted nor lock-extending;
+ *   * a success resets ONLY the target manager's counter, never the actor's.
+ * A locked challenge (either shape) fails with ManagerOverrideRateLimitedError
+ * carrying a client-safe retryAfterSeconds.
  */
 export interface ManagerOverrideAuthenticator {
-  verifyLiveChallenge(tenantId: string, managerUserId: string, managerOverridePin: string): Promise<Date>;
+  verifyLiveChallenge(
+    tenantId: string,
+    managerUserId: string,
+    managerOverridePin: string,
+    initiatingActorUserId: string,
+    /** Optional order link, recorded on the attempt ledger when provided. */
+    orderId?: string,
+  ): Promise<Date>;
 }
 
 // ── Side effects (claim-then-execute) ───────────────────────────────────────

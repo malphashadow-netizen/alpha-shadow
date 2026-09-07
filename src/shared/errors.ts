@@ -186,6 +186,31 @@ export class ManagerOverrideRequiredError extends ForbiddenError {
 export class ManagerOverrideAuthenticationError extends AuthorizationError {}
 
 /**
+ * Manager-override live PIN challenge rate limit (security patch): too many
+ * failed challenges — either the TARGET MANAGER is hard-locked (5 consecutive
+ * failures) or the INITIATING ACTOR is hard-locked across all managers (10
+ * failures in the window).
+ *
+ * Anti-oracle contract: the client sees ONE fixed generic message for BOTH
+ * lock shapes — no signal about which limit tripped, no PIN feedback, no
+ * manager-existence information. `retryAfterSeconds` (locked_until − now) is
+ * safe to expose: it helps a legitimate, patient user and gives a PIN guesser
+ * nothing (they already know they must wait).
+ */
+export class ManagerOverrideRateLimitedError extends DomainError {
+  readonly code = 'order.override_rate_limited' as const;
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super(MANAGER_OVERRIDE_RATE_LIMITED_MESSAGE);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** The ONE client-facing message for both manager-lock and actor-lock cases. */
+export const MANAGER_OVERRIDE_RATE_LIMITED_MESSAGE = 'لقد تجاوزت الحد المسموح من المحاولات. حاول لاحقًا.' as const;
+
+/**
  * A tenant-isolation invariant was violated or a cross-tenant access attempt
  * was detected (e.g. tenant_id ≠ current_setting('app.current_tenant_id')).
  * Raised by the tenant-context layer and RLS-boundary guards; treated as a
@@ -240,6 +265,12 @@ export interface ErrorResponse {
   readonly status: number;
   readonly code: string;
   readonly message: string;
+  /**
+   * Optional machine-readable Retry-After hint (seconds). Currently only the
+   * manager-override rate limit sets it; absence means "no defined retry
+   * moment" — transport layers must treat it as optional.
+   */
+  readonly retryAfterSeconds?: number;
 }
 
 /** Server-side sink for the detailed error (never sent to the client). */
@@ -297,6 +328,15 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
+    // Manager-override challenge lock (manager lock or actor lock): ONE fixed
+    // generic message — the error text itself is the anti-oracle boundary.
+    // retryAfterSeconds is safe to expose (see the class doc).
+    case 'order.override_rate_limited': {
+      const retryAfterSeconds = error instanceof ManagerOverrideRateLimitedError ? error.retryAfterSeconds : undefined;
+      return retryAfterSeconds === undefined
+        ? { status: 429, code: error.code, message: error.message }
+        : { status: 429, code: error.code, message: error.message, retryAfterSeconds };
+    }
     // Fail-closed boot: missing/invalid security secret or audit connection.
     // 503 (never 500) — the dependency is unavailable, and the generic message
     // leaks no configuration detail; the real cause goes to the log sink only.

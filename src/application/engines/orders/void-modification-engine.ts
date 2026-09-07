@@ -165,6 +165,9 @@ export class VoidModificationEngine {
         // LIVE CHALLENGE — never a name from a list: the approving manager
         // must be an active member, personally hold order:void:manager, and
         // pass their own separate PIN right now, at the moment of the void.
+        // The challenge is bound to the INITIATING ACTOR's identity (this
+        // user, straight from the authorization check) so that repeated
+        // guessing is counted and locked per employee, not per session.
         if (!(await scope.userIsActiveMember(tenantId, challenge.managerUserId))) {
           throw new ManagerOverrideAuthenticationError('Manager override rejected: the approving manager is not an active member of the tenant');
         }
@@ -176,6 +179,8 @@ export class VoidModificationEngine {
           tenantId,
           challenge.managerUserId,
           challenge.managerOverridePin,
+          actor.userId,
+          order.id,
         );
         managerUserId = challenge.managerUserId;
       }
