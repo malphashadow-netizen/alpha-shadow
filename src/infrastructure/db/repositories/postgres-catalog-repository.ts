@@ -24,7 +24,9 @@ import type {
 import { parseLocalizedText } from '../../../domain/contracts/catalog-rules.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import { currencyCode, minorUnitsFromDb, minorUnitsToDb, money } from '../../../shared/money.ts';
-import type { WithTenantContext } from '../tenant-context.ts';
+import { assertOrdinaryTaxCategory } from '../../../domain/contracts/tax-rules.ts';
+import { mapTaxCategory, type CategoryRow as TaxCategoryRow } from './tax-row-mappers.ts';
+import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
 
 export interface PostgresCatalogRepositoryDependencies {
   readonly withTenantContext: WithTenantContext;
@@ -192,6 +194,14 @@ function mapLink(row: LinkRow): MenuItemModifierGroupLink {
   };
 }
 
+async function assertOrdinaryTaxAssignment(q: TenantQuery, id: string | null): Promise<void> {
+  if (id === null) return;
+  const r = await q.query<TaxCategoryRow>('SELECT * FROM tax_categories WHERE id = $1', [id]);
+  const row = r.rows[0];
+  if (row === undefined) throw new NotFoundError('Tax category not found');
+  assertOrdinaryTaxCategory(mapTaxCategory(row));
+}
+
 export class PostgresCatalogRepository implements CatalogRepository {
   private readonly withTenantContext: WithTenantContext;
 
@@ -266,6 +276,7 @@ export class PostgresCatalogRepository implements CatalogRepository {
   async insertItem(tenantId: string, input: NewMenuItem): Promise<MenuItem> {
     try {
       return await this.withTenantContext(tenantId, async (q) => {
+        await assertOrdinaryTaxAssignment(q, input.taxRuleId);
         const result = await q.query<ItemRow>(
           `INSERT INTO menu_items
              (tenant_id, category_id, name, description, base_price_amount_minor, base_price_currency_code,
@@ -298,6 +309,9 @@ export class PostgresCatalogRepository implements CatalogRepository {
   async updateItem(tenantId: string, item: MenuItem): Promise<MenuItem> {
     try {
       return await this.withTenantContext(tenantId, async (q) => {
+        const before = await q.query<{ tax_rule_id: string | null }>('SELECT tax_rule_id FROM menu_items WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tenantId, item.id]);
+        if (before.rows[0] === undefined) throw new NotFoundError('Menu item not found');
+        if (before.rows[0].tax_rule_id !== item.taxRuleId) await assertOrdinaryTaxAssignment(q, item.taxRuleId);
         const result = await q.query<ItemRow>(
           `UPDATE menu_items
               SET category_id = $3,

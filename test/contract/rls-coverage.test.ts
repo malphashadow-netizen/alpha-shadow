@@ -103,13 +103,19 @@ export async function findRlsViolations(client: pg.Client, schemas: readonly str
     if (!t.rls_enabled) violations.push(`${name}: ROW LEVEL SECURITY is not ENABLED`);
     if (!t.rls_forced) violations.push(`${name}: ROW LEVEL SECURITY is not FORCED (table owner would bypass RLS)`);
 
+    // Phase 6 adds NULL-owned platform evidence to audit_log. A missing-safe
+    // equality is necessary when the platform principal has NO tenant GUC;
+    // it still denies every tenant row without an exact tenant UUID match.
+    const expected = t.schema === 'public' && t.table === 'audit_log'
+      ? normalise("(tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid)")
+      : EXPECTED_PREDICATE;
     const own = policies.filter((p) => p.schema === t.schema && p.table === t.table);
     const isolation = own.find(
       (p) =>
         p.cmd === 'ALL' &&
         p.permissive === 'PERMISSIVE' &&
-        normalise(p.qual) === EXPECTED_PREDICATE &&
-        normalise(p.with_check) === EXPECTED_PREDICATE,
+        normalise(p.qual) === expected &&
+        normalise(p.with_check) === expected,
     );
     if (!isolation) {
       const seen = own.length === 0 ? '(no policies at all)' : own.map((p) => `${p.policy}[cmd=${p.cmd} qual=${p.qual ?? 'NULL'} with_check=${p.with_check ?? 'NULL'}]`).join('; ');

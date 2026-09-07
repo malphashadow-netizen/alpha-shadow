@@ -93,6 +93,11 @@ async function applyMigrations(databaseUrl: string): Promise<void> {
       const sql = await readFile(join(migrationsDir, file), 'utf8');
       await client.query('BEGIN');
       try {
+        // Disposable harness only: tests separately prove the production
+        // operator gate and failure with even one unbackfilled branch.
+        if (file === '0013_phase6_branch_country_not_null.sql') {
+          await client.query("SELECT set_config('app.phase6_branch_country_backfill_confirmed', 'true', true)");
+        }
         await client.query(sql);
         await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
         await client.query('COMMIT');

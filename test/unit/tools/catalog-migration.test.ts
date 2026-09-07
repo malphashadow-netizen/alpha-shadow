@@ -115,7 +115,7 @@ describe('migrations/0009_phase5_modifier_single_max.sql — static contract', (
 
   it('is the next file after 0008 and does not rewrite 0008', () => {
     const files = readdirSync(join(REPO_ROOT, 'migrations')).filter((name) => name.endsWith('.sql')).sort();
-    expect(files[files.length - 1]).toBe('0009_phase5_modifier_single_max.sql');
+    expect(files).toContain('0009_phase5_modifier_single_max.sql');
     expect(files.indexOf('0009_phase5_modifier_single_max.sql')).toBe(files.indexOf('0008_phase5_catalog.sql') + 1);
     expect(sql).not.toMatch(/modifier_groups_single_max/);
   });

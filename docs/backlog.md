@@ -240,19 +240,13 @@ seed migration + the matching entry in `ISO_4217_MINOR_UNITS`.
 
 ## Catalog (Phase 5)
 
-### tax_rule_id is a Phase-6 hook (no FK yet)
-`menu_items.tax_rule_id` is `uuid NULL` with **no foreign-key constraint** in
-migration `0008_phase5_catalog.sql`. The column exists so catalog rows can
-already store a tax-rule identifier; the tax engine (Phase 6) will add:
-
-```sql
-ALTER TABLE menu_items
-  ADD CONSTRAINT menu_items_tax_rule_id_fkey
-  FOREIGN KEY (tax_rule_id) REFERENCES tax_rules (id);
-```
-
-Do not add that constraint before `tax_rules` exists. Until then the catalog
-engine treats the value as an opaque nullable UUID.
+### tax_rule_id hook activated in Phase 6 (completed)
+Migration 0016 activates the existing nullable `menu_items.tax_rule_id` as a
+foreign key to `tax_categories(id)` without editing migration 0008 or renaming
+the column. Ordinary catalog assignments now validate categories and reject
+excise; the separate tenant tax administration records explicit confirmation.
+See [Phase 6 deployment and invariants](phase6-tax-engine.md), including the
+legacy UUID preflight and the mandatory branch-country backfill.
 
 ### sku is a future inventory hook
 `menu_items.sku` is unique per tenant (`idx_menu_items_tenant_sku`, NULL
@@ -292,3 +286,19 @@ returns `true`. The production code is not wrong; the *test fixture* is: it
 should truncate the decoded bytes (or assert `parsePasswordHash(...) === null`)
 instead of assuming a 4-character cut is always malformed. Fix belongs to the
 auth phase owner — deliberately not touched by the Phase 4b branch.
+
+## Tax / order / invoice integration (Phase 6)
+
+The tax resolver, platform and tenant administration, snapshots and all 14
+acceptance scenarios are implemented. General order lifecycle/persistence and
+ZATCA remain future phases. The order implementation must use the supplied
+transactional writer port, pass full customer prices (not settlement proceeds),
+and honor `restaurantTaxInvoiceAllowed: false`. Future ZATCA reads immutable
+snapshots/context, without recomputing amounts. Negative credit-note/refund
+lifecycle is not introduced by Phase 6.
+
+The platform-admin composition is another deliberate non-tenant transaction
+boundary, **without expanding the raw-pg import allow-list**. Its dedicated DB
+role cannot bypass RLS and has no direct tax-rate write grants. Tenant tax
+requests continue to use `withTenantContext`. No production marketplace law or
+branch-country mapping is guessed; both require explicit reviewed data.

@@ -143,7 +143,7 @@ describe('integration: tenant isolation on core tables branches/users (real Post
   async function seedTenantA(): Promise<void> {
     await withAppCtx(TENANT_A, async (q) => {
       await q.query(
-        'INSERT INTO branches (id, tenant_id, name, base_currency, timezone) VALUES ($1, $2, $3, $4, $5)',
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, 'SA')",
         [BRANCH_A_ID, TENANT_A, 'Riyadh Main', 'SAR', 'Asia/Riyadh'],
       );
       await q.query(
@@ -157,7 +157,7 @@ describe('integration: tenant isolation on core tables branches/users (real Post
   async function seedTenantB(): Promise<void> {
     await withAppCtx(TENANT_B, async (q) => {
       await q.query(
-        'INSERT INTO branches (id, tenant_id, name, base_currency, timezone) VALUES ($1, $2, $3, $4, $5)',
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, 'SA')",
         [BRANCH_B_ID, TENANT_B, 'Jeddah Branch', 'SAR', 'Asia/Riyadh'],
       );
       await q.query(
@@ -239,7 +239,7 @@ describe('integration: tenant isolation on core tables branches/users (real Post
       await bindTenant(raw, TENANT_B);
       await expect(
         raw.query(
-          'INSERT INTO branches (id, tenant_id, name, base_currency, timezone) VALUES ($1, $2, $3, $4, $5)',
+          "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, 'SA')",
           ['eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', TENANT_A, 'Sneaky', 'SAR', 'Asia/Riyadh'],
         ),
       ).rejects.toThrow(/row-level security policy/);

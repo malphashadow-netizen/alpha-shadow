@@ -56,6 +56,22 @@ export class MissingExchangeRateError extends NotFoundError {
   }
 }
 
+/** Fail closed: missing tax configuration is NEVER an implicit zero rate. */
+export class NoApplicableTaxRateError extends NotFoundError {
+  constructor(readonly taxCategoryId: string, readonly on: string) {
+    super(`No applicable tax rate for category ${taxCategoryId} on ${on}`);
+  }
+}
+export class NoApplicableTaxLiabilityRuleError extends NotFoundError {
+  constructor(readonly countryCode: string, readonly salesChannel: string, readonly on: string) {
+    super(`No applicable tax liability rule for ${countryCode}/${salesChannel} on ${on}`);
+  }
+}
+export class TaxConfigurationError extends ValidationError {}
+export class InvoiceTaxBatchRequiredError extends ValidationError {
+  constructor() { super('invoice_total rounding requires the complete invoice batch, not isolated line resolution'); }
+}
+
 export class ConflictError extends DomainError {
   readonly code = 'conflict' as const;
 }
@@ -87,6 +103,11 @@ export class AuthorizationError extends DomainError {
  */
 export class ForbiddenError extends DomainError {
   readonly code = 'forbidden' as const;
+}
+
+/** Explicit procedural opt-in is required, independently of VAT registration. */
+export class ExciseConfirmationRequiredError extends ForbiddenError {
+  constructor() { super('Excise requires the dedicated, explicitly confirmed manufacturer/importer administrative path'); }
 }
 
 /**

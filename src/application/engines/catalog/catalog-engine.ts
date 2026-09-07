@@ -26,12 +26,14 @@ import {
   assertSelectionTypeConsistency,
   parentChainContains,
 } from '../../../domain/contracts/catalog-rules.ts';
-import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
+import type { CatalogTaxAssignmentPolicy } from '../../../domain/contracts/tenant-tax-admin.ts';
+import { NotFoundError, TaxConfigurationError, ValidationError } from '../../../shared/errors.ts';
 import { add, CurrencyMismatchError, money, type Money } from '../../../shared/money.ts';
 import { isWithinAvailabilitySchedule, parseAvailabilitySchedule } from './availability.ts';
 
 export interface CatalogEngineDependencies {
   readonly catalog: CatalogRepository;
+  readonly taxAssignments?: CatalogTaxAssignmentPolicy;
 }
 
 export interface CreateCategoryInput {
@@ -157,9 +159,11 @@ function requireFound<T>(value: T | null, what: string): T {
 
 export class CatalogEngine {
   private readonly catalog: CatalogRepository;
+  private readonly taxAssignments: CatalogTaxAssignmentPolicy | undefined;
 
   constructor(dependencies: CatalogEngineDependencies) {
     this.catalog = dependencies.catalog;
+    this.taxAssignments = dependencies.taxAssignments;
   }
 
   async createCategory(tenantId: string, input: CreateCategoryInput): Promise<MenuCategory> {
@@ -202,7 +206,14 @@ export class CatalogEngine {
     return this.catalog.listCategories(tenantId);
   }
 
+  private async assertOrdinaryTaxAssignment(tenantId: string, taxCategoryId: string | null): Promise<void> {
+    if (taxCategoryId === null) return;
+    if (this.taxAssignments === undefined) throw new TaxConfigurationError('Tax assignment policy must be configured before assigning a category');
+    await this.taxAssignments.assertOrdinaryAssignment(tenantId, taxCategoryId);
+  }
+
   async createItem(tenantId: string, input: CreateItemInput): Promise<MenuItem> {
+    await this.assertOrdinaryTaxAssignment(tenantId, input.taxRuleId ?? null);
     requireFound(await this.catalog.getCategory(tenantId, input.categoryId), `category ${input.categoryId} not found`);
     return this.catalog.insertItem(tenantId, {
       categoryId: input.categoryId,
@@ -218,6 +229,9 @@ export class CatalogEngine {
 
   async updateItem(tenantId: string, itemId: string, input: UpdateItemInput): Promise<MenuItem> {
     const current = requireFound(await this.catalog.getItem(tenantId, itemId), `item ${itemId} not found`);
+    if (input.taxRuleId !== undefined && input.taxRuleId !== current.taxRuleId) {
+      await this.assertOrdinaryTaxAssignment(tenantId, input.taxRuleId);
+    }
     const categoryId = input.categoryId ?? current.categoryId;
     if (categoryId !== current.categoryId) {
       requireFound(await this.catalog.getCategory(tenantId, categoryId), `category ${categoryId} not found`);

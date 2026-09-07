@@ -26,6 +26,8 @@ import type {
   NewModifierGroup,
 } from '../../../domain/contracts/catalog.ts';
 import { ConfigurationError, ConflictError, NotFoundError } from '../../../shared/errors.ts';
+import type { TaxCategory } from '../../../domain/contracts/tax.ts';
+import { assertOrdinaryTaxCategory } from '../../../domain/contracts/tax-rules.ts';
 import { money } from '../../../shared/money.ts';
 
 function assertInMemoryNotInProduction(): void {
@@ -38,6 +40,7 @@ function assertInMemoryNotInProduction(): void {
 }
 
 export class InMemoryCatalogStore {
+  readonly taxCategories = new Map<string, TaxCategory>();
   readonly categories = new Map<string, MenuCategory>();
   readonly items = new Map<string, MenuItem>();
   readonly groups = new Map<string, ModifierGroup>();
@@ -92,7 +95,15 @@ export class InMemoryCatalogRepository implements CatalogRepository {
     return [...this.store.categories.values()].filter((row) => row.tenantId === tenantId);
   }
 
+  private assertOrdinaryTaxAssignment(id: string | null): void {
+    if (id === null) return;
+    const category = this.store.taxCategories.get(id);
+    if (category === undefined) throw new NotFoundError('Tax category not found');
+    assertOrdinaryTaxCategory(category);
+  }
+
   async insertItem(tenantId: string, input: NewMenuItem): Promise<MenuItem> {
+    this.assertOrdinaryTaxAssignment(input.taxRuleId);
     this.assertSkuUnique(tenantId, input.sku, null);
     const row: MenuItem = {
       id: randomUUID(),
@@ -113,6 +124,7 @@ export class InMemoryCatalogRepository implements CatalogRepository {
 
   async updateItem(tenantId: string, item: MenuItem): Promise<MenuItem> {
     const current = this.owned(this.store.items.get(item.id), tenantId, `item ${item.id} not found`);
+    if (current.taxRuleId !== item.taxRuleId) this.assertOrdinaryTaxAssignment(item.taxRuleId);
     this.assertSkuUnique(tenantId, item.sku, item.id);
     const next: MenuItem = {
       ...current,
