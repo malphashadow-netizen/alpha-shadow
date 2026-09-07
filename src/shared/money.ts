@@ -409,6 +409,9 @@ function parseRateNumeric(rateText: string): ParsedDecimal {
     throw new ValidationError(`Invalid exchange rate NUMERIC text: "${rateText}"`, 'rate');
   }
   const integerPart = match[1];
+  if (integerPart === undefined) {
+    throw new ValidationError(`Invalid exchange rate NUMERIC text: "${rateText}"`, 'rate');
+  }
   const fractionPart = match[2] ?? '';
   if (fractionPart.length > MAX_RATE_SCALE) {
     throw new ValidationError(`Exchange rate has more than ${String(MAX_RATE_SCALE)} decimal places`, 'rate');
