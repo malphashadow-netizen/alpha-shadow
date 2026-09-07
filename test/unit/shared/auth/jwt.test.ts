@@ -118,6 +118,73 @@ describe('JWT sign/verify round-trip', () => {
   });
 });
 
+describe('JWT end-to-end (issue → verify) per algorithm through the token service', () => {
+  const now = new Date('2026-09-07T00:00:00Z');
+
+  it.each([
+    ['RS256', generateRsaKeypair],
+    ['ES256', generateEcKeypair],
+  ] as const)('%s: issue access + refresh tokens and verify them (full round-trip)', (_alg, gen) => {
+    const { privateKeyPem, publicKeyPem } = gen();
+    const privateKey = loadPrivateKey(privateKeyPem);
+    const publicKey = loadPublicKey(publicKeyPem);
+    const algorithm = algorithmForKey(privateKey, publicKey);
+    const service = new JwtTokenService({ privateKey, publicKey, algorithm });
+
+    const access = service.issueAccessToken({ tenantId: 't1', userId: 'u1', secV: 'digest-1', now });
+    const refresh = service.issueRefreshToken({
+      tenantId: 't1',
+      userId: 'u1',
+      secV: 'digest-1',
+      jti: randomUUID(),
+      familyId: randomUUID(),
+      now,
+    });
+
+    // Header advertises the JOSE name (not the Node digest name).
+    const header = JSON.parse(Buffer.from(access.split('.')[0] ?? '', 'base64url').toString('utf8')) as { alg: string };
+    expect(header.alg).toBe(algorithm);
+    expect(['RS256', 'ES256']).toContain(header.alg);
+
+    // verify must NOT throw; claims survive. Verify at the SAME fixed `now`
+    // (the short 15-minute access-token TTL is relative to `now`).
+    const verifyAt = Math.floor(now.getTime() / 1000);
+    const accessClaims = verifyJwt(access, publicKey, undefined, { now: verifyAt });
+    expect(accessClaims.sub).toBe('u1');
+    expect(accessClaims.tid).toBe('t1');
+    expect(accessClaims.sec_v).toBe('digest-1');
+    expect(accessClaims.typ).toBe('access');
+
+    const refreshClaims = service.verifyRefreshToken(refresh, now);
+    expect(refreshClaims.sub).toBe('u1');
+    expect(refreshClaims.typ).toBe('refresh');
+    expect(typeof refreshClaims.jti).toBe('string');
+
+    // ES256 JWS signature is the fixed 64-byte raw R‖S (ieee-p1363), not DER.
+    const sigBytes = Buffer.from((access.split('.')[2] ?? ''), 'base64url');
+    if (algorithm === 'ES256') {
+      expect(sigBytes.length).toBe(64);
+    } else {
+      expect(sigBytes.length).toBe(256); // RSA-2048 signature size
+    }
+  });
+
+  it('an ES256 token signed with raw R‖S verifies and rejects tampering (interoperability check)', () => {
+    const { privateKeyPem, publicKeyPem } = generateEcKeypair();
+    const privateKey = loadPrivateKey(privateKeyPem);
+    const publicKey = loadPublicKey(publicKeyPem);
+    const token = signJwt(
+      { typ: 'access', sub: 'u', tid: 't', sec_v: 'v', iat: 1, exp: 4102444800 },
+      privateKey,
+      'ES256',
+    );
+    expect(() => verifyJwt(token, publicKey)).not.toThrow();
+    const [h, , s] = token.split('.') as [string, string, string];
+    const payload = b64url(JSON.stringify({ typ: 'access', sub: 'attacker', tid: 't', sec_v: 'v', iat: 1, exp: 4102444800 }));
+    expect(() => verifyJwt(`${h}.${payload}.${s}`, publicKey)).toThrow(/signature/);
+  });
+});
+
 describe('token-service issued claims contain no secret material (acceptance #6)', () => {
   const FORBIDDEN = ['password_hash', 'passwordHash', 'pin_hash', 'pinHash', 'pepper', 'password', 'pin'];
 

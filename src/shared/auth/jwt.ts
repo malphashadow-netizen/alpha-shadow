@@ -85,9 +85,18 @@ export function signJwt(
   const headerSegment = base64Url(JSON.stringify(header));
   const payloadSegment = base64Url(JSON.stringify(claims));
   const signingInput = `${headerSegment}.${payloadSegment}`;
-  // node:crypto digest naming: RSA uses 'RSA-SHA256'; ECDSA uses 'sha256'.
+  // node:crypto uses OpenSSL digest naming, NOT the JWT/JOSE alg names:
+  //   RS256 → 'RSA-SHA256',  ES256 → 'sha256'.
+  // Passing the JOSE name ('RS256'/'ES256') to crypto.sign throws
+  // `TypeError: Invalid digest`, which would break every token.
   const nodeAlgorithm = algorithm === 'RS256' ? 'RSA-SHA256' : 'sha256';
-  const signature = cryptoSign(nodeAlgorithm, Buffer.from(signingInput), privateKey);
+  // ES256 (JWS/JWA) mandates the fixed-size raw R‖S signature (64 bytes for
+  // P-256); node emits DER by default. Pin ieee-p1363 for ES256 so the token is
+  // interoperable with any standards-compliant JWT library, not just this
+  // verifier. RS256 (PKCS#1 v1.5) signature encoding is unaffected.
+  const signKey =
+    algorithm === 'ES256' ? ({ key: privateKey, dsaEncoding: 'ieee-p1363' } as const) : privateKey;
+  const signature = cryptoSign(nodeAlgorithm, Buffer.from(signingInput), signKey);
   return `${signingInput}.${signature.toString('base64url')}`;
 }
 
@@ -172,12 +181,15 @@ export function verifyJwt(
 
   // 2) Signature verification with the asymmetric public key. cryptoVerify
   //    for RS256/ES256 cannot consume a symmetric secret; an HMAC-signed token
-  //    fails both the alg check above and this verification.
+  //    fails both the alg check above and this verification. The digest naming
+  //    and ES256 ieee-p1363 encoding must match signing (RSA uses the digest
+  //    name 'RSA-SHA256', ECDSA 'sha256').
   const signature = Buffer.from(decoded.signatureSegment, 'base64url');
   const nodeAlgorithm = alg === 'RS256' ? 'RSA-SHA256' : 'sha256';
+  const verifyKey = alg === 'ES256' ? ({ key: publicKey, dsaEncoding: 'ieee-p1363' } as const) : publicKey;
   let valid: boolean;
   try {
-    valid = cryptoVerify(nodeAlgorithm, Buffer.from(decoded.signingInput), publicKey, signature);
+    valid = cryptoVerify(nodeAlgorithm, Buffer.from(decoded.signingInput), verifyKey, signature);
   } catch {
     throw new JwtError('signature verification failed');
   }
