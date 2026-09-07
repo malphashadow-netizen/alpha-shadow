@@ -6,6 +6,7 @@ import {
   ConflictError,
   DomainError,
   ForbiddenError,
+  ManagerOverrideRateLimitedError,
   NotFoundError,
   RateLimitError,
   TenantIsolationViolationError,
@@ -127,6 +128,26 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(toErrorResponse(new ConflictError('c'), noop).status).toBe(409);
     expect(toErrorResponse(new RateLimitError('rl'), noop).status).toBe(429);
     expect(toErrorResponse(new ConfigurationError('cfg'), noop).status).toBe(500);
+  });
+
+  it('ManagerOverrideRateLimitedError: 429 + ONE fixed generic message for BOTH lock shapes (anti-oracle)', () => {
+    const noop = (): void => undefined;
+    // Manager lock (~15 min) and actor lock (~30 min) are indistinguishable
+    // to the client: same status, same code, same literal message.
+    const managerLock = toErrorResponse(new ManagerOverrideRateLimitedError(15 * 60), noop);
+    const actorLock = toErrorResponse(new ManagerOverrideRateLimitedError(30 * 60), noop);
+    expect(managerLock.status).toBe(429);
+    expect(actorLock.status).toBe(429);
+    expect(managerLock.code).toBe('order.override_rate_limited');
+    expect(actorLock.code).toBe('order.override_rate_limited');
+    expect(managerLock.message).toBe('لقد تجاوزت الحد المسموح من المحاولات. حاول لاحقًا.');
+    expect(managerLock.message).toBe(actorLock.message);
+    // retryAfterSeconds is the ONLY field allowed to differ (safe hint).
+    expect(managerLock.retryAfterSeconds).toBe(15 * 60);
+    expect(actorLock.retryAfterSeconds).toBe(30 * 60);
+    // The error message itself never leaks which limit tripped.
+    expect(new ManagerOverrideRateLimitedError(1).message).not.toContain('manager');
+    expect(new ManagerOverrideRateLimitedError(1).message).not.toContain('actor');
   });
 
   it('obscures non-domain errors (no stack/leak in the response) and logs them server-side', () => {

@@ -58,7 +58,15 @@ describe('scrypt password hashing', () => {
   it('never throws on a malformed/truncated record — returns false (length check before timingSafeEqual)', async () => {
     const password = generatePassword();
     const record = await hashPassword(password, TEST_PARAMS);
-    const truncated = record.slice(0, -4);
+    // Truncate by ONE character: the stored hash is 86 base64url chars, so 85
+    // is ≡ 1 (mod 4) — Buffer.from drops the dangling character, the
+    // round-trip re-encode is necessarily shorter, and parsePasswordHash
+    // rejects the record DETERMINISTICALLY, whatever the random hash bits.
+    // (Other slice sizes are NOT safe for this assertion: -2/-6 (≡ 0 mod 4)
+    // decode to whole bytes and verifyPassword then returns TRUE, and -4
+    // (≡ 2 mod 4) is accepted whenever the truncated group's discarded low
+    // bits happen to be zero — which made the original -4 flaky.)
+    const truncated = record.slice(0, -1);
     await expect(verifyPassword(password, truncated)).resolves.toBe(false);
     await expect(verifyPassword(password, 'not-a-valid-record')).resolves.toBe(false);
     await expect(verifyPassword(password, 'scrypt$N=x$r=8$p=1$aa$bb')).resolves.toBe(false);

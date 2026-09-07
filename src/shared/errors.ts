@@ -111,6 +111,106 @@ export class ExciseConfirmationRequiredError extends ForbiddenError {
 }
 
 /**
+ * Phase 7 (orders) — a void was attempted on an order whose payment_status is
+ * not 'open'. FAIL-CLOSED: the real Void Payment → Reopen → Void Item →
+ * re-collection sequence needs the payments engine, which is a deliberately
+ * deferred future phase (same placeholder discipline as ZATCA). Until that
+ * phase exists the answer is NEVER an implicit zero or an unconditional
+ * allow — it is this explicit error, raised by the void engine and enforced
+ * again by the order_voids validation trigger at the database level.
+ */
+export class PaymentReversalRequiredError extends DomainError {
+  readonly code = 'order.payment_reversal_required' as const;
+  constructor(readonly paymentStatus: string) {
+    super(
+      `Void on an order with payment_status='${paymentStatus}' requires a payment reversal; the payments engine is not built yet (fail closed)`,
+    );
+  }
+}
+
+/** No station routing rule matched the item — routing is never defaulted. */
+export class NoMatchingRoutingRuleError extends NotFoundError {
+  constructor(readonly branchId: string, readonly menuItemId: string) {
+    super(`No enabled station routing rule matches menu item ${menuItemId} in branch ${branchId}; refusing the order item (fail closed)`);
+  }
+}
+
+/** The tenant has no usable workflow (or initial state) — orders are refused. */
+export class OrderWorkflowNotConfiguredError extends NotFoundError {
+  constructor(readonly tenantId: string) {
+    super(`Tenant ${tenantId} has no enabled order workflow with an initial top-level state`);
+  }
+}
+
+/** Transition outside the tenant's enabled workflow sequence (fail-closed). */
+export class WorkflowTransitionError extends ValidationError {}
+
+/**
+ * Hard-deleting a tenant_order_workflow_state that is referenced by ANY row
+ * (active or archived) in orders / order_items / order_item_status_events.
+ * Fail-closed: the audit trail is permanent — disable instead of delete.
+ */
+export class WorkflowStateInUseError extends ConflictError {
+  constructor(readonly stateId: string) {
+    super(`Workflow state ${stateId} is referenced by order evidence and cannot be deleted; disable it (is_enabled = false) instead`);
+  }
+}
+
+/** The selected void reason is disabled or its platform kind is disabled. */
+export class VoidReasonUnavailableError extends ValidationError {
+  constructor(readonly voidReasonId: string) {
+    super(`Void reason ${voidReasonId} is not enabled for this tenant`);
+  }
+}
+
+/** The optional tenant void time limit (from order_items.created_at) passed. */
+export class VoidTimeLimitExceededError extends ForbiddenError {
+  constructor(readonly itemCreatedAt: Date, readonly limitMinutes: number) {
+    super(`Void time limit of ${limitMinutes} minutes (counted from the item creation) has been exceeded`);
+  }
+}
+
+/** A manager override is required (actor tier < reason tier) and was not provided. */
+export class ManagerOverrideRequiredError extends ForbiddenError {
+  constructor(readonly requiredTier: string) {
+    super(`This void requires a manager override (reason requires tier '${requiredTier}'); no override was provided`);
+  }
+}
+
+/**
+ * The live manager-override PIN challenge failed (unknown/inactive/PIN-less
+ * manager, or wrong PIN). A manager override is NEVER a name picked from a
+ * list: the approving manager's own separate PIN must be verified at the
+ * exact moment of the void.
+ */
+export class ManagerOverrideAuthenticationError extends AuthorizationError {}
+
+/**
+ * Manager-override live PIN challenge rate limit (security patch): too many
+ * failed challenges — either the TARGET MANAGER is hard-locked (5 consecutive
+ * failures) or the INITIATING ACTOR is hard-locked across all managers (10
+ * failures in the window).
+ *
+ * Anti-oracle contract: the client sees ONE fixed generic message for BOTH
+ * lock shapes — no signal about which limit tripped, no PIN feedback, no
+ * manager-existence information. `retryAfterSeconds` (locked_until − now) is
+ * safe to expose: it helps a legitimate, patient user and gives a PIN guesser
+ * nothing (they already know they must wait).
+ */
+export class ManagerOverrideRateLimitedError extends DomainError {
+  readonly code = 'order.override_rate_limited' as const;
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super(MANAGER_OVERRIDE_RATE_LIMITED_MESSAGE);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** The ONE client-facing message for both manager-lock and actor-lock cases. */
+export const MANAGER_OVERRIDE_RATE_LIMITED_MESSAGE = 'لقد تجاوزت الحد المسموح من المحاولات. حاول لاحقًا.' as const;
+
+/**
  * A tenant-isolation invariant was violated or a cross-tenant access attempt
  * was detected (e.g. tenant_id ≠ current_setting('app.current_tenant_id')).
  * Raised by the tenant-context layer and RLS-boundary guards; treated as a
@@ -165,6 +265,12 @@ export interface ErrorResponse {
   readonly status: number;
   readonly code: string;
   readonly message: string;
+  /**
+   * Optional machine-readable Retry-After hint (seconds). Currently only the
+   * manager-override rate limit sets it; absence means "no defined retry
+   * moment" — transport layers must treat it as optional.
+   */
+  readonly retryAfterSeconds?: number;
 }
 
 /** Server-side sink for the detailed error (never sent to the client). */
@@ -216,8 +322,21 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
       return { status: 404, code: error.code, message: error.message };
     case 'conflict':
       return { status: 409, code: error.code, message: error.message };
+    // Phase 7: fail-closed payments placeholder — a paid-order void needs the
+    // future payments engine; the client gets an explicit, retryable-later 409.
+    case 'order.payment_reversal_required':
+      return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
+    // Manager-override challenge lock (manager lock or actor lock): ONE fixed
+    // generic message — the error text itself is the anti-oracle boundary.
+    // retryAfterSeconds is safe to expose (see the class doc).
+    case 'order.override_rate_limited': {
+      const retryAfterSeconds = error instanceof ManagerOverrideRateLimitedError ? error.retryAfterSeconds : undefined;
+      return retryAfterSeconds === undefined
+        ? { status: 429, code: error.code, message: error.message }
+        : { status: 429, code: error.code, message: error.message, retryAfterSeconds };
+    }
     // Fail-closed boot: missing/invalid security secret or audit connection.
     // 503 (never 500) — the dependency is unavailable, and the generic message
     // leaks no configuration detail; the real cause goes to the log sink only.

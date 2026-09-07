@@ -19,7 +19,8 @@ violation.
 | 4     | Multi-currency, `audit_log`, foundation freeze          | ✅    |
 | 5     | Dynamic catalog / menu engine                               | ✅    |
 | 6     | Dynamic multi-country taxes, cascading, liability and immutable snapshots | ✅ |
-| 7–14  | Orders, payments, inventory, reporting, shifts, ZATCA, KDS, integrations | 📐 design only |
+| 7     | Orders, tenant workflows, station routing/KDS realtime, voids (3 tiers) | ✅    |
+| 8–14  | Payments, inventory, reporting, shifts, ZATCA, integrations | 📐 design only |
 
 ## Requirements
 

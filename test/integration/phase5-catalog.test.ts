@@ -92,7 +92,11 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
     const owner = await ownerPool.connect();
     try {
       await owner.query(
-        `TRUNCATE order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
+        // Phase 7 note: the first four tables were appended because they hold
+        // foreign keys to menu_items; PostgreSQL refuses to TRUNCATE a table
+        // referenced by any table not listed in the same statement (same
+        // pattern phase 6 followed for the order_line_tax_* tables).
+        `TRUNCATE order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
       );
       await owner.query('DELETE FROM branches WHERE id = ANY($1::uuid[])', [[BRANCH_A1, BRANCH_A2, BRANCH_B1]]);
     } finally {
