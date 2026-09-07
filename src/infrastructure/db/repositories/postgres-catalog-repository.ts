@@ -557,6 +557,12 @@ export class PostgresCatalogRepository implements CatalogRepository {
     });
   }
 
+  /**
+   * Writes the engine-assembled snapshot in full. Partial-update semantics
+   * (omit vs explicit null) live in CatalogEngine.setBranchOverride — SQL
+   * COALESCE(EXCLUDED.col, col) cannot distinguish those two cases on
+   * nullable columns, so it is not used here.
+   */
   async upsertBranchOverride(tenantId: string, input: NewBranchMenuItemOverride): Promise<BranchMenuItemOverride> {
     try {
       return await this.withTenantContext(tenantId, async (q) => {

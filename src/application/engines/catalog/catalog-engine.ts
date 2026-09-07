@@ -20,7 +20,12 @@ import type {
   ModifierGroup,
   ModifierSelectionType,
 } from '../../../domain/contracts/catalog.ts';
-import { parseLocalizedText, assertMinMaxSelections, parentChainContains } from '../../../domain/contracts/catalog-rules.ts';
+import {
+  parseLocalizedText,
+  assertMinMaxSelections,
+  assertSelectionTypeConsistency,
+  parentChainContains,
+} from '../../../domain/contracts/catalog-rules.ts';
 import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import { add, CurrencyMismatchError, money, type Money } from '../../../shared/money.ts';
 import { isWithinAvailabilitySchedule, parseAvailabilitySchedule } from './availability.ts';
@@ -98,11 +103,18 @@ export interface UpdateModifierInput {
   readonly isActive?: boolean;
 }
 
+/**
+ * Partial branch override. Omitted fields (`undefined`) keep the stored
+ * value (or the column default on first insert). An explicit `null` on
+ * `priceOverride` or `availabilitySchedule` CLEARS that field:
+ *   - priceOverride null → use the item base price
+ *   - availabilitySchedule null → no time window (unrestricted, still gated by isAvailable)
+ */
 export interface SetBranchOverrideInput {
   readonly branchId: string;
   readonly menuItemId: string;
-  readonly priceOverride: Money | null;
-  readonly isAvailable: boolean;
+  readonly priceOverride?: Money | null;
+  readonly isAvailable?: boolean;
   readonly availabilitySchedule?: unknown;
 }
 
@@ -239,6 +251,7 @@ export class CatalogEngine {
   async createModifierGroup(tenantId: string, input: CreateModifierGroupInput): Promise<ModifierGroup> {
     assertMinMaxSelections(input.minSelections, input.maxSelections);
     this.assertSelectionType(input.selectionType);
+    assertSelectionTypeConsistency(input.selectionType, input.maxSelections);
     return this.catalog.insertModifierGroup(tenantId, {
       name: parseLocalizedText(input.name, 'name', { allowEmpty: false }),
       selectionType: input.selectionType,
@@ -259,6 +272,7 @@ export class CatalogEngine {
     assertMinMaxSelections(minSelections, maxSelections);
     const selectionType = input.selectionType ?? current.selectionType;
     this.assertSelectionType(selectionType);
+    assertSelectionTypeConsistency(selectionType, maxSelections);
     return this.catalog.updateModifierGroup(tenantId, {
       ...current,
       name: input.name === undefined ? current.name : parseLocalizedText(input.name, 'name', { allowEmpty: false }),
@@ -317,21 +331,13 @@ export class CatalogEngine {
 
   async setBranchOverride(tenantId: string, input: SetBranchOverrideInput): Promise<BranchMenuItemOverride> {
     const item = requireFound(await this.catalog.getItem(tenantId, input.menuItemId), `item ${input.menuItemId} not found`);
-    let priceOverrideAmountMinor: bigint | null = null;
-    if (input.priceOverride !== null) {
-      if (input.priceOverride.currency !== item.basePrice.currency) {
-        throw new CurrencyMismatchError(item.basePrice.currency, input.priceOverride.currency);
-      }
-      priceOverrideAmountMinor = money(input.priceOverride.amountMinor, input.priceOverride.currency).amountMinor;
-    }
-    const availabilitySchedule =
-      input.availabilitySchedule === undefined ? null : parseAvailabilitySchedule(input.availabilitySchedule);
+    const current = await this.catalog.getBranchOverride(tenantId, input.branchId, input.menuItemId);
     return this.catalog.upsertBranchOverride(tenantId, {
       branchId: input.branchId,
       menuItemId: input.menuItemId,
-      priceOverrideAmountMinor,
-      isAvailable: input.isAvailable,
-      availabilitySchedule,
+      priceOverrideAmountMinor: this.mergePriceOverrideAmount(item, current, input.priceOverride),
+      isAvailable: input.isAvailable ?? current?.isAvailable ?? true,
+      availabilitySchedule: this.mergeAvailabilitySchedule(current, input.availabilitySchedule),
     });
   }
 
@@ -504,5 +510,39 @@ export class CatalogEngine {
     if (value !== 'single' && value !== 'multiple') {
       throw new ValidationError('selection_type is not recognised', 'selectionType');
     }
+  }
+
+  /**
+   * `undefined` keeps the stored override (or NULL on first insert).
+   * `null` clears the price so the item base price is used.
+   * A `Money` value replaces the stored override after a currency check.
+   */
+  private mergePriceOverrideAmount(
+    item: MenuItem,
+    current: BranchMenuItemOverride | null,
+    priceOverride: Money | null | undefined,
+  ): bigint | null {
+    if (priceOverride === undefined) {
+      return current?.priceOverrideAmountMinor ?? null;
+    }
+    if (priceOverride === null) {
+      return null;
+    }
+    if (priceOverride.currency !== item.basePrice.currency) {
+      throw new CurrencyMismatchError(item.basePrice.currency, priceOverride.currency);
+    }
+    return money(priceOverride.amountMinor, priceOverride.currency).amountMinor;
+  }
+
+  /**
+   * `undefined` keeps the stored schedule. `null` clears it. SQL
+   * `COALESCE(EXCLUDED.availability_schedule, …)` is intentionally not used:
+   * COALESCE cannot tell "omit" from "explicit SQL NULL".
+   */
+  private mergeAvailabilitySchedule(current: BranchMenuItemOverride | null, availabilitySchedule: unknown): unknown {
+    if (availabilitySchedule === undefined) {
+      return current?.availabilitySchedule ?? null;
+    }
+    return parseAvailabilitySchedule(availabilitySchedule);
   }
 }

@@ -39,6 +39,20 @@ export function parseLocalizedText(
   return Object.freeze(result);
 }
 
+/**
+ * `selection_type = 'single'` means at most one choice. `max_selections` may
+ * be `1` or `NULL` (NULL = unbounded at the column, interpreted as one for
+ * a single-choice group). Any other positive cap is contradictory.
+ */
+export function assertSelectionTypeConsistency(selectionType: string, maxSelections: number | null): void {
+  if (selectionType === 'single' && maxSelections !== null && maxSelections !== 1) {
+    throw new ValidationError(
+      'selection_type "single" requires max_selections to be 1 or null',
+      'maxSelections',
+    );
+  }
+}
+
 /** Rejects min_selections > max_selections when max is not NULL. */
 export function assertMinMaxSelections(minSelections: number, maxSelections: number | null): void {
   if (!Number.isInteger(minSelections) || minSelections < 0) {

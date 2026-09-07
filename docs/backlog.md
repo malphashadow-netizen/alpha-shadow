@@ -265,6 +265,20 @@ catalog engine does not track stock.
 money movement; L1 cache applies. New money-moving permissions must still be
 `is_sensitive = true` from the moment they are created.
 
+### setBranchOverride is a partial merge (not a full overwrite)
+`CatalogEngine.setBranchOverride` reads the current override and merges:
+omitted fields (`undefined`) keep the stored value; explicit `null` on
+`priceOverride` / `availabilitySchedule` clears that field. The repository
+upserts the assembled snapshot. SQL `COALESCE(EXCLUDED.col, col)` is **not**
+used — COALESCE cannot distinguish omit from explicit NULL on nullable
+columns.
+
+### selection_type='single' vs max_selections (migration 0009)
+0008 did not bind `selection_type = 'single'` to `max_selections`. 0009 adds
+`modifier_groups_single_max` (`max_selections` must be `1` or `NULL` when
+the type is `single`). The engine rejects the same combination before
+persistence. 0008 is not modified.
+
 ### KNOWN FLAKE (pre-existing, not Phase 4b): password truncated-record test
 `test/unit/shared/auth/password.test.ts` → "never throws on a
 malformed/truncated record" fails intermittently (measured ~1 in 20 runs on

@@ -164,6 +164,10 @@ The same migration seeds the global `permissions_registry` keys
 `ON CONFLICT (key) DO NOTHING`). Least-privilege grants for the six tables
 are in `roles/005_app_login_catalog.sql`.
 
+`0009_phase5_modifier_single_max.sql` is a hotfix on top of 0008 (0008 is
+not rewritten): `modifier_groups_single_max` CHECK requires
+`selection_type <> 'single' OR max_selections IS NULL OR max_selections = 1`.
+
 ### Phase 4b: the seeded `currencies` registry (`0007_seed_currencies.sql`)
 
 Migration `0006` left `currencies` empty on purpose. `0007_seed_currencies.sql`

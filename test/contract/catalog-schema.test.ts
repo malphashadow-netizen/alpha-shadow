@@ -111,6 +111,18 @@ describe('contract: phase-5 catalog schema', () => {
     expect(rows.rows.every((row) => !row.is_sensitive)).toBe(true);
   });
 
+  it('modifier_groups_single_max CHECK binds selection_type=single to max_selections 1 or NULL', async () => {
+    const result = await client.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def
+         FROM pg_constraint
+        WHERE conname = 'modifier_groups_single_max'`,
+    );
+    expect(result.rowCount).toBe(1);
+    const def = (result.rows[0]?.def ?? '').toLowerCase();
+    expect(def).toContain('selection_type');
+    expect(def).toContain('max_selections');
+  });
+
   it('amount columns are bigint (minor units), never numeric/float', async () => {
     const columns = await client.query<{ column_name: string; data_type: string }>(
       `SELECT column_name, data_type FROM information_schema.columns

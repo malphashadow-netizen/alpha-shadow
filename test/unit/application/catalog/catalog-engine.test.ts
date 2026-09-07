@@ -12,7 +12,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { CatalogEngine } from '../../../../src/application/engines/catalog/catalog-engine.ts';
-import { assertMinMaxSelections, parentChainContains, parseLocalizedText } from '../../../../src/domain/contracts/catalog-rules.ts';
+import {
+  assertMinMaxSelections,
+  assertSelectionTypeConsistency,
+  parentChainContains,
+  parseLocalizedText,
+} from '../../../../src/domain/contracts/catalog-rules.ts';
 import { InMemoryCatalogRepository } from '../../../../src/infrastructure/db/repositories/in-memory-catalog-repository.ts';
 import { NotFoundError, ValidationError } from '../../../../src/shared/errors.ts';
 import { currencyCode, CurrencyMismatchError, money } from '../../../../src/shared/money.ts';
@@ -45,6 +50,29 @@ describe('parseLocalizedText — free language keys', () => {
     expect(() => parseLocalizedText({}, 'name', { allowEmpty: false })).toThrow(ValidationError);
     expect(() => parseLocalizedText({ ar: 1 }, 'name', { allowEmpty: false })).toThrow(ValidationError);
     expect(() => parseLocalizedText({ '': 'x' }, 'name', { allowEmpty: false })).toThrow(ValidationError);
+  });
+});
+
+describe('assertSelectionTypeConsistency', () => {
+  it('rejects selection_type single with max_selections other than 1 or null', () => {
+    expect(() => {
+      assertSelectionTypeConsistency('single', 5);
+    }).toThrow(ValidationError);
+    expect(() => {
+      assertSelectionTypeConsistency('single', 0);
+    }).toThrow(ValidationError);
+  });
+
+  it('allows single with max 1 or null, and multiple with any valid cap', () => {
+    expect(() => {
+      assertSelectionTypeConsistency('single', 1);
+    }).not.toThrow();
+    expect(() => {
+      assertSelectionTypeConsistency('single', null);
+    }).not.toThrow();
+    expect(() => {
+      assertSelectionTypeConsistency('multiple', 5);
+    }).not.toThrow();
   });
 });
 
@@ -212,6 +240,112 @@ describe('CatalogEngine', () => {
     const total = engine.priceWithModifiers(item, [extra, noOnion], null);
     expect(total.amountMinor).toBe(2700n);
     expect(total.currency).toBe('SAR');
+  });
+
+  it('rejects selection_type single when max_selections is not 1 or null', async () => {
+    const engine = makeEngine();
+    await expect(
+      engine.createModifierGroup(TENANT, {
+        name: { ar: 'اختيار واحد' },
+        selectionType: 'single',
+        minSelections: 0,
+        maxSelections: 5,
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+
+    const singleOne = await engine.createModifierGroup(TENANT, {
+      name: { ar: 'واحد' },
+      selectionType: 'single',
+      minSelections: 0,
+      maxSelections: 1,
+    });
+    expect(singleOne.maxSelections).toBe(1);
+
+    const singleNull = await engine.createModifierGroup(TENANT, {
+      name: { ar: 'واحد بلا سقف' },
+      selectionType: 'single',
+      minSelections: 0,
+      maxSelections: null,
+    });
+    expect(singleNull.maxSelections).toBeNull();
+
+    const multiple = await engine.createModifierGroup(TENANT, {
+      name: { ar: 'متعدد' },
+      selectionType: 'multiple',
+      minSelections: 0,
+      maxSelections: 5,
+    });
+    await expect(engine.updateModifierGroup(TENANT, multiple.id, { selectionType: 'single' })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    await expect(engine.updateModifierGroup(TENANT, singleOne.id, { maxSelections: 5 })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+  });
+
+  it('merges branch overrides: omitted fields keep, explicit null clears', async () => {
+    const repo = new InMemoryCatalogRepository();
+    const engine = new CatalogEngine({ catalog: repo });
+    const category = await engine.createCategory(TENANT, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, {
+      categoryId: category.id,
+      name: { ar: 'لاتيه' },
+      basePrice: money(1800n, SAR),
+    });
+    const lunch = {
+      timeZone: 'UTC',
+      windows: [{ daysOfWeek: [3], start: '15:00', end: '16:00' }],
+    };
+
+    await engine.setBranchOverride(TENANT, {
+      branchId: BRANCH_1,
+      menuItemId: item.id,
+      isAvailable: true,
+      availabilitySchedule: lunch,
+    });
+
+    const afterPrice = await engine.setBranchOverride(TENANT, {
+      branchId: BRANCH_1,
+      menuItemId: item.id,
+      priceOverride: money(2200n, SAR),
+    });
+    expect(afterPrice.priceOverrideAmountMinor).toBe(2200n);
+    expect(afterPrice.isAvailable).toBe(true);
+    expect(afterPrice.availabilitySchedule).toEqual(lunch);
+
+    const noon = new Date('2026-03-04T12:00:00.000Z');
+    const lunchTime = new Date('2026-03-04T15:30:00.000Z');
+    const menuNoon = await engine.getBranchMenu(TENANT, BRANCH_1, noon, 'UTC');
+    const menuLunch = await engine.getBranchMenu(TENANT, BRANCH_1, lunchTime, 'UTC');
+    expect(menuNoon.categories[0]?.items[0]?.isAvailable).toBe(false);
+    expect(menuLunch.categories[0]?.items[0]?.isAvailable).toBe(true);
+    expect(menuLunch.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2200n);
+
+    const cleared = await engine.setBranchOverride(TENANT, {
+      branchId: BRANCH_1,
+      menuItemId: item.id,
+      availabilitySchedule: null,
+    });
+    expect(cleared.availabilitySchedule).toBeNull();
+    expect(cleared.priceOverrideAmountMinor).toBe(2200n);
+    expect(cleared.isAvailable).toBe(true);
+
+    const menuNoonAfterClear = await engine.getBranchMenu(TENANT, BRANCH_1, noon, 'UTC');
+    expect(menuNoonAfterClear.categories[0]?.items[0]?.isAvailable).toBe(true);
+    expect(menuNoonAfterClear.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2200n);
+
+    const priceCleared = await engine.setBranchOverride(TENANT, {
+      branchId: BRANCH_1,
+      menuItemId: item.id,
+      priceOverride: null,
+    });
+    expect(priceCleared.priceOverrideAmountMinor).toBeNull();
+    const menuBase = await engine.getBranchMenu(TENANT, BRANCH_1, noon, 'UTC');
+    expect(menuBase.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(1800n);
+
+    const stored = await repo.getBranchOverride(TENANT, BRANCH_1, item.id);
+    expect(stored?.availabilitySchedule).toBeNull();
+    expect(stored?.priceOverrideAmountMinor).toBeNull();
   });
 
   it('builds an unbounded category forest from parent ids', async () => {

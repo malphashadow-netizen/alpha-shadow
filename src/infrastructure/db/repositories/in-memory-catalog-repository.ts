@@ -221,6 +221,7 @@ export class InMemoryCatalogRepository implements CatalogRepository {
     return [...this.store.links.values()].filter((row) => row.tenantId === tenantId);
   }
 
+  /** Full snapshot write — the engine merges omit vs explicit-null first. */
   async upsertBranchOverride(tenantId: string, input: NewBranchMenuItemOverride): Promise<BranchMenuItemOverride> {
     const key = overrideKey(tenantId, input.branchId, input.menuItemId);
     const existing = this.store.overrides.get(key);

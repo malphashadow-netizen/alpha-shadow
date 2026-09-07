@@ -253,6 +253,105 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
     expect(stored).toEqual(name);
   });
 
+  it('rejects selection_type single with max_selections other than 1 or null in the engine and at CHECK', async () => {
+    await expect(
+      engine.createModifierGroup(TENANT_A, {
+        name: { ar: 'اختيار واحد' },
+        selectionType: 'single',
+        minSelections: 0,
+        maxSelections: 5,
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+
+    await expect(
+      withAppContext(TENANT_A, async (q) => {
+        await q.query(
+          `INSERT INTO modifier_groups (tenant_id, name, selection_type, min_selections, max_selections)
+           VALUES ($1, $2::jsonb, 'single', 0, 5)`,
+          [TENANT_A, { ar: 'bad-single' }],
+        );
+      }),
+    ).rejects.toThrow(/modifier_groups_single_max|check constraint/i);
+
+    const allowed = await engine.createModifierGroup(TENANT_A, {
+      name: { ar: 'واحد' },
+      selectionType: 'single',
+      minSelections: 0,
+      maxSelections: 1,
+    });
+    expect(allowed.maxSelections).toBe(1);
+  });
+
+  it('setBranchOverride is a partial merge: omitted schedule is kept, explicit null clears it', async () => {
+    const category = await engine.createCategory(TENANT_A, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT_A, {
+      categoryId: category.id,
+      name: { ar: 'لاتيه' },
+      basePrice: money(1800n, SAR),
+    });
+    const lunch = {
+      timeZone: 'UTC',
+      windows: [{ daysOfWeek: [3], start: '15:00', end: '16:00' }],
+    };
+
+    await engine.setBranchOverride(TENANT_A, {
+      branchId: BRANCH_A1,
+      menuItemId: item.id,
+      isAvailable: true,
+      availabilitySchedule: lunch,
+    });
+    await engine.setBranchOverride(TENANT_A, {
+      branchId: BRANCH_A1,
+      menuItemId: item.id,
+      priceOverride: money(2500n, SAR),
+    });
+
+    const afterPrice = await withAppContext(TENANT_A, async (q) => {
+      const result = await q.query<{
+        price_override_amount_minor: string | null;
+        is_available: boolean;
+        availability_schedule: unknown;
+      }>(
+        `SELECT price_override_amount_minor, is_available, availability_schedule
+           FROM branch_menu_item_overrides
+          WHERE branch_id = $1 AND menu_item_id = $2`,
+        [BRANCH_A1, item.id],
+      );
+      return result.rows[0];
+    });
+    expect(afterPrice?.price_override_amount_minor).toBe('2500');
+    expect(afterPrice?.is_available).toBe(true);
+    expect(afterPrice?.availability_schedule).toEqual(lunch);
+
+    const noon = new Date('2026-03-04T12:00:00.000Z');
+    const lunchTime = new Date('2026-03-04T15:30:00.000Z');
+    const menuNoon = await engine.getBranchMenu(TENANT_A, BRANCH_A1, noon, 'UTC');
+    const menuLunch = await engine.getBranchMenu(TENANT_A, BRANCH_A1, lunchTime, 'UTC');
+    expect(menuNoon.categories[0]?.items[0]?.isAvailable).toBe(false);
+    expect(menuLunch.categories[0]?.items[0]?.isAvailable).toBe(true);
+    expect(menuLunch.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2500n);
+
+    await engine.setBranchOverride(TENANT_A, {
+      branchId: BRANCH_A1,
+      menuItemId: item.id,
+      availabilitySchedule: null,
+    });
+    const cleared = await withAppContext(TENANT_A, async (q) => {
+      const result = await q.query<{
+        price_override_amount_minor: string | null;
+        availability_schedule: unknown;
+      }>(
+        `SELECT price_override_amount_minor, availability_schedule
+           FROM branch_menu_item_overrides
+          WHERE branch_id = $1 AND menu_item_id = $2`,
+        [BRANCH_A1, item.id],
+      );
+      return result.rows[0];
+    });
+    expect(cleared?.availability_schedule).toBeNull();
+    expect(cleared?.price_override_amount_minor).toBe('2500');
+  });
+
   it('a branch override does not affect another branch or menu_items.base_price', async () => {
     const category = await engine.createCategory(TENANT_A, { name: { ar: 'قهوة' } });
     const item = await engine.createItem(TENANT_A, {

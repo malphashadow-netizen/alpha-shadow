@@ -17,6 +17,7 @@ import {
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 const MIGRATION = join(REPO_ROOT, 'migrations', '0008_phase5_catalog.sql');
+const HOTFIX = join(REPO_ROOT, 'migrations', '0009_phase5_modifier_single_max.sql');
 const ROLES = join(REPO_ROOT, 'migrations', 'roles', '005_app_login_catalog.sql');
 
 const TABLES = [
@@ -38,8 +39,9 @@ const code = stripSqlComments(sql);
 describe('migrations/0008_phase5_catalog.sql — static contract', () => {
   it('is the next migration after 0007 (0001–0007 are untouched)', () => {
     const files = readdirSync(join(REPO_ROOT, 'migrations')).filter((name) => name.endsWith('.sql')).sort();
-    expect(files[files.length - 1]).toBe('0008_phase5_catalog.sql');
     expect(files).toContain('0007_seed_currencies.sql');
+    expect(files).toContain('0008_phase5_catalog.sql');
+    expect(files.indexOf('0008_phase5_catalog.sql')).toBe(files.indexOf('0007_seed_currencies.sql') + 1);
   });
 
   it('creates exactly the six catalog tables, each with tenant_id NOT NULL', () => {
@@ -105,6 +107,26 @@ describe('migrations/0008_phase5_catalog.sql — static contract', () => {
   it('does not seed tenants or probe data', () => {
     expect(sql).not.toMatch(/INSERT\s+INTO\s+tenants/i);
     expect(sql).not.toMatch(/probe-tenant/i);
+  });
+});
+
+describe('migrations/0009_phase5_modifier_single_max.sql — static contract', () => {
+  const hotfix = stripSqlComments(readFileSync(HOTFIX, 'utf8'));
+
+  it('is the next file after 0008 and does not rewrite 0008', () => {
+    const files = readdirSync(join(REPO_ROOT, 'migrations')).filter((name) => name.endsWith('.sql')).sort();
+    expect(files[files.length - 1]).toBe('0009_phase5_modifier_single_max.sql');
+    expect(files.indexOf('0009_phase5_modifier_single_max.sql')).toBe(files.indexOf('0008_phase5_catalog.sql') + 1);
+    expect(sql).not.toMatch(/modifier_groups_single_max/);
+  });
+
+  it('adds CHECK that single implies max_selections is 1 or NULL, without DROP TABLE / CASCADE', () => {
+    expect(hotfix).toMatch(/modifier_groups_single_max/);
+    expect(hotfix).toMatch(
+      /selection_type\s*<>\s*'single'\s+OR\s+max_selections\s+IS\s+NULL\s+OR\s+max_selections\s*=\s*1/i,
+    );
+    expect(hotfix).not.toMatch(/\bdrop\s+table\b/i);
+    expect(hotfix).not.toMatch(/\bcascade\b/i);
   });
 });
 
