@@ -85,7 +85,9 @@ export function signJwt(
   const headerSegment = base64Url(JSON.stringify(header));
   const payloadSegment = base64Url(JSON.stringify(claims));
   const signingInput = `${headerSegment}.${payloadSegment}`;
-  const signature = cryptoSign(algorithm, Buffer.from(signingInput), privateKey);
+  // node:crypto digest naming: RSA uses 'RSA-SHA256'; ECDSA uses 'sha256'.
+  const nodeAlgorithm = algorithm === 'RS256' ? 'RSA-SHA256' : 'sha256';
+  const signature = cryptoSign(nodeAlgorithm, Buffer.from(signingInput), privateKey);
   return `${signingInput}.${signature.toString('base64url')}`;
 }
 
@@ -172,9 +174,10 @@ export function verifyJwt(
   //    for RS256/ES256 cannot consume a symmetric secret; an HMAC-signed token
   //    fails both the alg check above and this verification.
   const signature = Buffer.from(decoded.signatureSegment, 'base64url');
+  const nodeAlgorithm = alg === 'RS256' ? 'RSA-SHA256' : 'sha256';
   let valid: boolean;
   try {
-    valid = cryptoVerify(alg, Buffer.from(decoded.signingInput), publicKey, signature);
+    valid = cryptoVerify(nodeAlgorithm, Buffer.from(decoded.signingInput), publicKey, signature);
   } catch {
     throw new JwtError('signature verification failed');
   }

@@ -14,7 +14,7 @@
  *   - AUDIT_DATABASE_URL  dedicated app_audit role DSN (resolved in the
  *                       auth-audit DB module; required when wiring the sink).
  */
-import type { KeyObject } from 'node:crypto';
+import { createSign, createVerify, type KeyObject } from 'node:crypto';
 
 import { ServiceUnavailableError } from '../../shared/errors.ts';
 import { decodePinPepper, PIN_HASH_PEPPER_KEY } from '../../shared/auth/pin.ts';
@@ -86,13 +86,29 @@ export function loadAuthSecrets(env: AuthSecretEnvironment): AuthSecrets {
     throw new ServiceUnavailableError(`${JWT_PUBLIC_KEY_KEY} is not a valid PEM public key; refusing to start.`);
   }
 
-  // 3) The pair must agree on key type (and the alg must match the keys).
+  // 3) The pair must agree on key type AND actually be a matching keypair:
+  //    a public key from a different pair must be rejected at boot.
   let algorithm: 'RS256' | 'ES256';
   try {
     algorithm = algorithmForKey(privateKey, publicKey);
   } catch (error) {
     throw new ServiceUnavailableError(
       `JWT keypair is invalid or mismatched: ${error instanceof Error ? error.message : 'key agreement failure'}`,
+    );
+  }
+
+  const digest = algorithm === 'RS256' ? 'RSA-SHA256' : 'sha256';
+  const probe = Buffer.from('alpha-shadow boot key-agreement probe');
+  const sign = createSign(digest);
+  sign.update(probe);
+  sign.end();
+  const signature = sign.sign(privateKey);
+  const verify = createVerify(digest);
+  verify.update(probe);
+  verify.end();
+  if (!verify.verify(publicKey, signature)) {
+    throw new ServiceUnavailableError(
+      `${JWT_PRIVATE_KEY_KEY} and ${JWT_PUBLIC_KEY_KEY} are not a matching keypair; refusing to start.`,
     );
   }
 

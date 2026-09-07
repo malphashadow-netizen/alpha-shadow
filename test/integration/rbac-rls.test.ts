@@ -120,7 +120,7 @@ describe('integration: RLS isolation on roles/role_permissions/user_roles (real 
   beforeEach(async () => {
     const owner = await ownerPool.connect();
     try {
-      await owner.query('TRUNCATE user_roles, role_permissions, roles, users');
+      await owner.query('TRUNCATE auth_refresh_tokens, user_roles, role_permissions, roles, users, branches CASCADE');
     } finally {
       owner.release();
     }

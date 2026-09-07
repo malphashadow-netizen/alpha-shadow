@@ -133,7 +133,7 @@ describe('integration: tenant isolation on core tables branches/users (real Post
     // user_roles must be listed too or PostgreSQL refuses the TRUNCATE.
     const owner = await ownerPool.connect();
     try {
-      await owner.query('TRUNCATE user_roles, users, branches');
+      await owner.query('TRUNCATE auth_refresh_tokens, user_roles, users, branches CASCADE');
     } finally {
       owner.release();
     }
