@@ -23,3 +23,13 @@ export {
   PostgresPermissionWriteRepository,
   type PostgresPermissionRepositoryDependencies,
 } from './postgres-permission-repository.ts';
+export {
+  PostgresAuditLogRepository,
+  type PostgresAuditLogRepositoryDependencies,
+} from './postgres-audit-log-repository.ts';
+export {
+  PostgresCurrencyRepository,
+  PostgresExchangeRateRepository,
+  PostgresReportingCurrencyRepository,
+  type PostgresMultiCurrencyRepositoryDependencies,
+} from './postgres-multi-currency-repositories.ts';

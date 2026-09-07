@@ -32,7 +32,7 @@ const pgRestriction = PG_IMPORT_RESTRICTION;
 const pgAllowGlobs = PG_IMPORT_ALLOWLIST; // same values as the policy module
 
 export default defineConfig([
-  globalIgnores(['dist/**', 'node_modules/**', 'coverage/**', '.embedded-postgres/**']),
+  globalIgnores(['dist/**', 'node_modules/**', 'coverage/**', '.embedded-postgres/**', 'tools/**/*.mjs']),
 
   eslintJs.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
@@ -174,7 +174,7 @@ export default defineConfig([
   },
 
   {
-    files: ['tools/**/*.ts', 'test/**/*.ts', 'eslint-rules/**/*.ts', 'eslint.config.js', 'vitest.config.ts'],
+    files: ['tools/**/*.ts', 'tools/**/*.mjs', 'test/**/*.ts', 'eslint-rules/**/*.ts', 'eslint.config.js', 'vitest.config.ts'],
     rules: {
       'no-console': 'off',
       '@typescript-eslint/explicit-module-boundary-types': 'off',

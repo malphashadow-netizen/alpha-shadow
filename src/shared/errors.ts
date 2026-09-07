@@ -41,6 +41,21 @@ export class NotFoundError extends DomainError {
   readonly code = 'not_found' as const;
 }
 
+export class MissingExchangeRateError extends NotFoundError {
+  readonly fromCurrency: string;
+  readonly toCurrency: string;
+  readonly transactionTime: Date;
+
+  constructor(fromCurrency: string, toCurrency: string, transactionTime: Date) {
+    super(
+      `No exchange rate for ${fromCurrency} to ${toCurrency} effective at or before ${transactionTime.toISOString()}`,
+    );
+    this.fromCurrency = fromCurrency;
+    this.toCurrency = toCurrency;
+    this.transactionTime = transactionTime;
+  }
+}
+
 export class ConflictError extends DomainError {
   readonly code = 'conflict' as const;
 }

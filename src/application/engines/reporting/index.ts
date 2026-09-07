@@ -1,4 +1,6 @@
-// FUTURE: reporting engine — placeholder only, no implementation until its phase.
-// Every permission registered here later uses the `resource:action` key format
-// and sets `is_sensitive = true` for money-affecting actions.
-export {};
+/** Phase 4 reporting-time currency conversion exports. */
+export {
+  CurrencyConversionEngine,
+  ReportingCurrencyConversionEngine,
+  type CurrencyConversionEngineDependencies,
+} from './currency-conversion-engine.ts';

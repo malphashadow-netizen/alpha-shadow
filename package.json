@@ -17,6 +17,7 @@
     "check:migrations:selftest": "node tools/check-migrations.ts --self-test",
     "check:secrets": "node tools/check-secrets.ts",
     "check:secrets:selftest": "node tools/check-secrets.ts --self-test",
+    "verify:financial-arithmetic": "npm run build && node tools/verify-financial-arithmetic.mjs",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",

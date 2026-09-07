@@ -13,7 +13,7 @@ Engines live under `engines/`. Every engine is a placeholder until its phase:
 | `orders/`      | 5+    | FUTURE  |
 | `payments/`    | 5+    | FUTURE  |
 | `inventory/`   | 5+    | FUTURE  |
-| `reporting/`   | 10    | FUTURE  |
+| `reporting/`   | 4     | implemented |
 | `shifts/`      | 5+    | FUTURE  |
 | `zatca/`       | 12    | FUTURE  |
 | `kds/`         | 5+    | FUTURE  |
