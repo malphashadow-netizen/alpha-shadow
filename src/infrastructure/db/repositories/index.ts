@@ -27,3 +27,8 @@ export {
   PostgresAuditLogRepository,
   type PostgresAuditLogRepositoryDependencies,
 } from './postgres-audit-log-repository.ts';
+export {
+  PostgresCurrencyRepository,
+  PostgresExchangeRateRepository,
+  type PostgresMultiCurrencyRepositoryDependencies,
+} from './postgres-multi-currency-repositories.ts';
