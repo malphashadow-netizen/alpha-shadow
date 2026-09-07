@@ -211,6 +211,17 @@ describe('Phase 4 live acceptance: FX history, audit snapshots, and RLS', () => 
     }
   });
 
+  it('append-only exchange_rates rejects UPDATE and DELETE at the database trigger boundary', async () => {
+    await rates.append(TENANT_A, USD, EUR, '0.90000000', new Date('2025-01-01T00:00:00.000Z'));
+    const owner = await ownerPool.connect();
+    try {
+      await expect(owner.query(`UPDATE exchange_rates SET rate = '1.10' WHERE tenant_id = $1`, [TENANT_A])).rejects.toThrow(/append-only/);
+      await expect(owner.query('DELETE FROM exchange_rates WHERE tenant_id = $1', [TENANT_A])).rejects.toThrow(/append-only/);
+    } finally {
+      owner.release();
+    }
+  });
+
   it('database privileges reject UPDATE and DELETE on immutable audit_log for app_login', async () => {
     await audit.append({
       tenantId: TENANT_A,
