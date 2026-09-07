@@ -105,6 +105,21 @@ test harness. Files under `migrations/roles/` are deliberately **different**:
 | `roles/001_app_login.sql`    | role `app_login` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) | `USAGE` on `public`; `SELECT` on `tenants`; `SELECT, INSERT, UPDATE, DELETE` on `branches`, `users` |
 | `roles/002_app_login_rbac.sql` | role `app_login` | `SELECT` on `permissions_registry`; `SELECT, INSERT, UPDATE, DELETE` on `roles`, `role_permissions`, `user_roles` |
 | `roles/003_app_audit.sql`    | role `app_audit` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) — the ONE non-`withTenantContext` connection | `USAGE` on `public`; `EXECUTE` ONLY on `record_auth_attempt(...)` / `count_recent_auth_failures(...)` SECURITY DEFINER functions; `app_login` additionally gets `SELECT, INSERT, UPDATE` on `auth_refresh_tokens` |
+| `roles/004_app_login_phase4.sql` | role `app_login` | `SELECT` on `currencies`; `SELECT, INSERT` on `exchange_rates`; `SELECT, INSERT` on `audit_log`; explicit `REVOKE UPDATE, DELETE` on both append-only/immutable tables |
+
+### Phase 4: multi-currency and commercial audit roles
+
+Migration `0006_phase4_multi_currency_audit.sql` creates the global
+`currencies` reference table plus tenant-scoped `exchange_rates` and
+`audit_log`. The latter two have ENABLE + FORCE RLS and the standard
+`tenant_isolation` policy. `exchange_rates` is append-only and `audit_log` is
+immutable at the database trigger boundary; the `app_login` grants in
+`roles/004_app_login_phase4.sql` add only SELECT/INSERT and explicitly revoke
+UPDATE/DELETE. No currency or rate rows are seeded by production migrations.
+
+`audit_log` is the commercial/business audit trail. It is not
+`auth_audit_log`, which remains the separate global login-attempt/rate-limit
+ledger from Phase 3.
 
 ### The `app_audit` role and the `auth_audit_log` RLS exception (Phase 3)
 
