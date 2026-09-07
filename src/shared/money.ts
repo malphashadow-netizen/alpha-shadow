@@ -8,10 +8,8 @@
  *  - Every operation between two Money values requires same currency.
  *  - Single rounding rule: round-half-to-even (banker's rounding), implemented once.
  *  - `amountMinor` is bounded by `DEFAULT_MAX_MINOR_UNITS` (see `money`).
- *
- * Known gap (backlog): there is intentionally NO FX conversion function in
- * this module yet — converting one currency into another requires mid-market
- * rates + spread + date attribution and is tracked in docs/backlog.md.
+ *  - FX conversion is implemented exactly once by `convertMoneyAtRate()`;
+ *    rates enter as NUMERIC text and never as a JavaScript number.
  */
 
 import { ValidationError } from './errors.ts';
@@ -390,6 +388,79 @@ export function divideRoundHalfToEven(numerator: bigint, denominator: bigint): b
 
 export function scale(value: Money, numerator: bigint, denominator: bigint): Money {
   return money(divideRoundHalfToEven(value.amountMinor * numerator, denominator), value.currency);
+}
+
+const MAX_RATE_SCALE = 8;
+
+interface ParsedDecimal {
+  readonly coefficient: bigint;
+  readonly scale: number;
+}
+
+function parseRateNumeric(rateText: string): ParsedDecimal {
+  if (typeof rateText !== 'string' || rateText.length === 0) {
+    throw new ValidationError('Exchange rate must be a non-empty NUMERIC string', 'rate');
+  }
+  // PostgreSQL NUMERIC is supplied as text. Exponents, Infinity, NaN, and
+  // whitespace are rejected so no implicit floating-point conversion can enter
+  // the financial path.
+  const match = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(rateText);
+  if (match === null) {
+    throw new ValidationError(`Invalid exchange rate NUMERIC text: "${rateText}"`, 'rate');
+  }
+  const integerPart = match[1];
+  const fractionPart = match[2] ?? '';
+  if (fractionPart.length > MAX_RATE_SCALE) {
+    throw new ValidationError(`Exchange rate has more than ${String(MAX_RATE_SCALE)} decimal places`, 'rate');
+  }
+  const coefficientText = `${integerPart}${fractionPart}`;
+  const coefficient = BigInt(coefficientText);
+  if (coefficient <= 0n) {
+    throw new ValidationError('Exchange rate must be greater than zero', 'rate');
+  }
+  return { coefficient, scale: fractionPart.length };
+}
+
+function assertMinorUnitDigits(digits: number, field: string): void {
+  if (!Number.isInteger(digits) || digits < 0 || digits > 4) {
+    throw new ValidationError(`${field} must be an integer from 0 through 4`, field);
+  }
+}
+
+function tenTo(digits: number, field: string, maxDigits: number): bigint {
+  if (!Number.isInteger(digits) || digits < 0 || digits > maxDigits) {
+    throw new ValidationError(`${field} must be an integer from 0 through ${String(maxDigits)}`, field);
+  }
+  return 10n ** BigInt(digits);
+}
+
+/**
+ * The sole Money × exchange-rate operation.
+ *
+ * `rateText` is the exact text returned for PostgreSQL `NUMERIC(18,8)` and is
+ * parsed into an integer coefficient. The amount is converted from source
+ * minor units to source major units, multiplied by the rate, then expressed in
+ * target minor units. The one final division uses round-half-even, including
+ * negative amounts, and no JavaScript number participates in the calculation.
+ *
+ * Formula:
+ *   round_even(amountMinor × rateCoefficient × 10^targetDigits /
+ *              (10^sourceDigits × 10^rateScale))
+ */
+export function convertMoneyAtRate(
+  value: Money,
+  rateText: string,
+  targetCurrency: CurrencyCode,
+  targetMinorUnitDigits: number,
+  sourceMinorUnitDigits: number = minorUnitScale(value.currency),
+): Money {
+  assertMinorUnitDigits(sourceMinorUnitDigits, 'sourceMinorUnitDigits');
+  assertMinorUnitDigits(targetMinorUnitDigits, 'targetMinorUnitDigits');
+  const parsedRate = parseRateNumeric(rateText);
+  const numerator = value.amountMinor * parsedRate.coefficient * tenTo(targetMinorUnitDigits, 'targetMinorUnitDigits', 4);
+  const denominator =
+    tenTo(sourceMinorUnitDigits, 'sourceMinorUnitDigits', 4) * tenTo(parsedRate.scale, 'rateScale', MAX_RATE_SCALE);
+  return money(divideRoundHalfToEven(numerator, denominator), targetCurrency);
 }
 
 /**
