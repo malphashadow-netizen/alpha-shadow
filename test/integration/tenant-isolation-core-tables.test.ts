@@ -129,9 +129,11 @@ describe('integration: tenant isolation on core tables branches/users (real Post
   beforeEach(async () => {
     // TRUNCATE as the owner (superuser) bypasses RLS; rows belong to the two
     // fixture tenants only (users → branches FK handled by listing both).
+    // Phase 2 (migration 0004) adds user_roles.user_id → users(id), so
+    // user_roles must be listed too or PostgreSQL refuses the TRUNCATE.
     const owner = await ownerPool.connect();
     try {
-      await owner.query('TRUNCATE users, branches');
+      await owner.query('TRUNCATE user_roles, users, branches');
     } finally {
       owner.release();
     }

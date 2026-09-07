@@ -127,3 +127,57 @@ max = max(1, floor((DATABASE_MAX_CONNECTIONS - 5) / APP_INSTANCES))
   connections and the migration client.
 - Formula and guards are unit-tested; production boot also refuses URLs that
   are the known default superuser DSN or lack `sslmode=require`-family.
+
+## RBAC/ABAC (Phase 2) — decisions & notes
+
+### TENANT_SUPER_ADMIN is seeded in the tenant-creation path (NOT a migration)
+The system role `TENANT_SUPER_ADMIN` (`roles.is_system = true`, `role_version = 1`)
+is created **automatically for every tenant the moment the tenant is created**,
+inside the SAME transaction as the `tenants` INSERT — implemented by
+`IPermissionWriteRepository.createTenantWithSystemRole` (both the InMemory and
+Postgres adapters). It is deliberately NOT a static SQL migration: a migration
+cannot know future tenant ids, and the super-admin role must always exist
+atomically with its tenant. The role is identified by `roles.is_system = true`
+(never by a hard-coded name — the name is only the display value set at seed
+time). The corresponding migration (`migrations/0004_phase2_rbac_tables.sql`)
+carries NO data rows.
+
+### Tenant provisioning runs under admin credentials
+`tenants` remains SELECT-only for `app_login` (Phase-1 decision unchanged).
+`createTenantWithSystemRole` is therefore a cross-cutting super-admin / schema
+owner operation: the caller must inject a `withTenantContext` whose connection
+can INSERT into `tenants` (e.g. an admin composition root), and the method
+disables the tenant-existence probe (`verifyTenantExists: false`) for that one
+transaction only. Any self-service tenant-creation flow must route through this
+single path — never an ad-hoc `INSERT INTO tenants` + `INSERT INTO roles`.
+
+### New-table grants (migrations/roles/002_app_login_rbac.sql)
+Phase-2 grants, applied like `001` (manual one-time DBA script, never run by
+`tools/migrate.ts`):
+- `permissions_registry` → `app_login` gets SELECT only (global registry, same
+  logic as `tenants`); registry writes are schema-owner operations.
+- `roles`, `role_permissions`, `user_roles` → SELECT/INSERT/UPDATE/DELETE,
+  bounded by RLS (ENABLE + FORCE + tenant_isolation) and `NOBYPASSRLS`.
+
+### L1 permission cache — sensitive permissions bypass in BOTH directions
+The authorization engine memoises the Permission-Check stage in an LRU cache
+(1-minute TTL). `permissions_registry.is_sensitive = true` checks are NEVER
+cached — neither a grant nor a denial — and are re-read from the store on every
+request. New permissions that touch sensitive money flows must be registered
+with `is_sensitive = true` from the moment they are created.
+
+### `sec_v` token derivation (Phase 2)
+`sec_v` = SHA-256 hex digest over a fixed-format sorted JSON array of the
+quadruples `(roleId, roleVersion, scopeType, scopeId)` for every ACTIVE
+`user_roles` row plus `users.security_version`. The scope is part of the
+quadruple on purpose: an UPDATE that only changes the scope (without touching
+roleId/roleVersion) still changes the hash and therefore invalidates any token
+that carried the old scope. Sorted by `roleId`, then `scopeId`, for determinism.
+
+### Super-admin protection scope
+`IPermissionWriteRepository.removeUserRoleAssignment` and
+`deactivateUserRoleAssignment` take `SELECT … FOR UPDATE` on the tenant's active
+`TENANT_SUPER_ADMIN` assignments inside the SAME transaction as the mutation and
+refuse when the target is the last active one. `disableUser`
+(`UPDATE users.is_active = false`) repeats the SAME lock + check — a user
+disable that would remove the last active super-admin is refused, no exceptions.
