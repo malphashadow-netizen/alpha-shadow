@@ -53,7 +53,7 @@ GRANT EXECUTE ON FUNCTION count_recent_auth_failures(text, text, text, integer) 
 
 -- Defence in depth: make explicit that the audit role never touches tenant
 -- tables (the role was created fresh, so these are no-ops on first run).
-REVOKE ALL ON tenants, permissions_registry, branches, users, roles, role_permissions, user_roles, auth_refresh_tokens FROM app_audit;
+REVOKE ALL ON tenants, permissions_registry, branches, users, roles, role_permissions, user_roles, auth_refresh_tokens, currencies, exchange_rates, audit_log FROM app_audit;
 
 -- Phase-3 tenant-scoped table used by the NORMAL application role:
 -- auth_refresh_tokens (refresh-token ledger). It is bounded by RLS
