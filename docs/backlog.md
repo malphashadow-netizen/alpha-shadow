@@ -224,3 +224,30 @@ that carried the old scope. Sorted by `roleId`, then `scopeId`, for determinism.
 refuse when the target is the last active one. `disableUser`
 (`UPDATE users.is_active = false`) repeats the SAME lock + check — a user
 disable that would remove the last active super-admin is refused, no exceptions.
+
+### Phase 4b: seeded `currencies` reference registry (migration 0007)
+`currencies` is global reference data (no `tenant_id`, no RLS). Migration
+`0007_seed_currencies.sql` seeds `SAR/EGP/KWD/USD/AED/EUR` with
+`ON CONFLICT (code) DO NOTHING` — never `DO UPDATE`: a stored
+`minor_unit_digits` may already have determined the rounding scale of
+historical `exchange_rates` and past reports, so a correction must be a new,
+explicit migration that states the old value, the new value and the reporting
+impact. The seeded digits are contracted to equal `ISO_4217_MINOR_UNITS` in
+`src/shared/money.ts` (KWD = 3, fils) and this is enforced twice: statically by
+`test/unit/tools/currency-seed-migration.test.ts` and live by
+`test/integration/phase4b-currency-seed.test.ts`. Adding a currency = a new
+seed migration + the matching entry in `ISO_4217_MINOR_UNITS`.
+
+### KNOWN FLAKE (pre-existing, not Phase 4b): password truncated-record test
+`test/unit/shared/auth/password.test.ts` → "never throws on a
+malformed/truncated record" fails intermittently (measured ~1 in 20 runs on
+`main` at 762a6c4, before any Phase-4b change). Root cause: the test truncates
+the base64url record by 4 characters; with probability ~1/4 the remaining 82
+characters still round-trip cleanly (the trailing unused bits happen to be
+zero), so `parsePasswordHash` accepts a 61-byte hash — and because scrypt's
+final step is PBKDF2 with one iteration, a 61-byte derivation IS the prefix of
+the 64-byte one, so the compare legitimately succeeds and `verifyPassword`
+returns `true`. The production code is not wrong; the *test fixture* is: it
+should truncate the decoded bytes (or assert `parsePasswordHash(...) === null`)
+instead of assuming a 4-character cut is always malformed. Fix belongs to the
+auth phase owner — deliberately not touched by the Phase 4b branch.

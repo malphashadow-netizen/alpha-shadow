@@ -18,6 +18,32 @@ test database. Enforced by tests:
   A production `npm run migrate` therefore applies schema changes only and can
   never plant probe rows.
 
+### The one exception: global reference data (`0007_seed_currencies.sql`)
+
+A migration MAY seed a **global, non-tenant reference registry** whose contents
+are identical in every environment and are part of the schema contract rather
+than of anybody's data — today that is exactly `currencies` (ISO 4217 codes and
+their minor-unit digit counts). The rules for such a migration:
+
+1. The table has **no `tenant_id`** column (so it is not tenant data and the
+   RLS contract does not apply).
+2. The rows contain **no environment-specific, tenant, or probe data** — the
+   `INSERT INTO tenants` / `probe-tenant` guard above still holds unchanged.
+3. The statement uses `INSERT … ON CONFLICT (<pk>) DO NOTHING` — **never
+   `DO UPDATE`**. Re-running the migration must be a no-op. An existing row may
+   already be referenced by historical rows (e.g. `exchange_rates`) and by
+   reports whose rounding scale came from it, so it is never silently rewritten.
+4. Correcting an already-seeded value is a **new, explicit migration** that
+   states the old value, the new value and the reporting impact.
+5. `currencies.minor_unit_digits` must match `ISO_4217_MINOR_UNITS` in
+   `src/shared/money.ts` exactly (the single source of truth for rounding
+   scale — KWD is 3 digits, not 2). Enforced by
+   `test/unit/tools/currency-seed-migration.test.ts` (static, no DB) and
+   `test/integration/phase4b-currency-seed.test.ts` (live rows + a real KWD
+   conversion through `CurrencyConversionEngine`).
+
+Anything that is not a global reference registry stays out of `migrations/`.
+
 ## Mandatory template for tenant-scoped tables (RLS)
 
 Any migration that creates a table with a `tenant_id` column **must** include —
@@ -120,6 +146,15 @@ UPDATE/DELETE. No currency or rate rows are seeded by production migrations.
 `audit_log` is the commercial/business audit trail. It is not
 `auth_audit_log`, which remains the separate global login-attempt/rate-limit
 ledger from Phase 3.
+
+### Phase 4b: the seeded `currencies` registry (`0007_seed_currencies.sql`)
+
+Migration `0006` left `currencies` empty on purpose. `0007_seed_currencies.sql`
+adds the six base rows — `SAR 2`, `EGP 2`, `KWD 3`, `USD 2`, `AED 2`, `EUR 2` —
+with `ON CONFLICT (code) DO NOTHING` (see the reference-data exception above).
+`0006` is not modified; the seed is a separate file applied after it. No RLS
+block is added because `currencies` has no `tenant_id`; `app_login` keeps
+`SELECT`-only access from `roles/004_app_login_phase4.sql`.
 
 ### The `app_audit` role and the `auth_audit_log` RLS exception (Phase 3)
 
