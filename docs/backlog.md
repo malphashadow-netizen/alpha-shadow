@@ -238,6 +238,47 @@ impact. The seeded digits are contracted to equal `ISO_4217_MINOR_UNITS` in
 `test/integration/phase4b-currency-seed.test.ts`. Adding a currency = a new
 seed migration + the matching entry in `ISO_4217_MINOR_UNITS`.
 
+## Catalog (Phase 5)
+
+### tax_rule_id is a Phase-6 hook (no FK yet)
+`menu_items.tax_rule_id` is `uuid NULL` with **no foreign-key constraint** in
+migration `0008_phase5_catalog.sql`. The column exists so catalog rows can
+already store a tax-rule identifier; the tax engine (Phase 6) will add:
+
+```sql
+ALTER TABLE menu_items
+  ADD CONSTRAINT menu_items_tax_rule_id_fkey
+  FOREIGN KEY (tax_rule_id) REFERENCES tax_rules (id);
+```
+
+Do not add that constraint before `tax_rules` exists. Until then the catalog
+engine treats the value as an opaque nullable UUID.
+
+### sku is a future inventory hook
+`menu_items.sku` is unique per tenant (`idx_menu_items_tenant_sku`, NULL
+allowed). Inventory (a later phase) will join on `(tenant_id, sku)` — the
+catalog engine does not track stock.
+
+### Catalog permissions are not sensitive
+`catalog:read`, `catalog:write`, `catalog:archive` are registered in
+`permissions_registry` with `is_sensitive = false`. Editing a menu is not live
+money movement; L1 cache applies. New money-moving permissions must still be
+`is_sensitive = true` from the moment they are created.
+
+### setBranchOverride is a partial merge (not a full overwrite)
+`CatalogEngine.setBranchOverride` reads the current override and merges:
+omitted fields (`undefined`) keep the stored value; explicit `null` on
+`priceOverride` / `availabilitySchedule` clears that field. The repository
+upserts the assembled snapshot. SQL `COALESCE(EXCLUDED.col, col)` is **not**
+used — COALESCE cannot distinguish omit from explicit NULL on nullable
+columns.
+
+### selection_type='single' vs max_selections (migration 0009)
+0008 did not bind `selection_type = 'single'` to `max_selections`. 0009 adds
+`modifier_groups_single_max` (`max_selections` must be `1` or `NULL` when
+the type is `single`). The engine rejects the same combination before
+persistence. 0008 is not modified.
+
 ### KNOWN FLAKE (pre-existing, not Phase 4b): password truncated-record test
 `test/unit/shared/auth/password.test.ts` → "never throws on a
 malformed/truncated record" fails intermittently (measured ~1 in 20 runs on
