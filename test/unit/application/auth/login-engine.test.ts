@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { InvalidCredentialsError } from '../../../../src/shared/errors.ts';
+import { InvalidCredentialsError, TenantSuspendedError } from '../../../../src/shared/errors.ts';
 import { sha256Hex } from '../../../../src/shared/crypto.ts';
 import { LoginEngine, PASSWORD_LOCK_THRESHOLD, PIN_LOCK_THRESHOLD } from '../../../../src/application/engines/auth/login-engine.ts';
 import { buildAuthFakes, type FakeUser } from '../../../support/auth-fakes.ts';
@@ -213,6 +213,37 @@ describe('LoginEngine — PIN mode', () => {
     const { engine } = await makeEngine();
     await expect(
       engine.login({ mode: 'pin', tenantId: TENANT_A, userIdOrStaffCode: 'NOBODY', pin: generatePin() }, ctx),
+    ).rejects.toBeInstanceOf(InvalidCredentialsError);
+  });
+});
+
+describe('LoginEngine — B5 suspended tenant', () => {
+  it('password login on a suspended tenant fails with the uniform 401 (no status leak)', async () => {
+    const { engine, repo, hashPasswordValue } = await makeEngine();
+    const password = generatePassword();
+    repo.addUser(
+      passwordUser({ id: 'u1', tenantId: TENANT_A, email: 'a@x.com', passwordHash: await hashPasswordValue(password) }),
+    );
+    // The real repository throws this from the in-tx status probe.
+    repo.findByEmail = async () => {
+      throw new TenantSuspendedError('suspended');
+    };
+    await expect(
+      engine.login({ mode: 'password', tenantId: TENANT_A, email: 'a@x.com', password }, ctx),
+    ).rejects.toBeInstanceOf(InvalidCredentialsError);
+  });
+
+  it('PIN login on a suspended tenant fails with the uniform 401 (no status leak)', async () => {
+    const { engine, repo, hashPinValue } = await makeEngine();
+    const pin = generatePin();
+    repo.addUser(
+      pinUser({ id: 'u9', tenantId: TENANT_A, staffCode: 'STF-9', pinHash: hashPinValue(TENANT_A, 'u9', pin) }),
+    );
+    repo.findByPinIdentifier = async () => {
+      throw new TenantSuspendedError('suspended');
+    };
+    await expect(
+      engine.login({ mode: 'pin', tenantId: TENANT_A, userIdOrStaffCode: 'STF-9', pin }, ctx),
     ).rejects.toBeInstanceOf(InvalidCredentialsError);
   });
 });

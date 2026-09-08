@@ -105,6 +105,21 @@ export class ForbiddenError extends DomainError {
   readonly code = 'forbidden' as const;
 }
 
+/**
+ * B5: the tenant exists but is not 'active' (suspended, or any future
+ * non-active status — the check is positive on 'active', fail-closed).
+ * Operations surface this as a distinct 403; login/refresh NEVER surface
+ * it (they fold it into the uniform 401 — tenant status must not be
+ * enumerable through authentication).
+ */
+export class TenantSuspendedError extends DomainError {
+  readonly code = 'tenant.suspended' as const;
+
+  constructor(readonly status: string) {
+    super(`Tenant account is not active (status: "${status}")`);
+  }
+}
+
 /** Explicit procedural opt-in is required, independently of VAT registration. */
 export class ExciseConfirmationRequiredError extends ForbiddenError {
   constructor() { super('Excise requires the dedicated, explicitly confirmed manufacturer/importer administrative path'); }
@@ -466,8 +481,12 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // 401 INVALID_CREDENTIALS (see InvalidCredentialsError).
     case 'INVALID_CREDENTIALS':
       return { status: 401, code: error.code, message: 'Invalid credentials' };
+    // B5: suspended (or otherwise non-active) tenant — distinct from both
+    // the unauthenticated 401 and the per-user 403. Never raised by
+    // login/refresh (those fold it into the uniform 401).
     case 'forbidden':
     case 'tenant_isolation.violation':
+    case 'tenant.suspended':
       return { status: 403, code: error.code, message: error.message };
     case 'not_found':
       return { status: 404, code: error.code, message: error.message };

@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { InvalidCredentialsError } from '../../../../src/shared/errors.ts';
+import { InvalidCredentialsError, TenantSuspendedError } from '../../../../src/shared/errors.ts';
 import { sha256Hex } from '../../../../src/shared/crypto.ts';
 import { LoginEngine } from '../../../../src/application/engines/auth/login-engine.ts';
 import { RefreshEngine } from '../../../../src/application/engines/auth/refresh-engine.ts';
@@ -153,5 +153,19 @@ describe('RefreshEngine', () => {
       now,
     });
     await expect(refresh.refresh({ refreshToken: token }, ctx)).rejects.toBeInstanceOf(InvalidCredentialsError);
+  });
+
+  it('B5: refresh on a suspended tenant fails with the uniform 401 (no status leak)', async () => {
+    const { login, refresh, repo, hashPasswordValue } = await boot();
+    const password = generatePassword();
+    repo.addUser(baseUser('u1', await hashPasswordValue(password)));
+    const first = await login.login({ mode: 'password', tenantId: TENANT, email: 'u1@x.com', password }, ctx);
+    // The real repository throws this from the in-tx status probe.
+    repo.getActiveSecVInputs = async () => {
+      throw new TenantSuspendedError('suspended');
+    };
+    await expect(refresh.refresh({ refreshToken: first.refreshToken }, ctx)).rejects.toBeInstanceOf(
+      InvalidCredentialsError,
+    );
   });
 });

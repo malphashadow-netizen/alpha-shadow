@@ -1,7 +1,7 @@
 /* eslint-disable preserve-caught-error */
 import type { QueryResult, QueryResultRow } from 'pg';
 
-import { NotFoundError, ValidationError } from '../../shared/errors.ts';
+import { NotFoundError, TenantSuspendedError, ValidationError } from '../../shared/errors.ts';
 import { acquireDbClient } from './pool.ts';
 import { mapPostgresError } from './postgres-errors.ts';
 
@@ -61,7 +61,7 @@ export interface WithTenantContextOptions {
    * so the transaction lifecycle still belongs to this module.
    */
   readonly pool?: TenantPool | undefined;
-  /** When true, verifies the tenant row exists in public.tenants before fn runs. */
+  /** When true, verifies the tenant row exists in public.tenants AND its status is 'active' before fn runs (B5: suspended → TenantSuspendedError). */
   readonly verifyTenantExists?: boolean | undefined;
   /** PostgreSQL statement_timeout (ms). undefined = inherit server default. */
   readonly statementTimeoutMs?: number | undefined;
@@ -186,12 +186,21 @@ export function createWithTenantContext(pool: TenantPool, options: WithTenantCon
       await client.query('SELECT set_config($1, $2, true)', [TENANT_ID_SETTING, validTenantId]);
 
       if (verifyTenantExists) {
-        const tenantCheck = await client.query<{ exists: boolean }>(
-          'SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1) AS exists',
+        // B5: existence AND active status in ONE in-transaction probe. The
+        // check is positive on 'active' (fail-closed): a suspended (or any
+        // non-active) tenant fails every operation here with a distinct
+        // 403. Login/refresh fold this into the uniform 401 at the engine
+        // layer — the status must never leak through authentication.
+        const tenantCheck = await client.query<{ status: string }>(
+          'SELECT status FROM tenants WHERE id = $1',
           [validTenantId],
         );
-        if (tenantCheck.rows[0]?.exists !== true) {
+        const tenantStatus = tenantCheck.rows[0]?.status;
+        if (tenantStatus === undefined) {
           throw new NotFoundError(`Tenant "${validTenantId}" does not exist`);
+        }
+        if (tenantStatus !== 'active') {
+          throw new TenantSuspendedError(tenantStatus);
         }
       }
 
@@ -264,6 +273,7 @@ const defaultWithTenantContext: WithTenantContext = createWithTenantContext(prod
  *
  * Defaults (fail closed):
  *   - verifies the tenant row exists in `public.tenants` (throw NotFoundError)
+ *     AND its status is 'active' (B5: throw TenantSuspendedError → 403)
  *   - applies a 30s statement timeout so a runaway query cannot hold the pool;
  *     PostgreSQL kills the statement, the code path then ROLLBACKs + DISCARDs.
  *   - applies a 5s lock timeout (B3) so a piled-up lock wait fails fast with

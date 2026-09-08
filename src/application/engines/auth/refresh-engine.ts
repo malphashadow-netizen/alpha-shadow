@@ -14,14 +14,17 @@
  *     (revoked) token is detected; the whole token family is revoked and the
  *     request gets the uniform 401.
  *   - All failures — invalid signature/expiry, unknown token, replay,
- *     blocked/inactive account, stale sec_v — collapse to the same
- *     InvalidCredentialsError (401 INVALID_CREDENTIALS).
+ *     blocked/inactive account, a SUSPENDED tenant (the tenant-level
+ *     analogue of a blocked account), stale sec_v — collapse to the same
+ *     InvalidCredentialsError (401 INVALID_CREDENTIALS). A suspension
+ *     landing MID-refresh (past the sec_v lookup) is caught at rotation
+ *     and collapses to the same 401.
  */
 import { randomUUID } from 'node:crypto';
 
-import { InvalidCredentialsError, RateLimitError } from '../../../shared/errors.ts';
+import { InvalidCredentialsError, RateLimitError, TenantSuspendedError } from '../../../shared/errors.ts';
 import { sha256Hex, timingSafeEqualHex } from '../../../shared/crypto.ts';
-import type { IAuthAuditSink, IAuthRepository, IRefreshTokenStore } from '../../../domain/contracts/auth.ts';
+import type { IAuthAuditSink, IAuthRepository, IRefreshTokenStore, SecVInputs } from '../../../domain/contracts/auth.ts';
 import type { ITokenService, Sha256Hex } from '../../../shared/auth/ports.ts';
 import { deriveSecV } from '../../../domain/contracts/sec-v.ts';
 import type { LoginContext } from './login-engine.ts';
@@ -108,7 +111,16 @@ export class RefreshEngine {
     // 3) RE-DERIVE sec_v FRESH from the store — never the token's value,
     //    never cached. A role/scope/security_version change makes the token's
     //    sec_v stale → force a new login.
-    const fresh = await this.authRepository.getActiveSecVInputs(tenantId, userId);
+    //    B5: a suspended tenant throws from the in-tx status probe — the
+    //    tenant-level analogue of a blocked account → uniform 401.
+    let fresh: (SecVInputs & { readonly isActive: boolean }) | null;
+    try {
+      fresh = await this.authRepository.getActiveSecVInputs(tenantId, userId);
+    } catch (error: unknown) {
+      if (!(error instanceof TenantSuspendedError)) throw error;
+      await this.recordFailure(context, `refresh:${userId}`, tenantId, userId);
+      invalidCredentials();
+    }
     if (fresh?.isActive !== true) {
       await this.recordFailure(context, `refresh:${userId}`, tenantId, userId);
       invalidCredentials();
@@ -126,14 +138,23 @@ export class RefreshEngine {
     const oldTokenHash = this.sha256(claims.jti);
     const newTokenHash = this.sha256(newJti);
 
-    const rotation = await this.refreshTokenStore.rotate({
-      tenantId,
-      oldTokenHash,
-      newTokenHash,
-      familyId: claims.fam,
-      newExpiresAt,
-      now,
-    });
+    // B5 race backstop: a suspension landing between the sec_v lookup and
+    // rotation collapses to the uniform 401.
+    let rotation: Awaited<ReturnType<IRefreshTokenStore['rotate']>>;
+    try {
+      rotation = await this.refreshTokenStore.rotate({
+        tenantId,
+        oldTokenHash,
+        newTokenHash,
+        familyId: claims.fam,
+        newExpiresAt,
+        now,
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof TenantSuspendedError)) throw error;
+      await this.recordFailure(context, `refresh:${userId}`, tenantId, userId);
+      invalidCredentials();
+    }
 
     if (rotation.status !== 'rotated') {
       // 'replayed' (stolen-token reuse) and 'invalid'/'account_blocked' all

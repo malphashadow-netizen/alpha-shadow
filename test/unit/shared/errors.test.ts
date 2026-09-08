@@ -10,6 +10,7 @@ import {
   NotFoundError,
   RateLimitError,
   TenantIsolationViolationError,
+  TenantSuspendedError,
   toErrorResponse,
   ValidationError,
 } from '../../../src/shared/errors.ts';
@@ -124,6 +125,7 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(toErrorResponse(new AuthorizationError('unauth'), noop).status).toBe(401);
     expect(toErrorResponse(new ForbiddenError('no'), noop).status).toBe(403);
     expect(toErrorResponse(new TenantIsolationViolationError('iso'), noop).status).toBe(403);
+    expect(toErrorResponse(new TenantSuspendedError('suspended'), noop)).toMatchObject({ status: 403, code: 'tenant.suspended' });
     expect(toErrorResponse(new NotFoundError('nf'), noop).status).toBe(404);
     expect(toErrorResponse(new ConflictError('c'), noop).status).toBe(409);
     expect(toErrorResponse(new RateLimitError('rl'), noop).status).toBe(429);
