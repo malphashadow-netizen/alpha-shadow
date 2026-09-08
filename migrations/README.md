@@ -270,7 +270,7 @@ checks these tables, not just tables discovered by a tenant_id column.
 Run `roles/009_phase8_payments.sql` separately with DBA authority after 0035
 (same manual provisioning contract as `roles/006`–`roles/008`).
 
-## Phase 9: 0037–0042 (inventory, recipes, stock ledger)
+## Phase 9: 0037–0043 (inventory, recipes, stock ledger)
 
 | Migration | Purpose |
 | --- | --- |
@@ -281,6 +281,7 @@ Run `roles/009_phase8_payments.sql` separately with DBA authority after 0035
 | 0040 | `stock_override_claims` (single-use claim: one override attempt authorizes exactly one order — the PK makes double-claim structurally impossible) + the append-only `stock_movements` ledger (per-kind sign CHECKs, order-link CHECKs, override-scope CHECK) + `validate_stock_movement` (branch match, active actor, inventory-key assertions for manual moves, 0036-shaped override evidence via the claim, the MANDATORY negative-balance gate with `FOR UPDATE` row lock) + `apply_stock_movement` (the ONLY writer of `current_quantity`) + `guard_inventory_item_writes` |
 | 0041 | `manager_override_attempts.context_type` widened with `'stock_override'` under an explicit stable CHECK name; lockout tables untouched (cross-context, same rationale as 0036); no new index (the 0036 evidence index already keys on `context_type`) |
 | 0042 | message-text-only `CREATE OR REPLACE` of `validate_stock_movement()`: the three override-evidence messages name the actual movement type (bare `%` + `NEW.movement_type`, the same RAISE style 0040 already uses) instead of the hard-coded `sale_deduction` prefix — byte-identical text for sales, truthful text for waste rows; no structural or logic change |
+| 0043 | wording-only `CREATE OR REPLACE` of `validate_stock_movement()`: the valid-attempt message now reads `initiated by the movement actor` instead of the antecedent-less `bound to the same actor` (exactly what the check compares); requirement-prefix, stale and claim messages unchanged; no structural or logic change |
 
 Balance design: `current_quantity` carries NO non-negative CHECK on purpose — a
 manager-approved sale into shortage legitimately drives it below zero (a
