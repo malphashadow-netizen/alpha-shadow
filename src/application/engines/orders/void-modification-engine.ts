@@ -180,6 +180,7 @@ export class VoidModificationEngine {
           challenge.managerUserId,
           challenge.managerOverridePin,
           actor.userId,
+          'void',
           order.id,
         );
         managerUserId = challenge.managerUserId;

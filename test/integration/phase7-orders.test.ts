@@ -16,6 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { KdsEventService } from '../../src/application/engines/kds/kds-event-service.ts';
 import { SideEffectWorker } from '../../src/application/engines/kds/side-effect-worker.ts';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
+import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
 import { StationRoutingEngine } from '../../src/application/engines/orders/station-routing-engine.ts';
 import { VoidModificationEngine } from '../../src/application/engines/orders/void-modification-engine.ts';
 import { WorkflowAdminEngine } from '../../src/application/engines/orders/workflow-admin-engine.ts';
@@ -31,6 +32,7 @@ import { createWithTenantContext, type WithTenantContext } from '../../src/infra
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
+import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -104,6 +106,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let authorization: AuthorizationEngine;
   let store: PostgresOrdersStore;
   let creation: OrderCreationEngine;
+  let shifts: ShiftEngine;
   let routing: StationRoutingEngine;
   let transitions: WorkflowTransitionEngine;
   let workflowAdmin: WorkflowAdminEngine;
@@ -111,6 +114,11 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let kdsEvents: KdsEventService;
   let saCategory: TaxCategory;
   const menuCategoryByTenant = new Map<string, string>();
+  // Phase 8 shift-gateway fixtures: one lazily-created cashier (with a
+  // standing OPEN shift, zero float) per branch, opened by two DISTINCT
+  // people (dual verification is a database CHECK).
+  const shiftCashierByBranch = new Map<string, string>();
+  const shiftVerifiersByTenant = new Map<string, { readonly openerId: string; readonly verifierId: string }>();
   const workflowStatesByTenant = new Map<string, readonly TenantWorkflowState[]>();
   let fixture: BranchFixture;
   let serverUser: TieredUser;
@@ -120,7 +128,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
-    for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql']) {
+    for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
+      '009_phase8_payments.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -142,6 +151,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
     creation = new OrderCreationEngine({ store });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
     routing = new StationRoutingEngine({ store });
     transitions = new WorkflowTransitionEngine({ store });
     workflowAdmin = new WorkflowAdminEngine({ store });
@@ -266,14 +276,49 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     return match;
   }
 
+  /** Phase-8 gateway fixture: one cashier per branch, holding the standing OPEN shift. */
+  async function ensureShiftCashier(tenantId: string, branchId: string): Promise<string> {
+    const existing = shiftCashierByBranch.get(branchId);
+    if (existing !== undefined) return existing;
+    let verifiers = shiftVerifiersByTenant.get(tenantId);
+    if (verifiers === undefined) {
+      const openerId = randomUUID();
+      const verifierId = randomUUID();
+      await withApp(tenantId, (q) => q.query(
+        'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4), ($5, $2, $6, $7)',
+        [openerId, tenantId, `${openerId}@example.test`, hashPin(PIN_PEPPER, tenantId, openerId, '1111'),
+         verifierId, `${verifierId}@example.test`, hashPin(PIN_PEPPER, tenantId, verifierId, '2222')],
+      ));
+      verifiers = { openerId, verifierId };
+      shiftVerifiersByTenant.set(tenantId, verifiers);
+    }
+    const cashierId = randomUUID();
+    await withApp(tenantId, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [cashierId, tenantId, `${cashierId}@example.test`, hashPin(PIN_PEPPER, tenantId, cashierId, '3333')],
+    ));
+    await shifts.openShift(tenantId, {
+      branchId,
+      cashierUserId: cashierId,
+      openedByUserId: verifiers.openerId,
+      openVerifiedByUserId: verifiers.verifierId,
+      openedAt: new Date(),
+      openCounts: [],
+    });
+    shiftCashierByBranch.set(branchId, cashierId);
+    return cashierId;
+  }
+
   async function newOrder(
     tenantId: string,
     f: BranchFixture,
     lines: readonly { menuItemId: string; quantity?: number }[],
     occurredAt = new Date(),
   ) {
+    const cashierUserId = await ensureShiftCashier(tenantId, f.branchId);
     return creation.create(tenantId, {
       branchId: f.branchId,
+      cashierUserId,
       orderType: 'dine_in',
       salesChannelCode: 'dine_in',
       deliveryPlatformId: null,

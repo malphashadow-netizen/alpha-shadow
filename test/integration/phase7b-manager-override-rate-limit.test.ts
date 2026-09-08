@@ -40,6 +40,8 @@ import { createWithTenantContext, type WithTenantContext } from '../../src/infra
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
+import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
+import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
 import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -111,6 +113,10 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
   let permissionRead: PostgresPermissionReadRepository;
   let store: PostgresOrdersStore;
   let creation: OrderCreationEngine;
+  let shifts: ShiftEngine;
+  let shiftCashierId: string;
+  let shiftOpenerId: string;
+  let shiftVerifierId: string;
   let voids: VoidModificationEngine;
   let authenticator: PostgresManagerOverrideAuthenticator;
   let saCategory: TaxCategory;
@@ -126,6 +132,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
+      '009_phase8_payments.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -146,6 +153,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
     creation = new OrderCreationEngine({ store });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     voids = new VoidModificationEngine({
       store,
@@ -178,6 +186,9 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
       ]);
     }
     menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة الرقعة الأمنية' } })).id;
+    // Phase-8 gateway identities: two DISTINCT people for the dual verification.
+    shiftOpenerId = await createUserWithPin('1111');
+    shiftVerifierId = await createUserWithPin('2222');
   });
 
   beforeEach(async () => {
@@ -193,6 +204,18 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
       await q.query('INSERT INTO station_routing_rules (id, tenant_id, branch_id, station_id, menu_item_id) VALUES ($1, $2, $3, $4, $5)', [randomUUID(), T, branchId, stationId, itemId]);
     });
+    // Phase-8 shift gateway: the creating cashier holds the standing OPEN
+    // shift at this fresh branch (zero float, dual-verified).
+    const cashierId = await createUserWithPin('3333');
+    await shifts.openShift(T, {
+      branchId,
+      cashierUserId: cashierId,
+      openedByUserId: shiftOpenerId,
+      openVerifiedByUserId: shiftVerifierId,
+      openedAt: new Date(),
+      openCounts: [],
+    });
+    shiftCashierId = cashierId;
     serverUser = await createTieredUser('server');
   });
 
@@ -240,7 +263,8 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
 
   async function newOrder() {
     return creation.create(T, {
-      branchId, orderType: 'dine_in', salesChannelCode: 'dine_in', deliveryPlatformId: null, tableId: null,
+      branchId, cashierUserId: shiftCashierId, orderType: 'dine_in', salesChannelCode: 'dine_in',
+      deliveryPlatformId: null, tableId: null,
       items: [{ menuItemId: itemId, quantity: 1 }], occurredAt: new Date(),
     });
   }
@@ -250,7 +274,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
   }
 
   function challenge(managerUserId: string, pin: string, initiatingActorUserId: string, orderId?: string): Promise<Date> {
-    return authenticator.verifyLiveChallenge(T, managerUserId, pin, initiatingActorUserId, orderId);
+    return authenticator.verifyLiveChallenge(T, managerUserId, pin, initiatingActorUserId, 'void', orderId);
   }
 
   async function managerState(managerUserId: string): Promise<LockoutRow | null> {

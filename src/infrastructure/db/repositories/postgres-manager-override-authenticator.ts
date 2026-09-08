@@ -45,7 +45,7 @@
  * raised outside the tenant transaction because withTenantContext rolls back
  * on any throw — the audit/counters commit first, the error surfaces after.
  */
-import type { ManagerOverrideAuthenticator } from '../../../domain/contracts/orders.ts';
+import type { ManagerOverrideAuthenticator, ManagerOverrideContextType } from '../../../domain/contracts/orders.ts';
 import { verifyPin } from '../../../shared/auth/pin.ts';
 import { ManagerOverrideAuthenticationError, ManagerOverrideRateLimitedError } from '../../../shared/errors.ts';
 import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
@@ -95,6 +95,7 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
     managerUserId: string,
     managerOverridePin: string,
     initiatingActorUserId: string,
+    contextType: ManagerOverrideContextType,
     orderId?: string,
   ): Promise<Date> {
     const decision = await this.dependencies.withTenantContext(tenantId, async (q) => {
@@ -122,7 +123,7 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
         // Refuse IMMEDIATELY — users is not even read. Audited, but neither
         // re-counted nor extended (a hammering employee cannot keep a lock
         // open forever; the actor lock is what stops the hammering itself).
-        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, orderId, 'rejected_locked');
+        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
         return { kind: 'rate_limited', retryAfterMs: must(actorState.locked_until, 'actor locked_until').getTime() - now.getTime() } satisfies ChallengeDecision;
       }
 
@@ -134,7 +135,7 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
       );
       const managerState = await lockStateRow(q, 'manager_override_lockout_state', 'manager_user_id', tenantId, managerUserId);
       if (isActiveLock(managerState, now)) {
-        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, orderId, 'rejected_locked');
+        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
         return { kind: 'rate_limited', retryAfterMs: must(managerState.locked_until, 'manager locked_until').getTime() - now.getTime() } satisfies ChallengeDecision;
       }
 
@@ -159,7 +160,7 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
 
       // ── Step 4: permanent audit ledger (committed even when the challenge
       // ultimately fails — that is the point of the ledger).
-      await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, orderId, outcome);
+      await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, outcome);
 
       // ── Step 5: manager counter. Success resets ONLY this counter.
       if (outcome === 'succeeded') {
@@ -287,14 +288,15 @@ async function appendAttempt(
   tenantId: string,
   targetManagerUserId: string,
   initiatingActorUserId: string,
+  contextType: ManagerOverrideContextType,
   orderId: string | undefined,
   outcome: AttemptOutcome,
 ): Promise<void> {
   await q.query(
     `INSERT INTO manager_override_attempts
-       (tenant_id, target_manager_user_id, initiating_actor_user_id, order_id, outcome)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [tenantId, targetManagerUserId, initiatingActorUserId, orderId ?? null, outcome],
+       (tenant_id, target_manager_user_id, initiating_actor_user_id, context_type, order_id, outcome)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [tenantId, targetManagerUserId, initiatingActorUserId, contextType, orderId ?? null, outcome],
   );
 }
 
