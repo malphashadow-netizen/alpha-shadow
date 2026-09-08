@@ -136,6 +136,7 @@ test harness. Files under `migrations/roles/` are deliberately **different**:
 | `roles/003_app_audit.sql`    | role `app_audit` (`NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`) — the ONE non-`withTenantContext` connection | `USAGE` on `public`; `EXECUTE` ONLY on `record_auth_attempt(...)` / `count_recent_auth_failures(...)` SECURITY DEFINER functions; `app_login` additionally gets `SELECT, INSERT, UPDATE` on `auth_refresh_tokens` |
 | `roles/004_app_login_phase4.sql` | role `app_login` | `SELECT` on `currencies`; `SELECT, INSERT` on `exchange_rates`; `SELECT, INSERT` on `audit_log`; explicit `REVOKE UPDATE, DELETE` on both append-only/immutable tables |
 | `roles/005_app_login_catalog.sql` | role `app_login` | `SELECT, INSERT, UPDATE, DELETE` on `menu_categories`, `menu_items`, `branch_menu_item_overrides`, `modifier_groups`, `modifiers`, `menu_item_modifier_groups` (RLS FORCE + `NOBYPASSRLS`) |
+| `roles/009_phase8_payments.sql` | role `app_login` | Phase-8 payments surface: `SELECT` on `currency_denominations`; `SELECT, INSERT, UPDATE` on `payment_methods`, `coupons`, `payments`, `shift_reconciliations`; `SELECT, INSERT` on `order_discounts`, `cash_count_details`; full CRUD on `user_discount_limits` |
 
 ### Phase 4: multi-currency and commercial audit roles
 
@@ -252,3 +253,18 @@ this one mixed-scope ledger; the mandatory template stays unchanged elsewhere.
 Additional categories/snapshots have no duplicated tenant_id, but use ENABLE +
 FORCE RLS through their protected parent. The live Phase-6 contract additionally
 checks these tables, not just tables discovered by a tenant_id column.
+
+## Phase 8: 0029–0035 (payments, discounts, shifts)
+
+| Migration | Purpose |
+| --- | --- |
+| 0029 | `orders.split_people_count` (display only) + `order_items.split_group_id` (light split tag) — both frozen as order-time evidence |
+| 0030 | Global `currency_denominations` registry + per-country denomination seed (the documented global-reference exception, same contract as 0007) |
+| 0031 | `permissions_registry` cap columns (`max_discount_percentage`/`max_discount_fixed_amount`), keys `order:discount:apply` / `payments:refund` / `payments:void` (all sensitive), and per-user `user_discount_limits` |
+| 0032 | `shift_reconciliations` (dual verification CHECKs, one-open-shift-per-cashier index, generated `variance`, immutable after close) + append-only `cash_count_details` with generated `subtotal` and a deferred sum-consistency trigger |
+| 0033 | `payment_methods` (foreign currency = cash-only, manual fixed rate whose every change is appended to `exchange_rates` by a trigger) |
+| 0034 | `tenants.allow_discount_stacking`, `coupons` (UNIQUE tenant+code), `order_discounts` (append-only; stacking gate, capping ≤ subtotal, mandatory zero-out escalation, per-user cap re-verification, successful Phase-7b override-attempt binding) |
+| 0035 | `payments` (open-shift gateway, frozen `exchange_rate_snapshot`, net-of-change base amounts, completed → voided/refunded lifecycle) + the structural `recorded_cash_sales` verification at Z-Report close |
+
+Run `roles/009_phase8_payments.sql` separately with DBA authority after 0035
+(same manual provisioning contract as `roles/006`–`roles/008`).
