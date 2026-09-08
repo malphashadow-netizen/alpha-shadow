@@ -194,6 +194,8 @@ export function isStockShortageTriggerError(error: unknown): boolean {
 
 export interface PostgresOrdersStoreDependencies {
   readonly withTenantContext: WithTenantContext;
+  /** B3: per-transaction lock_timeout override (ms). undefined = inherit the context default. */
+  readonly lockTimeoutMs?: number | undefined;
 }
 
 export class PostgresOrdersStore implements OrdersStore {
@@ -216,7 +218,13 @@ export class PostgresOrdersStore implements OrdersStore {
           tax.close();
         }
       },
-      { isolationLevel: 'repeatable read', verifyTenantExists: true },
+      {
+        isolationLevel: 'repeatable read',
+        verifyTenantExists: true,
+        // B3: spread ONLY when set — an explicit undefined would wipe the
+        // production lock_timeout default during option merging.
+        ...(this.dependencies.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: this.dependencies.lockTimeoutMs }),
+      },
     );
   }
 }

@@ -373,8 +373,43 @@ export class ServiceUnavailableError extends DomainError {
   readonly code = 'service.unavailable' as const;
 }
 
+const PG_CONCURRENCY_MESSAGE = {
+  '40001': 'Transaction serialization conflict — safe to retry',
+  '40P01': 'Transaction deadlock — safe to retry',
+  '55P03': 'Transaction lock wait timed out — safe to retry',
+} as const;
+
+/**
+ * B3: a transaction killed by a PostgreSQL concurrency control — 40001
+ * (serialization failure), 40P01 (deadlock), or 55P03 (lock timeout / NOWAIT).
+ * The transaction was FULLY rolled back and changed nothing, so the client
+ * MUST treat this as "retry the same request" (see
+ * docs/concurrency-and-locking.md for ceilings and backoff guidance).
+ * `pgCode` preserves the SQLSTATE for operators; the message is constructed
+ * (never pg text) so the 503 transport mapping can echo it safely.
+ */
+export class ConcurrencyRetryableError extends DomainError {
+  readonly code = 'concurrency.retryable_conflict' as const;
+
+  constructor(
+    readonly pgCode: '40001' | '40P01' | '55P03',
+    options?: ErrorOptions,
+  ) {
+    super(PG_CONCURRENCY_MESSAGE[pgCode], options);
+  }
+}
+
 export function isDomainError(value: unknown): value is DomainError {
   return value instanceof DomainError;
+}
+
+/**
+ * B3: the client retry predicate. Retry loops MUST branch on this (or the
+ * stable `concurrency.retryable_conflict` code) — never on the pgCode, the
+ * message text, or the HTTP status alone.
+ */
+export function isConcurrencyRetryableError(value: unknown): value is ConcurrencyRetryableError {
+  return value instanceof ConcurrencyRetryableError;
 }
 
 export interface ErrorResponse {
@@ -471,6 +506,13 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     case 'service.unavailable':
       logSink(error);
       return { status: 503, code: error.code, message: 'Service temporarily unavailable' };
+    // B3: concurrency-control deaths (40001/40P01/55P03) — the transaction
+    // rolled back cleanly, so the client retries the same request. The
+    // message is constructed (never pg text): safe to echo, and the code is
+    // the machine-readable retry signal. Not log-sinked: an expected
+    // control-flow outcome under contention, like the 409s above.
+    case 'concurrency.retryable_conflict':
+      return { status: 503, code: error.code, message: error.message };
     case 'config.invalid':
       // 500-class: never echo the detailed message; log it server-side only.
       logSink(error);

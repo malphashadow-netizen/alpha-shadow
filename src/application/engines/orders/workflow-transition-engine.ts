@@ -98,7 +98,7 @@ export class WorkflowTransitionEngine {
       // B2: resolve the order id, then lock FIRST and re-read under the lock.
       // The order lock + revision bump serialize every concurrent mutation of
       // this order (exactly one wins; the loser gets a 40001 serialization
-      // failure, retryable — B3).
+      // failure; retryable as ConcurrencyRetryableError → 503).
       const probe = await scope.loadOrderItem(tenantId, input.orderItemId);
       if (probe === null) throw new NotFoundError(`Order item ${input.orderItemId} not found`);
       const order = await scope.lockOrder(tenantId, probe.orderId);

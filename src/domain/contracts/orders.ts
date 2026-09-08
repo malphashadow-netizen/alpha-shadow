@@ -386,7 +386,7 @@ export interface OrdersTxScope {
    * shift_reconciliations). Under REPEATABLE READ the lock alone is not
    * enough (the waiter's snapshot stays stale), so every locker also calls
    * bumpOrderRevision: exactly one concurrent mutation wins, the loser gets a
-   * 40001 serialization failure (retryable — see B3).
+   * 40001 serialization failure (retryable: ConcurrencyRetryableError → 503).
    */
   lockOrder(tenantId: string, orderId: string): Promise<OrderRecord | null>;
   /**

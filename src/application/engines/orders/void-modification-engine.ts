@@ -190,7 +190,7 @@ export class VoidModificationEngine {
 
       // B2: the order lock + revision bump serialize this void against every
       // concurrent mutation of the order (exactly one wins; the loser gets a
-      // 40001 serialization failure, retryable — B3). Positioned AFTER the
+      // 40001 serialization failure (retryable: ConcurrencyRetryableError → 503). Positioned AFTER the
       // live challenge ON PURPOSE: the challenge runs in its own transaction
       // on a second connection, and its attempt row carries an FK to orders —
       // holding FOR UPDATE across it deadlocks the FK check in a way the

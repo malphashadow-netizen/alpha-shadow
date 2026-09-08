@@ -36,8 +36,9 @@
  *     gateway cleanly), a winning collect forces the close to retry WITH the
  *     payment in its SUM (variance still zero). FAILS pre-fix (both commit).
  *
- * Loser assertions pin the CURRENT mechanism (raw code '40001'): B3 remaps
- * these to a retryable error and updates these pins deliberately.
+ * Loser assertions pin the mapped mechanism: raw 40001/40P01/55P03 deaths
+ * surface as ConcurrencyRetryableError ('concurrency.retryable_conflict',
+ * HTTP 503) via the central mapPostgresError — the client retries.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -224,8 +225,9 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
     // The loser dies on the order lock: the winner's revision bump makes the
-    // waiter's FOR UPDATE raise 40001 under REPEATABLE READ (retryable — B3).
-    expect(rejected[0]).toMatchObject({ status: 'rejected', reason: { code: '40001' } });
+    // waiter's FOR UPDATE raise 40001 under REPEATABLE READ (mapped to the
+    // retryable ConcurrencyRetryableError → 503).
+    expect(rejected[0]).toMatchObject({ status: 'rejected', reason: { code: 'concurrency.retryable_conflict' } });
     if (fulfilled[0]?.status !== 'fulfilled') throw new Error('Expected one fulfilled collect');
     expect(fulfilled[0].value.remainingBalanceMinor).toBe(1600n);
 
@@ -279,7 +281,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     const rejected = [rOne, rTwo].filter((r) => r.status === 'rejected');
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]).toMatchObject({ status: 'rejected', reason: { code: '40001' } });
+    expect(rejected[0]).toMatchObject({ status: 'rejected', reason: { code: 'concurrency.retryable_conflict' } });
 
     // Retry-convergence: the loser retries cleanly and both items land.
     if (rOne.status === 'rejected') await moveOne();
@@ -345,7 +347,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     if (collectResult.status === 'fulfilled') {
       // Collect won: the close serialization-failed on the touched shift row;
       // retrying the close MUST see the payment in its SUM (variance zero).
-      expect(closeResult).toMatchObject({ status: 'rejected', reason: { code: '40001' } });
+      expect(closeResult).toMatchObject({ status: 'rejected', reason: { code: 'concurrency.retryable_conflict' } });
       const retried = await close();
       expect(retried.status).toBe('closed');
       expect(retried.varianceType).toBe('exact');
@@ -357,7 +359,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     } else {
       // Close won: no payment was recorded; re-collecting fails the shift
       // gateway cleanly (no open shift anymore), never a 40001 retry loop.
-      expect(collectResult).toMatchObject({ status: 'rejected', reason: { code: '40001' } });
+      expect(collectResult).toMatchObject({ status: 'rejected', reason: { code: 'concurrency.retryable_conflict' } });
       expect(closeResult.status).toBe('fulfilled');
       const payCount = row((await owner.query<{ n: string }>(
         'SELECT count(*)::text AS n FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, orderId],

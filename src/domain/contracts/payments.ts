@@ -271,7 +271,7 @@ export interface PaymentsTxScope {
    * B2: SELECT … FOR UPDATE on a shift_reconciliations row — taken (after
    * the order lock) by collect, and FIRST by close. Always followed by
    * bumpShiftRevision; serializes close-vs-collect so the Z-Report SUM can
-   * never miss a concurrent payment (the loser gets 40001, retryable — B3).
+   * never miss a concurrent payment (the loser gets ConcurrencyRetryableError → 503).
    */
   lockShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
   /** B2: UPDATE shift_reconciliations SET revision = revision + 1. */

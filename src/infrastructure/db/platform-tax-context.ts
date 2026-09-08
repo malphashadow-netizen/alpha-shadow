@@ -5,6 +5,7 @@
  */
 import { ConfigurationError, ConflictError, ForbiddenError, ValidationError } from '../../shared/errors.ts';
 import type { TenantPool, TenantQuery } from './tenant-context.ts';
+import { mapPostgresError } from './postgres-errors.ts';
 
 export const PLATFORM_TAX_DATABASE_URL_KEY = 'PLATFORM_TAX_DATABASE_URL';
 export interface PlatformTaxEnvironment {
@@ -84,7 +85,9 @@ export function createWithPlatformTaxContext(pool: TenantPool): WithPlatformTaxC
       errors.push(discardError);
       client.release(true);
     }
-    if (errors.length === 1) throw errors[0];
+    // B3: concurrency-control deaths (40001/40P01/55P03) surface as the
+    // retryable domain error; everything else passes through untouched.
+    if (errors.length === 1) throw mapPostgresError(errors[0]);
     if (errors.length > 1) throw new AggregateError(errors, 'Platform tax transaction/cleanup failed');
     return result as T;
   };

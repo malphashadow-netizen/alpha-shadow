@@ -91,6 +91,8 @@ function mapCount(r: CashCountRow): CashCountDetailRecord {
 
 export interface PostgresShiftsStoreDependencies {
   readonly withTenantContext: WithTenantContext;
+  /** B3: per-transaction lock_timeout override (ms). undefined = inherit the context default. */
+  readonly lockTimeoutMs?: number | undefined;
 }
 
 export class PostgresShiftsStore implements ShiftsStore {
@@ -104,7 +106,13 @@ export class PostgresShiftsStore implements ShiftsStore {
     return this.dependencies.withTenantContext(
       tenantId,
       async (q) => fn(buildScope(q)),
-      { isolationLevel: 'repeatable read', verifyTenantExists: true },
+      {
+        isolationLevel: 'repeatable read',
+        verifyTenantExists: true,
+        // B3: spread ONLY when set — an explicit undefined would wipe the
+        // production lock_timeout default during option merging.
+        ...(this.dependencies.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: this.dependencies.lockTimeoutMs }),
+      },
     );
   }
 }

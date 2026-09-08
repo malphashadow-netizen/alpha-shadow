@@ -365,7 +365,7 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
     expect(factoryPool.connectCalls).toBe(0);
   });
 
-  it('18. exported withTenantContext applies production defaults (timeout + tenant check) with a safe pool override', async () => {
+  it('18. exported withTenantContext applies production defaults (timeouts + tenant check) with a safe pool override', async () => {
     const existsRows = { rows: [{ exists: true }] };
     const queryMock = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT EXISTS')) return existsRows as never;
@@ -388,12 +388,16 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
       'BEGIN',
       `SELECT set_config($1, $2, true)`,
       `SELECT set_config($1, $2, true)`,
+      // B3: the lock_timeout bound is the third transaction-scoped default.
+      `SELECT set_config($1, $2, true)`,
       'SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1) AS exists',
       'COMMIT',
       'DISCARD ALL',
     ]);
     const timeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'statement_timeout');
     expect(timeoutCall?.[1]?.[1]).toBe('30000');
+    const lockTimeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'lock_timeout');
+    expect(lockTimeoutCall?.[1]?.[1]).toBe('5000');
   });
 });
 
