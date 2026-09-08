@@ -245,7 +245,13 @@ export class LoyaltyPointsDeferredError extends DomainError {
  * REQUIRED and was not provided.
  */
 export class DiscountOverrideRequiredError extends ForbiddenError {
-  constructor(readonly reason: 'zeroes_out_subtotal' | 'exceeds_user_cap' | 'both') {
+  constructor(
+    readonly reason:
+      | 'zeroes_out_subtotal'
+      | 'exceeds_matching_cap'
+      | 'exceeds_cross_equivalent_cap'
+      | 'both',
+  ) {
     super(`This discount requires a manager override (${reason}); no override was provided`);
   }
 }

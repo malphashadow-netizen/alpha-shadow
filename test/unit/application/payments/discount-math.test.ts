@@ -97,13 +97,86 @@ describe('discountOverrideRequirement — step 4', () => {
     const stage = computeDiscountStage(10000n, percentage('30.00')); // requested 3000 of 10000
     const requirement = discountOverrideRequirement(stage, percentage('30.00'), caps('15.00', null));
     expect(requirement.required).toBe(true);
-    expect(requirement.reason).toBe('exceeds_user_cap');
+    expect(requirement.reason).toBe('exceeds_matching_cap');
   });
 
   it('exactly at the cap does NOT escalate (the cap is inclusive)', () => {
     const stage = computeDiscountStage(10000n, percentage('15.00'));
     const requirement = discountOverrideRequirement(stage, percentage('15.00'), caps('15.00', null));
     expect(requirement.required).toBe(false);
+  });
+});
+
+describe('discountOverrideRequirement — the dual-cap cross-dimension gate', () => {
+  // Basis for every case: the CURRENT remaining subtotal of 40.00 SAR.
+  // 15% of 40.00 = 6.00 SAR; 10.00 SAR of 40.00 = 25%.
+
+  it('percentage-only cap + a fixed request exceeding the percentage-equivalent escalates (cross gate)', () => {
+    // Only the percentage dimension is granted (15%); the fixed dimension is NULL.
+    // A fixed 10.00 request = 25% of the 40.00 basis > the granted 15%.
+    const stage = computeDiscountStage(4000n, fixed('10.00'));
+    const requirement = discountOverrideRequirement(stage, fixed('10.00'), caps('15.00', null));
+    expect(requirement.required).toBe(true);
+    expect(requirement.reason).toBe('exceeds_cross_equivalent_cap');
+  });
+
+  it('percentage-only cap + a fixed request within the percentage-equivalent does NOT escalate', () => {
+    // A fixed 5.00 request = 12.5% of the 40.00 basis ≤ the granted 15%.
+    const stage = computeDiscountStage(4000n, fixed('5.00'));
+    const requirement = discountOverrideRequirement(stage, fixed('5.00'), caps('15.00', null));
+    expect(requirement.required).toBe(false);
+    expect(requirement.reason).toBeNull();
+  });
+
+  it('both caps granted + the request passes its own dimension but fails the cross gate escalates', () => {
+    // Fixed 18.00 is INSIDE the granted fixed cap (20.00) — the matching gate
+    // passes — but equals 45% of the 40.00 basis, far above the granted 15%.
+    const stage = computeDiscountStage(4000n, fixed('18.00'));
+    const requirement = discountOverrideRequirement(stage, fixed('18.00'), caps('15.00', '20.00'));
+    expect(requirement.required).toBe(true);
+    expect(requirement.reason).toBe('exceeds_cross_equivalent_cap');
+
+    // The mirror direction: a 12% request is inside the granted 15% cap, but
+    // its amount equivalent (4.80) exceeds the granted fixed cap (3.00).
+    const pctStage = computeDiscountStage(4000n, percentage('12.00'));
+    const pctRequirement = discountOverrideRequirement(pctStage, percentage('12.00'), caps('15.00', '3.00'));
+    expect(pctRequirement.required).toBe(true);
+    expect(pctRequirement.reason).toBe('exceeds_cross_equivalent_cap');
+  });
+
+  it('one dimension granted and the other NULL: NO cross check ever — the decision is the pre-existing gate alone', () => {
+    // Percentage request against a granted percentage cap, fixed cap NULL:
+    // within the cap → no escalation, and no cross conversion can even run.
+    const pctStage = computeDiscountStage(4000n, percentage('10.00'));
+    const pctRequirement = discountOverrideRequirement(pctStage, percentage('10.00'), caps('15.00', null));
+    expect(pctRequirement.required).toBe(false);
+    expect(pctRequirement.reason).toBeNull();
+
+    // Fixed request against a granted fixed cap, percentage cap NULL: within
+    // the cap → no escalation, no cross conversion.
+    const fixedStage = computeDiscountStage(4000n, fixed('15.00'));
+    const fixedRequirement = discountOverrideRequirement(fixedStage, fixed('15.00'), caps(null, '20.00'));
+    expect(fixedRequirement.required).toBe(false);
+    expect(fixedRequirement.reason).toBeNull();
+  });
+
+  it('a zero basis escalates immediately, before any conversion arithmetic (never divides by zero)', () => {
+    // Direct construction of a zero-basis stage (computeDiscountStage itself
+    // zeroes out first for a zero input): the guard must answer without
+    // ever running a conversion.
+    const zeroBasis = { requestedMinor: 0n, appliedMinor: 0n, zeroesOutSubtotal: false, remainingSubtotalMinor: 0n };
+    const requirement = discountOverrideRequirement(zeroBasis, fixed('5.00'), caps('15.00', '20.00'));
+    expect(requirement.required).toBe(true);
+    expect(requirement.reason).toBe('zeroes_out_subtotal');
+  });
+
+  it('the cross equivalents round exactly as the engine does (half-even, same basis)', () => {
+    // 10% of 87.53 = 8.753 → banker's → 8.75: exactly at the 8.75 fixed cap
+    // (inclusive) does NOT escalate; 10.01% rounds to 8.76 and does.
+    const atCap = computeDiscountStage(8753n, percentage('10.00'));
+    expect(discountOverrideRequirement(atCap, percentage('10.00'), caps('50.00', '8.75')).required).toBe(false);
+    const overCap = computeDiscountStage(8753n, percentage('10.01'));
+    expect(discountOverrideRequirement(overCap, percentage('10.01'), caps('50.00', '8.75')).required).toBe(true);
   });
 });
 

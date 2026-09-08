@@ -848,6 +848,36 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     })).rejects.toMatchObject({ code: 'forbidden' });
   });
 
+  it('the dual-cap cross gate: a fixed discount inside its own cap but over the percentage-equivalent escalates', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // subtotal 40.00; actor caps: 15% / 20.00
+
+    // Fixed 18.00 sits INSIDE the granted fixed cap (20.00) — the matching
+    // gate passes — but equals 45% of the 40.00 basis, far above the granted
+    // 15%: the CROSS gate demands a manager override.
+    await expect(discounts.applyDiscount(T, actor(discountUser), {
+      orderId: order.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '18.0000',
+    })).rejects.toBeInstanceOf(DiscountOverrideRequiredError);
+
+    // With the live Phase-7b manager PIN (discount context), it goes through
+    // and is recorded as an escalated discount.
+    const escalated = await discounts.applyDiscount(T, actor(discountUser), {
+      orderId: order.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '18.0000',
+      managerOverride: { managerUserId: overrideManager.userId, managerOverridePin: overrideManager.pin },
+    });
+    expect(escalated.requiredManagerOverride).toBe(true);
+    expect(escalated.discountAmountApplied).toBe('18.00');
+    expect(escalated.managerOverrideAttemptId).not.toBeNull();
+
+    // A fixed 5.00 (12.5% of the basis, inside BOTH caps) never escalates.
+    const order2 = await newOrder(till);
+    const plain = await discounts.applyDiscount(T, actor(discountUser), {
+      orderId: order2.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '5.0000',
+    });
+    expect(plain.requiredManagerOverride).toBe(false);
+    expect(plain.discountAmountApplied).toBe('5.00');
+  });
+
   it('#3 stacking: rejected while disabled, coupon → manual while enabled, tax on the discounted base', async () => {
     const till = await setupTill();
     const order = await newOrder(till); // subtotal 40.00

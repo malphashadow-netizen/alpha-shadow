@@ -106,29 +106,90 @@ export function computeDiscountStage(remainingSubtotalMinor: bigint, request: Pa
   };
 }
 
-export type DiscountOverrideReason = 'zeroes_out_subtotal' | 'exceeds_user_cap' | 'both';
+export type DiscountOverrideReason =
+  | 'zeroes_out_subtotal'
+  | 'exceeds_matching_cap'
+  | 'exceeds_cross_equivalent_cap'
+  | 'both';
 
 /**
- * Step 4 of the binding pseudocode:
+ * Step 4 of the binding pseudocode — the DUAL-cap gate:
  *   IF applied ≥ subtotal → override REQUIRED, ALWAYS (zeroing out escalates
  *   unconditionally, even when the requested amount is inside the cap);
- *   ELSE IF requested > the actor's cap for the kind → override REQUIRED.
+ *   ELSE IF requested > the actor's cap for the kind (the MATCHING dimension)
+ *   → override REQUIRED;
+ *   ELSE IF the request's equivalent in the OTHER cap dimension exceeds that
+ *   cap → override REQUIRED (a 45%-equivalent fixed discount is not a 15%
+ *   discount, whatever shape it was typed in).
+ *
+ * The conversion basis is the SAME current remaining subtotal the stage ran
+ * against (the engine's remainingSubtotal = applied + the post-application
+ * remainder), so stacking stays consistent: every stage converts against the
+ * remainder it actually discounts. Conversions use the same
+ * divideRoundHalfToEven rounding as the rest of the engine.
  *
  * A NULL cap dimension is NOT "unlimited": the caller must have rejected the
- * request earlier with DiscountAuthorityMissingError (see discount-engine).
+ * request earlier with DiscountAuthorityMissingError when the MATCHING
+ * dimension is NULL (the first gate, discount-engine — no conversion, no
+ * equivalent). Inside this function a NULL cap dimension simply does not
+ * escalate on its own; the cross-dimension check only ever runs when the
+ * OTHER dimension is actually granted (non-NULL).
+ *
+ * The gate applies without exception to the mechanism (manual or coupon):
+ * both flow through the same discountKind/discountValueText.
  */
 export function discountOverrideRequirement(
   stage: DiscountStageComputation,
   request: ParsedDiscountRequest,
   caps: ParsedDiscountCaps,
 ): { required: boolean; reason: DiscountOverrideReason | null } {
-  const cap =
+  // The stage's INPUT subtotal (the current remaining subtotal this discount
+  // was computed against): applied + the post-application remainder.
+  const basisSubtotalMinor = stage.appliedMinor + stage.remainingSubtotalMinor;
+
+  // The MATCHING-dimension check: the request vs the cap of its own kind (a
+  // pure comparison — no basis arithmetic involved).
+  const matchingCap =
     request.kind === 'percentage' ? caps.maxPercentDbps : caps.maxFixedAmountMinor;
-  const requested = request.kind === 'percentage' ? (request.percentDbps ?? 0n) : (request.fixedAmountMinor ?? 0n);
-  const exceedsCap = cap === null ? true : requested > cap;
-  if (stage.zeroesOutSubtotal && exceedsCap) return { required: true, reason: 'both' };
-  if (stage.zeroesOutSubtotal) return { required: true, reason: 'zeroes_out_subtotal' };
-  if (exceedsCap) return { required: true, reason: 'exceeds_user_cap' };
+  const requestedRaw =
+    request.kind === 'percentage' ? (request.percentDbps ?? 0n) : (request.fixedAmountMinor ?? 0n);
+  const matchingExceeded = matchingCap !== null && requestedRaw > matchingCap;
+
+  if (stage.zeroesOutSubtotal) {
+    // Zeroing out the remainder ALWAYS escalates, even inside the cap.
+    return { required: true, reason: matchingExceeded ? 'both' : 'zeroes_out_subtotal' };
+  }
+  if (basisSubtotalMinor <= 0n) {
+    // A non-positive basis is a zero-out by definition — escalate
+    // immediately, BEFORE any conversion arithmetic (never divide by zero).
+    return { required: true, reason: 'zeroes_out_subtotal' };
+  }
+
+  // The CROSS-dimension check: only when the OTHER dimension is granted
+  // (non-NULL) — the request is converted to that dimension's equivalent at
+  // the same basis subtotal, with the engine's divideRoundHalfToEven.
+  let crossExceeded = false;
+  if (request.kind === 'percentage') {
+    const otherCap = caps.maxFixedAmountMinor;
+    if (otherCap !== null) {
+      // The percentage's amount equivalent is exactly the stage's requested
+      // value: divideRoundHalfToEven(basis × dbps, DBPS_PER_PERCENT).
+      crossExceeded = stage.requestedMinor > otherCap;
+    }
+  } else {
+    const otherCap = caps.maxPercentDbps;
+    if (otherCap !== null) {
+      const equivalentDbps = divideRoundHalfToEven(
+        (request.fixedAmountMinor ?? 0n) * DBPS_PER_PERCENT,
+        basisSubtotalMinor,
+      );
+      crossExceeded = equivalentDbps > otherCap;
+    }
+  }
+
+  if (matchingExceeded && crossExceeded) return { required: true, reason: 'both' };
+  if (matchingExceeded) return { required: true, reason: 'exceeds_matching_cap' };
+  if (crossExceeded) return { required: true, reason: 'exceeds_cross_equivalent_cap' };
   return { required: false, reason: null };
 }
 

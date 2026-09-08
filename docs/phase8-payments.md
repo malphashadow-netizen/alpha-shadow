@@ -67,6 +67,16 @@ alternating between Void and Discount challenges.
   A NULL cap dimension means the kind is NOT granted — an override can raise
   a SET cap but can never MINT authority that was never granted
   (`validate_order_discount`).
+* The cap gate is DUAL-dimension: besides the request's own dimension
+  (`exceeds_matching_cap`), when the OTHER dimension is granted its
+  equivalent is also checked — the percentage's amount equivalent
+  (`remaining × dbps`, half-even) vs the fixed cap, or the fixed amount's
+  percentage equivalent of the SAME current remaining subtotal vs the
+  percentage cap (`exceeds_cross_equivalent_cap`). A 45%-equivalent fixed
+  discount is not a 15% discount, whatever shape it was typed in. A
+  non-positive remaining subtotal escalates immediately, before any
+  conversion arithmetic. Applies without exception to manual and coupon
+  mechanisms (both flow through the same kind/value).
 * Zeroing out the subtotal ALWAYS escalates, even when the value is inside
   the actor's caps.
 * The discount engine does a pre-pass read transaction, then the Phase-7b
