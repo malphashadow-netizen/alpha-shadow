@@ -23,7 +23,8 @@ interface Work {
 
 /**
  * Mandatory order: priority ASC, category UUID ASC. Equal priorities do NOT
- * compound one another; only tax from STRICTLY lower priorities is added.
+ * compound one another; only EXCLUSIVE tax from STRICTLY lower priorities
+ * is added (B6: inclusive tax is already embedded in the line amount).
  * Inclusive/exclusive applies to EACH category's working base independently,
  * exactly as in the Phase-6 contract (not a reverse unstack of a bundle).
  */
@@ -91,7 +92,12 @@ export function calculateCascadingTaxes(
           taxAmountMinor: taxAmount,
         });
         result.get(work.lineId)?.push(row);
-        atThisPriority.set(work.lineId, (atThisPriority.get(work.lineId) ?? 0n) + taxAmount);
+        // B6: ONLY exclusive tax cascades into higher-priority bases. An
+        // inclusive tax is already embedded in the line amount — adding it
+        // again would double-count it (spec step 7, Saudi example).
+        if (!rate.isPriceInclusiveDefault) {
+          atThisPriority.set(work.lineId, (atThisPriority.get(work.lineId) ?? 0n) + taxAmount);
+        }
       }
     }
     for (const [lineId, subtotal] of atThisPriority) {
