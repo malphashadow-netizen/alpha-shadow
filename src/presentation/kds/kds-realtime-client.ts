@@ -140,18 +140,27 @@ export class KdsRealtimeClient {
     socket.addEventListener('message', (event: MessageEvent) => {
       this.handleMessage(String(event.data));
     });
-    socket.addEventListener('close', () => {
+    // 'error' and 'close' both funnel into ONE idempotent failure handler,
+    // because implementations disagree on the failure handshake:
+    //   * some (undici on a failed handshake) fire 'error' but NEVER 'close';
+    //   * others fire 'error' then 'close'.
+    // Whichever arrives first detaches the socket and schedules exactly ONE
+    // reconnect; the second is a no-op. Never call socket.close() from inside
+    // the error handler — undici re-dispatches 'error' from the forced close
+    // of a CONNECTING socket, recursing synchronously until the stack
+    // overflows and leaving the client stuck in 'connecting', never falling
+    // back to polling.
+    let failureHandled = false;
+    const handleSocketFailure = (): void => {
       if (this.state === 'stopped') return;
       if (this.socket !== socket) return; // already replaced/stopped
+      if (failureHandled) return;
+      failureHandled = true;
       this.socket = null;
       this.scheduleReconnect();
-    });
-    socket.addEventListener('error', () => {
-      if (this.socket !== socket) return;
-      // The close event that follows performs the reconnect scheduling; do
-      // NOT detach the socket here or the close would be ignored.
-      socket.close();
-    });
+    };
+    socket.addEventListener('close', handleSocketFailure);
+    socket.addEventListener('error', handleSocketFailure);
   }
 
   private scheduleReconnect(): void {
