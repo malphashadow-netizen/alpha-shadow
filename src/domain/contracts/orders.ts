@@ -418,7 +418,14 @@ export interface OrdersTxScope {
   /** The Phase-8 shift gateway probe: the cashier's standing OPEN shift at the branch, or null. */
   findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<{ id: string } | null>;
   insertInitialStatusEvent(tenantId: string, orderItemId: string, orderId: string, toWorkflowStateId: string, occurredAt: Date): Promise<void>;
-  resolveLineTax(tenantId: string, input: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }): Promise<TaxResolution>;
+  /**
+   * B4: the complete-invoice tax call — ONE call per order carrying EVERY
+   * line, resolved via resolveInvoiceAndSnapshot in this same transaction.
+   * Per-line resolution cannot serve invoice_total jurisdictions (the rounded
+   * unit is the invoice sum, not the line), so creation never resolves lines
+   * in isolation. Returns the per-line resolutions keyed by orderLineId.
+   */
+  resolveInvoiceTax(tenantId: string, inputs: readonly { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }[]): Promise<ReadonlyMap<string, TaxResolution>>;
 
   // Transitions.
   insertStatusEvent(tenantId: string, input: { orderItemId: string; orderId: string; fromWorkflowStateId: string | null; toWorkflowStateId: string; actorUserId: string | null; occurredAt: Date }): Promise<void>;

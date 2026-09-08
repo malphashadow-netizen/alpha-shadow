@@ -48,7 +48,7 @@ import {
   WorkflowStateInUseError,
 } from '../../../shared/errors.ts';
 import { insertStockMovementRow, mapInventoryItem, type InventoryItemRow } from './stock-ledger-rows.ts';
-import { TaxResolutionEngine } from '../../../application/engines/tax/tax-resolution-engine.ts';
+import { resolveInvoiceAndSnapshot } from '../../../application/engines/tax/tax-resolution-engine.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
 
@@ -459,18 +459,20 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       );
     },
 
-    async resolveLineTax(tid: string, input: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }): Promise<TaxResolution> {
-      const engine = new TaxResolutionEngine({ transaction: tax, orderLineId: input.orderLineId });
-      return engine.resolveAndSnapshot(
-        tid,
-        input.branchId,
-        input.menuItemId,
-        input.customerAmountMinor,
-        input.currencyCode,
-        input.at,
-        input.salesChannel,
-        input.deliveryPlatformId,
-      );
+    async resolveInvoiceTax(tid: string, inputs: readonly { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }[]): Promise<ReadonlyMap<string, TaxResolution>> {
+      // B4: the whole invoice resolves in ONE call on this transaction —
+      // allocations are made before ANY snapshot write (invoice_total), and
+      // the per_line result is mathematically identical to isolated lines.
+      return resolveInvoiceAndSnapshot(tax, tid, inputs.map((input) => ({
+        orderLineId: input.orderLineId,
+        branchId: input.branchId,
+        menuItemId: input.menuItemId,
+        grossOrNetAmountMinor: input.customerAmountMinor,
+        currencyCode: input.currencyCode,
+        at: input.at,
+        salesChannel: input.salesChannel,
+        deliveryPlatformId: input.deliveryPlatformId,
+      })));
     },
 
     async insertStatusEvent(tid: string, input: { orderItemId: string; orderId: string; fromWorkflowStateId: string | null; toWorkflowStateId: string; actorUserId: string | null; occurredAt: Date }): Promise<void> {

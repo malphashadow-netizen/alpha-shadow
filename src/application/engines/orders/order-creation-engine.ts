@@ -61,6 +61,7 @@ import {
   NoMatchingRoutingRuleError,
   NotFoundError,
   OrderWorkflowNotConfiguredError,
+  TaxConfigurationError,
   ValidationError,
 } from '../../../shared/errors.ts';
 
@@ -203,7 +204,8 @@ export class OrderCreationEngine {
         splitPeopleCount: input.splitPeopleCount ?? null,
       });
 
-      const createdItems: CreatedOrderItem[] = [];
+      const items: CreatedOrderItem['item'][] = [];
+      const taxInputs: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }[] = [];
       for (const line of input.items) {
         const menuItem = await scope.loadMenuItem(tenantId, line.menuItemId);
         if (!menuItem?.isActive) {
@@ -242,11 +244,13 @@ export class OrderCreationEngine {
         // the outbox evidence in this same transaction.
         await scope.insertInitialStatusEvent(tenantId, itemId, orderId, initialState.id, occurredAt);
 
-        // Phase-6 tax seam: the tax engine writes order_line_tax_contexts and
-        // the immutable snapshots with order_line_id = this item's id, inside
-        // the SAME transaction (the customer price, never platform proceeds).
+        // Phase-6 tax seam: collect the line's request — the tax engine
+        // resolves the COMPLETE invoice once, after every item exists (B4).
+        // Contexts and immutable snapshots land with order_line_id = this
+        // item's id, inside the SAME transaction (the customer price, never
+        // platform proceeds).
         const lineAmount = unitPriceMinor * BigInt(line.quantity);
-        const taxes = await scope.resolveLineTax(tenantId, {
+        taxInputs.push({
           orderLineId: itemId,
           branchId: input.branchId,
           menuItemId: line.menuItemId,
@@ -259,8 +263,22 @@ export class OrderCreationEngine {
 
         const item = await scope.loadOrderItem(tenantId, itemId);
         if (item === null) throw new ValidationError('Created order item could not be read back');
-        createdItems.push({ item, taxes });
+        items.push(item);
       }
+
+      // B4: ONE batched tax call for the complete invoice. Per-line
+      // resolution cannot serve invoice_total jurisdictions (the rounded
+      // unit is the invoice sum, not the line — isolated calls throw
+      // InvoiceTaxBatchRequiredError), while the batch API allocates
+      // before ANY snapshot write and is mathematically identical to
+      // isolated lines under per_line. Every line shares branch,
+      // currency, channel, platform and occurredAt by construction.
+      const resolvedTaxes = await scope.resolveInvoiceTax(tenantId, taxInputs);
+      const createdItems: CreatedOrderItem[] = items.map((item) => {
+        const taxes = resolvedTaxes.get(item.id);
+        if (taxes === undefined) throw new TaxConfigurationError('Missing invoice tax result');
+        return { item, taxes };
+      });
 
       // Phase-9 stock: FRESH requirements (recipes may have changed since the
       // pre-flight) + fresh quantities, re-checked with clean errors; then
