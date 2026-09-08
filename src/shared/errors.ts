@@ -210,6 +210,93 @@ export class ManagerOverrideRateLimitedError extends DomainError {
 /** The ONE client-facing message for both manager-lock and actor-lock cases. */
 export const MANAGER_OVERRIDE_RATE_LIMITED_MESSAGE = 'لقد تجاوزت الحد المسموح من المحاولات. حاول لاحقًا.' as const;
 
+// ── Phase 8: payments / discounts / shifts ─────────────────────────────────
+
+/**
+ * The SHIFT GATEWAY (Phase 8): a cashier without a standing status='open'
+ * shift at the relevant branch can create NO new order and record NO payment.
+ * Fail-closed — never an implicit allow; the cashier must open a shift first
+ * (atomic open count + dual verification).
+ */
+export class CashierShiftRequiredError extends DomainError {
+  readonly code = 'payments.shift_required' as const;
+  constructor(readonly cashierUserId: string, readonly branchId: string) {
+    super(`Cashier ${cashierUserId} has no standing open shift at branch ${branchId}; open a shift first (the shift gateway)`);
+  }
+}
+
+/**
+ * Loyalty points are a DELIBERATELY DEFERRED Phase-8 item. The
+ * order_discounts mechanism vocabulary reserves 'points' and the stacking
+ * sequence reserves the points stage, but no points balance/redemption
+ * exists — applying one is this explicit fail-closed refusal, never a silent
+ * zero (same placeholder discipline as PaymentReversalRequiredError).
+ */
+export class LoyaltyPointsDeferredError extends DomainError {
+  readonly code = 'payments.loyalty_points_deferred' as const;
+  constructor() {
+    super('Loyalty points are a deliberately deferred phase; the points discount mechanism is reserved but not implemented (fail closed)');
+  }
+}
+
+/**
+ * The requested discount zeroes out the remaining subtotal and/or exceeds the
+ * actor's per-user cap: a manager override (live Phase-7b PIN challenge) is
+ * REQUIRED and was not provided.
+ */
+export class DiscountOverrideRequiredError extends ForbiddenError {
+  constructor(readonly reason: 'zeroes_out_subtotal' | 'exceeds_user_cap' | 'both') {
+    super(`This discount requires a manager override (${reason}); no override was provided`);
+  }
+}
+
+/**
+ * The actor holds no discount authority for the requested kind: the per-user
+ * cap dimension for that kind is NULL (NULL + NULL = no discount authority at
+ * all). A manager override can raise a SET cap — it cannot mint authority
+ * that was never granted.
+ */
+export class DiscountAuthorityMissingError extends ForbiddenError {
+  constructor(readonly discountKind: 'percentage' | 'fixed_amount') {
+    super(`No discount authority for '${discountKind}' discounts: the per-user cap for this kind is not granted`);
+  }
+}
+
+/** The coupon is inactive, expired, exhausted, or the order is below its minimum. */
+export class CouponUnavailableError extends ValidationError {
+  constructor(readonly couponCode: string, readonly reason: string) {
+    super(`Coupon ${couponCode} cannot be applied: ${reason}`);
+  }
+}
+
+/** The payment method is unknown, inactive, or not available at the order's branch. */
+export class PaymentMethodUnavailableError extends ValidationError {
+  constructor(readonly paymentMethodId: string, readonly reason: string) {
+    super(`Payment method ${paymentMethodId} cannot be used: ${reason}`);
+  }
+}
+
+/** The payment would collect more than the order's remaining balance. */
+export class PaymentExceedsBalanceError extends ValidationError {
+  constructor(readonly requestedMinor: bigint, readonly remainingMinor: bigint) {
+    super(`Payment ${requestedMinor.toString()} minor units exceeds the remaining order balance ${remainingMinor.toString()} minor units`);
+  }
+}
+
+/** The payment is not in a state that allows the requested lifecycle move. */
+export class PaymentStatusTransitionError extends ValidationError {
+  constructor(readonly from: string, readonly to: string) {
+    super(`Payment status may only move completed → voided or completed → refunded (attempted ${from} → ${to})`);
+  }
+}
+
+/** The shift is not open (already closed, or does not exist) for this operation. */
+export class ShiftNotOpenError extends ConflictError {
+  constructor(readonly shiftId: string) {
+    super(`Shift ${shiftId} is not open`);
+  }
+}
+
 /**
  * A tenant-isolation invariant was violated or a cross-tenant access attempt
  * was detected (e.g. tenant_id ≠ current_setting('app.current_tenant_id')).
@@ -325,6 +412,13 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // Phase 7: fail-closed payments placeholder — a paid-order void needs the
     // future payments engine; the client gets an explicit, retryable-later 409.
     case 'order.payment_reversal_required':
+      return { status: 409, code: error.code, message: error.message };
+    // Phase 8: the shift gateway — open a shift first (retryable later).
+    case 'payments.shift_required':
+      return { status: 409, code: error.code, message: error.message };
+    // Phase 8: loyalty points are a deliberately deferred phase — explicit,
+    // never a silent zero.
+    case 'payments.loyalty_points_deferred':
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };

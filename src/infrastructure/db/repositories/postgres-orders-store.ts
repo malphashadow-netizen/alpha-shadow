@@ -67,6 +67,7 @@ interface OrderRow {
   table_id: string | null;
   current_status_kind_id: string;
   payment_status: OrderPaymentStatus;
+  split_people_count: number | null;
   placed_at: Date;
   closed_at: Date | null;
 }
@@ -83,6 +84,7 @@ interface OrderItemRow {
   station_id: string;
   is_voided: boolean;
   voided_at: Date | null;
+  split_group_id: string | null;
   created_at: Date;
 }
 
@@ -120,6 +122,7 @@ function mapOrder(r: OrderRow): OrderRecord {
     tableId: r.table_id,
     currentStatusKindId: r.current_status_kind_id,
     paymentStatus: r.payment_status,
+    splitPeopleCount: r.split_people_count,
     placedAt: r.placed_at,
     closedAt: r.closed_at,
   };
@@ -138,6 +141,7 @@ function mapOrderItem(r: OrderItemRow): OrderItemRecord {
     stationId: r.station_id,
     isVoided: r.is_voided,
     voidedAt: r.voided_at,
+    splitGroupId: r.split_group_id,
     createdAt: r.created_at,
   };
 }
@@ -353,18 +357,18 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         : { ruleId: r.id, stationId: r.station_id, specificityScore: Number(r.specificity_score), priorityWeight: r.priority_weight };
     },
 
-    async insertOrder(tid: string, order: { id: string; branchId: string; orderType: OrderType; salesChannelCode: string; deliveryPlatformId: string | null; tableId: string | null; initialStatusKindId: string; placedAt: Date }): Promise<void> {
+    async insertOrder(tid: string, order: { id: string; branchId: string; orderType: OrderType; salesChannelCode: string; deliveryPlatformId: string | null; tableId: string | null; initialStatusKindId: string; placedAt: Date; splitPeopleCount: number | null }): Promise<void> {
       await q.query(
-        `INSERT INTO orders (id, tenant_id, branch_id, order_type, sales_channel_code, delivery_platform_id, table_id, current_status_kind_id, placed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [order.id, tid, order.branchId, order.orderType, order.salesChannelCode, order.deliveryPlatformId, order.tableId, order.initialStatusKindId, order.placedAt],
+        `INSERT INTO orders (id, tenant_id, branch_id, order_type, sales_channel_code, delivery_platform_id, table_id, current_status_kind_id, split_people_count, placed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [order.id, tid, order.branchId, order.orderType, order.salesChannelCode, order.deliveryPlatformId, order.tableId, order.initialStatusKindId, order.splitPeopleCount, order.placedAt],
       );
     },
 
-    async insertOrderItem(tid: string, item: { id: string; orderId: string; menuItemId: string; itemNameSnapshot: LocalizedText; unitPriceMinor: bigint; quantity: number; modifiersSnapshot: readonly OrderItemModifierSnapshot[]; initialStatusKindId: string; stationId: string; createdAt: Date }): Promise<void> {
+    async insertOrderItem(tid: string, item: { id: string; orderId: string; menuItemId: string; itemNameSnapshot: LocalizedText; unitPriceMinor: bigint; quantity: number; modifiersSnapshot: readonly OrderItemModifierSnapshot[]; initialStatusKindId: string; stationId: string; createdAt: Date; splitGroupId: string | null }): Promise<void> {
       await q.query(
-        `INSERT INTO order_items (id, tenant_id, order_id, menu_item_id, item_name_snapshot, unit_price_minor, quantity, modifiers_snapshot, current_status_kind_id, station_id, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, $10, $11)`,
+        `INSERT INTO order_items (id, tenant_id, order_id, menu_item_id, item_name_snapshot, unit_price_minor, quantity, modifiers_snapshot, current_status_kind_id, station_id, split_group_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, $10, $11, $12)`,
         [
           item.id,
           tid,
@@ -376,9 +380,21 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
           JSON.stringify(item.modifiersSnapshot),
           item.initialStatusKindId,
           item.stationId,
+          item.splitGroupId,
           item.createdAt,
         ],
       );
+    },
+
+    async findOpenShiftForCashier(tid: string, cashierUserId: string, branchId: string): Promise<{ id: string } | null> {
+      // The Phase-8 shift gateway probe (order creation).
+      const result = await q.query<{ id: string }>(
+        `SELECT id FROM shift_reconciliations
+          WHERE tenant_id = $1 AND cashier_id = $2 AND branch_id = $3 AND status = 'open'
+          LIMIT 1`,
+        [tid, cashierUserId, branchId],
+      );
+      return result.rows[0] === undefined ? null : { id: result.rows[0].id };
     },
 
     async insertInitialStatusEvent(tid: string, orderItemId: string, orderId: string, toWorkflowStateId: string, occurredAt: Date): Promise<void> {

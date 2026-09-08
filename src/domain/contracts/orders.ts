@@ -96,6 +96,8 @@ export interface OrderRecord {
   readonly tableId: string | null;
   readonly currentStatusKindId: string;
   readonly paymentStatus: OrderPaymentStatus;
+  /** Display-only Phase-8 split metadata. */
+  readonly splitPeopleCount: number | null;
   readonly placedAt: Date;
   readonly closedAt: Date | null;
 }
@@ -112,6 +114,8 @@ export interface OrderItemRecord {
   readonly stationId: string;
   readonly isVoided: boolean;
   readonly voidedAt: Date | null;
+  /** Light Phase-8 check-split tag (immutable with the rest of the evidence). */
+  readonly splitGroupId: string | null;
   readonly createdAt: Date;
 }
 
@@ -189,14 +193,24 @@ export interface NewOrderItemLine {
   /** Defaults to the menu item's current base price when omitted. */
   readonly unitPriceMinor?: bigint;
   readonly modifiers?: readonly OrderItemModifierSnapshot[];
+  /** Optional light check-split tag (frozen with the rest of the evidence). */
+  readonly splitGroupId?: string | null;
 }
 
 export interface NewOrderInput {
   readonly branchId: string;
+  /**
+   * The cashier creating the order (Phase 8 shift gateway): they must be an
+   * active member holding a standing status='open' shift AT THIS BRANCH —
+   * no open shift, no new order, fail-closed.
+   */
+  readonly cashierUserId: string;
   readonly orderType: OrderType;
   readonly salesChannelCode: string;
   readonly deliveryPlatformId?: string | null;
   readonly tableId?: string | null;
+  /** Display only: how many people the check is split across (no sub-invoices). */
+  readonly splitPeopleCount?: number | null;
   readonly items: readonly NewOrderItemLine[];
   readonly occurredAt?: Date;
 }
@@ -329,8 +343,10 @@ export interface OrdersTxScope {
   resolveStationRoute(tenantId: string, branchId: string, context: StationRoutingContext): Promise<StationRoutingDecision | null>;
 
   // Order creation (all inside one transaction).
-  insertOrder(tenantId: string, order: { id: string; branchId: string; orderType: OrderType; salesChannelCode: string; deliveryPlatformId: string | null; tableId: string | null; initialStatusKindId: string; placedAt: Date }): Promise<void>;
-  insertOrderItem(tenantId: string, item: { id: string; orderId: string; menuItemId: string; itemNameSnapshot: LocalizedText; unitPriceMinor: bigint; quantity: number; modifiersSnapshot: readonly OrderItemModifierSnapshot[]; initialStatusKindId: string; stationId: string; createdAt: Date }): Promise<void>;
+  insertOrder(tenantId: string, order: { id: string; branchId: string; orderType: OrderType; salesChannelCode: string; deliveryPlatformId: string | null; tableId: string | null; initialStatusKindId: string; placedAt: Date; splitPeopleCount: number | null }): Promise<void>;
+  insertOrderItem(tenantId: string, item: { id: string; orderId: string; menuItemId: string; itemNameSnapshot: LocalizedText; unitPriceMinor: bigint; quantity: number; modifiersSnapshot: readonly OrderItemModifierSnapshot[]; initialStatusKindId: string; stationId: string; createdAt: Date; splitGroupId: string | null }): Promise<void>;
+  /** The Phase-8 shift gateway probe: the cashier's standing OPEN shift at the branch, or null. */
+  findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<{ id: string } | null>;
   insertInitialStatusEvent(tenantId: string, orderItemId: string, orderId: string, toWorkflowStateId: string, occurredAt: Date): Promise<void>;
   resolveLineTax(tenantId: string, input: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }): Promise<TaxResolution>;
 

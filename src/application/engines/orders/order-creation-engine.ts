@@ -1,5 +1,5 @@
 /**
- * Order-creation engine (Phase 7).
+ * Order-creation engine (Phase 7 + the Phase 8 shift gateway).
  *
  * One transaction per order (repeatable read, tenant verified): the order row,
  * every item (name/price/modifier snapshot + station resolved by an EXPLICIT
@@ -7,6 +7,12 @@
  * snapshots (order_items.id IS order_line_tax_contexts.order_line_id — the
  * documented seam). If ANY item has no matching routing rule, the whole order
  * is refused (fail-closed) and nothing is written — including outbox rows.
+ *
+ * Phase 8 — THE SHIFT GATEWAY: a new order can only be created by a cashier
+ * who is an active member of the tenant AND holds a standing status='open'
+ * shift at the order's branch. No open shift, no new order — never an
+ * implicit allow (CashierShiftRequiredError; the payments engine enforces
+ * the same gateway structurally for payments).
  */
 import { randomUUID } from 'node:crypto';
 import type {
@@ -17,7 +23,14 @@ import type {
   OrderItemModifierSnapshot,
   TenantWorkflowState,
 } from '../../../domain/contracts/orders.ts';
-import { NoMatchingRoutingRuleError, NotFoundError, OrderWorkflowNotConfiguredError, ValidationError } from '../../../shared/errors.ts';
+import {
+  CashierShiftRequiredError,
+  ForbiddenError,
+  NoMatchingRoutingRuleError,
+  NotFoundError,
+  OrderWorkflowNotConfiguredError,
+  ValidationError,
+} from '../../../shared/errors.ts';
 
 export interface OrderCreationEngineDependencies {
   readonly store: OrdersStore;
@@ -46,6 +59,17 @@ export class OrderCreationEngine {
       if (!branch?.isActive) {
         throw new NotFoundError(`Branch ${input.branchId} is not an active branch of tenant ${tenantId}`);
       }
+      // THE SHIFT GATEWAY (Phase 8): the creating cashier must be an active
+      // member holding the standing OPEN shift at this branch.
+      if (!(await scope.userIsActiveMember(tenantId, input.cashierUserId))) {
+        throw new ForbiddenError('the creating cashier is not an active member of the tenant');
+      }
+      if ((await scope.findOpenShiftForCashier(tenantId, input.cashierUserId, input.branchId)) === null) {
+        throw new CashierShiftRequiredError(input.cashierUserId, input.branchId);
+      }
+      if (input.splitPeopleCount !== undefined && input.splitPeopleCount !== null && (!Number.isInteger(input.splitPeopleCount) || input.splitPeopleCount < 1)) {
+        throw new ValidationError('splitPeopleCount must be a positive integer (display-only)', 'splitPeopleCount');
+      }
       // The tenant's effective sequence decides the initial state — there is
       // no hard-coded "received": a tenant whose workflow starts at
       // "confirmed" starts there.
@@ -63,6 +87,7 @@ export class OrderCreationEngine {
         tableId: input.tableId ?? null,
         initialStatusKindId: initialState.id,
         placedAt: occurredAt,
+        splitPeopleCount: input.splitPeopleCount ?? null,
       });
 
       const createdItems: CreatedOrderItem[] = [];
@@ -100,6 +125,7 @@ export class OrderCreationEngine {
           initialStatusKindId: initialState.id,
           stationId: routing.stationId,
           createdAt: occurredAt,
+          splitGroupId: line.splitGroupId ?? null,
         });
         // The initial event (from NULL → initial state) is the first row of
         // the immutable ledger; the triggers derive the item status and write
