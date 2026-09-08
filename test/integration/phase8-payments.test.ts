@@ -742,11 +742,11 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(zeroed.requiredManagerOverride).toBe(true);
     expect(zeroed.discountAmountApplied).toBe('40.00');
     expect(zeroed.managerOverrideAttemptId).not.toBeNull();
-    const attempt = await owner.query<{ outcome: string; initiating_actor_user_id: string; order_id: string }>(
-      'SELECT outcome, initiating_actor_user_id, order_id FROM manager_override_attempts WHERE id = $1 AND tenant_id = $2',
+    const attempt = await owner.query<{ outcome: string; initiating_actor_user_id: string; order_id: string; context_type: string }>(
+      'SELECT outcome, initiating_actor_user_id, order_id, context_type FROM manager_override_attempts WHERE id = $1 AND tenant_id = $2',
       [zeroed.managerOverrideAttemptId, T],
     );
-    expect(row(attempt.rows)).toMatchObject({ outcome: 'succeeded', initiating_actor_user_id: discountUser.userId, order_id: order.order.id });
+    expect(row(attempt.rows)).toMatchObject({ outcome: 'succeeded', initiating_actor_user_id: discountUser.userId, order_id: order.order.id, context_type: 'discount' });
 
     // The DB refuses a zeroing row WITHOUT the escalation evidence.
     const order2 = await newOrder(till);
@@ -758,7 +758,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
     // An escalated row whose attempt is NOT successful is refused: create a
     // REAL failed attempt on the Phase-7b ledger (wrong PIN), then cite it.
-    await expect(authenticator.verifyLiveChallenge(T, overrideManager.userId, '0000', discountUser.userId, order2.order.id))
+    await expect(authenticator.verifyLiveChallenge(T, overrideManager.userId, '0000', discountUser.userId, 'discount', order2.order.id))
       .rejects.toMatchObject({ code: 'authorization.failed' });
     const failedAttempt = await owner.query<{ id: string }>(
       "SELECT id FROM manager_override_attempts WHERE tenant_id = $1 AND initiating_actor_user_id = $2 AND order_id = $3 AND outcome = 'failed_wrong_pin' ORDER BY created_at DESC LIMIT 1",
@@ -775,6 +775,37 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(totals.discountedSubtotalMinor).toBe(0n);
     expect(totals.taxMinor).toBe(0n);
     expect(totals.totalMinor).toBe(0n);
+  });
+
+  it('override evidence is context-scoped: a void-context success never authorizes a discount', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // subtotal 40.00
+
+    // A SUCCESSFUL challenge of the same actor + manager + order, but issued
+    // in the VOID context (e.g. a prior item-void override on this order).
+    await authenticator.verifyLiveChallenge(T, overrideManager.userId, overrideManager.pin, discountUser.userId, 'void', order.order.id);
+    const voidContextAttempt = await owner.query<{ id: string }>(
+      "SELECT id FROM manager_override_attempts WHERE tenant_id = $1 AND initiating_actor_user_id = $2 AND target_manager_user_id = $3 AND order_id = $4 AND outcome = 'succeeded' AND context_type = 'void' ORDER BY created_at DESC LIMIT 1",
+      [T, discountUser.userId, overrideManager.userId, order.order.id],
+    );
+
+    // A zeroing discount row citing that void-context success as its evidence
+    // is rejected by the database (validate_order_discount, upgraded in
+    // 0036): evidence must be a DISCOUNT-context attempt, whatever the code
+    // path.
+    await expect(withApp(T, (q) => q.query(
+      `INSERT INTO order_discounts (id, tenant_id, order_id, mechanism, discount_kind, discount_value, discount_amount_applied, required_manager_override, manager_override_attempt_id, applied_by)
+       VALUES ($1, $2, $3, 'manual', 'fixed_amount', 999.0000, 40.00, true, $4, $5)`,
+      [randomUUID(), T, order.order.id, row(voidContextAttempt.rows).id, discountUser.userId],
+    ))).rejects.toMatchObject({ code: '23514' });
+
+    // The discount-context lookup never sees the void-context attempt: the
+    // engine-side query (findSuccessfulOverrideAttemptId) is context-filtered.
+    const discountContextHit = await owner.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM manager_override_attempts WHERE tenant_id = $1 AND initiating_actor_user_id = $2 AND target_manager_user_id = $3 AND order_id = $4 AND outcome = 'succeeded' AND context_type = 'discount'",
+      [T, discountUser.userId, overrideManager.userId, order.order.id],
+    );
+    expect(row(discountContextHit.rows).count).toBe('0');
   });
 
   it('caps: within-cap applies without escalation; above-cap escalates; NULL kind = no authority', async () => {

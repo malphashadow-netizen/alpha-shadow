@@ -287,13 +287,30 @@ export interface VoidActor {
  *   * a success resets ONLY the target manager's counter, never the actor's.
  * A locked challenge (either shape) fails with ManagerOverrideRateLimitedError
  * carrying a client-safe retryAfterSeconds.
+ *
+ * Context (Phase 8): every attempt records its business context ('void' |
+ * 'discount') so EVIDENCE is context-scoped — but the RATE LIMITING above is
+ * deliberately NOT: the counters stay shared across all contexts per manager
+ * and per initiating actor, otherwise an active lock could be bypassed by
+ * simply alternating between Void and Discount challenges.
  */
+/**
+ * The business context a manager-override challenge is issued for. Every
+ * attempt row on the Phase-7b ledger records its context, so override
+ * evidence can never cross contexts: a successful 'void' challenge does not
+ * authorize a discount, and a successful 'discount' challenge does not
+ * authorize a void.
+ */
+export type ManagerOverrideContextType = 'void' | 'discount';
+
 export interface ManagerOverrideAuthenticator {
   verifyLiveChallenge(
     tenantId: string,
     managerUserId: string,
     managerOverridePin: string,
     initiatingActorUserId: string,
+    /** The business context of the override — stamped on the attempt ledger. */
+    contextType: ManagerOverrideContextType,
     /** Optional order link, recorded on the attempt ledger when provided. */
     orderId?: string,
   ): Promise<Date>;

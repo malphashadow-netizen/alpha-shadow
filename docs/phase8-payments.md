@@ -41,6 +41,24 @@ against its reduced base. Only EXCLUSIVE taxes enter the total.
 * Percentage discounts are stored at NUMERIC(18,4) precision
   (`dbps` internally); amounts at NUMERIC(18,2) minor units.
 
+## Manager-override evidence is context-scoped (locked)
+
+Every Phase-7b live challenge attempt records its business context —
+`'void'` (Phase 7 order/item voids) or `'discount'` (Phase 8 discount
+escalations) — on `manager_override_attempts.context_type` (migration 0036;
+pre-Phase-8 rows are backfilled as `'void'`, and the default is then dropped
+so every insert states its context explicitly). Evidence can never cross
+contexts: `findSuccessfulOverrideAttemptId` filters by context, and the
+database (`validate_order_discount`, upgraded in 0036) accepts only a
+SUCCESSFUL **discount-context** attempt of the same actor and order as a
+discount row's override evidence.
+
+**Deliberate**: the rate-limiting lockout state
+(`manager_override_lockout_state`, `manager_override_actor_lockout_state`)
+does NOT record context and stays in force ACROSS ALL CONTEXTS per manager
+and per initiating actor — otherwise an active lock could be bypassed by
+alternating between Void and Discount challenges.
+
 ## Discount authority (locked)
 
 * The atomic sensitive permission key is `order:discount:apply`

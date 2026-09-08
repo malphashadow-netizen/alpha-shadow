@@ -274,7 +274,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
   }
 
   function challenge(managerUserId: string, pin: string, initiatingActorUserId: string, orderId?: string): Promise<Date> {
-    return authenticator.verifyLiveChallenge(T, managerUserId, pin, initiatingActorUserId, orderId);
+    return authenticator.verifyLiveChallenge(T, managerUserId, pin, initiatingActorUserId, 'void', orderId);
   }
 
   async function managerState(managerUserId: string): Promise<LockoutRow | null> {

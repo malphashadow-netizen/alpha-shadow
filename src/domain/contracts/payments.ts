@@ -29,6 +29,8 @@
  * engines, with the currency scale stated explicitly at each call site.
  */
 
+import type { ManagerOverrideContextType } from './orders.ts';
+
 // ── Vocabularies (fixed by the Phase-8 spec) ───────────────────────────────
 
 export type PaymentMethodType = 'cash' | 'card' | 'wallet' | 'foreign_currency_cash' | 'other';
@@ -267,7 +269,7 @@ export interface PaymentsTxScope {
   incrementCouponUses(tenantId: string, couponId: string): Promise<void>;
   findSuccessfulOverrideAttemptId(
     tenantId: string,
-    evidence: { actorUserId: string; managerUserId: string; orderId: string },
+    evidence: { actorUserId: string; managerUserId: string; orderId: string; contextType: ManagerOverrideContextType },
   ): Promise<string | null>;
 
   // Payment-method administration.

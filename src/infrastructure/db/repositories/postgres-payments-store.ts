@@ -392,9 +392,9 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       const result = await q.query<{ id: string }>(
         `SELECT id FROM manager_override_attempts
           WHERE tenant_id = $1 AND initiating_actor_user_id = $2 AND target_manager_user_id = $3
-            AND order_id = $4 AND outcome = 'succeeded'
+            AND order_id = $4 AND outcome = 'succeeded' AND context_type = $5
           ORDER BY created_at DESC LIMIT 1`,
-        [tid, evidence.actorUserId, evidence.managerUserId, evidence.orderId],
+        [tid, evidence.actorUserId, evidence.managerUserId, evidence.orderId, evidence.contextType],
       );
       return result.rows[0]?.id ?? null;
     },

@@ -254,7 +254,7 @@ Additional categories/snapshots have no duplicated tenant_id, but use ENABLE +
 FORCE RLS through their protected parent. The live Phase-6 contract additionally
 checks these tables, not just tables discovered by a tenant_id column.
 
-## Phase 8: 0029–0035 (payments, discounts, shifts)
+## Phase 8: 0029–0036 (payments, discounts, shifts)
 
 | Migration | Purpose |
 | --- | --- |
@@ -265,6 +265,7 @@ checks these tables, not just tables discovered by a tenant_id column.
 | 0033 | `payment_methods` (foreign currency = cash-only, manual fixed rate whose every change is appended to `exchange_rates` by a trigger) |
 | 0034 | `tenants.allow_discount_stacking`, `coupons` (UNIQUE tenant+code), `order_discounts` (append-only; stacking gate, capping ≤ subtotal, mandatory zero-out escalation, per-user cap re-verification, successful Phase-7b override-attempt binding) |
 | 0035 | `payments` (open-shift gateway, frozen `exchange_rate_snapshot`, net-of-change base amounts, completed → voided/refunded lifecycle) + the structural `recorded_cash_sales` verification at Z-Report close |
+| 0036 | `manager_override_attempts.context_type` ('void' / 'discount' — backfilled as 'void', then the default is dropped so inserts state it explicitly), the context-scoped evidence index, and the `validate_order_discount` same-context evidence check. The lockout state tables stay cross-context ON PURPOSE (an active lock must not be bypassable by alternating contexts). |
 
 Run `roles/009_phase8_payments.sql` separately with DBA authority after 0035
 (same manual provisioning contract as `roles/006`–`roles/008`).

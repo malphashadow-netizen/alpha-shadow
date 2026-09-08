@@ -146,6 +146,7 @@ export class DiscountEngine {
         challenge.managerUserId,
         challenge.managerOverridePin,
         actor.userId,
+        'discount',
         input.orderId,
       );
       challenged = true;
@@ -183,6 +184,7 @@ export class DiscountEngine {
           actorUserId: actor.userId,
           managerUserId: challenge.managerUserId,
           orderId: input.orderId,
+          contextType: 'discount',
         });
         if (managerOverrideAttemptId === null) {
           throw new ValidationError('The manager override succeeded but its attempt evidence could not be found (fail closed)');
