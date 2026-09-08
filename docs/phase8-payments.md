@@ -115,6 +115,15 @@ alternating between Void and Discount challenges.
 
 ## Payment lifecycle (locked)
 
+* A reversal (Void Payment / refund) must be attributed to a standing OPEN
+  shift at the ORIGINAL ORDER's branch — never to an open shift the acting
+  cashier may hold at another branch. The engine's lifecycle gate looks up
+  the acting cashier's open shift constrained by `branchId = order.branchId`
+  (tenant + cashier + branch) and refuses with the explicit
+  `CashierShiftRequiredError` when none exists there (fail-closed). The
+  database guard independently refuses any lifecycle change once the
+  payment's own shift has closed (the Z-Report numbers are final).
+
 * `completed → voided` (full void evidence triple, `payments:void`) — the
   order REOPENS for re-collection.
 * `completed → refunded` (`payments:refund`, the spec-mandated SENSITIVE key;

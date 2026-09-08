@@ -233,6 +233,17 @@ export class PaymentsEngine {
     }
 
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // The reversal's drawer impact must land on a standing OPEN shift at
+      // the ORIGINAL ORDER's branch — never on whatever open shift the
+      // acting cashier may hold at ANOTHER branch. Fail closed with the
+      // explicit gateway error when no same-branch open shift exists.
+      const pre = await scope.loadOrderFinancialSnapshot(tenantId, existing.orderId);
+      if (pre === null) throw new NotFoundError(`Order ${existing.orderId} not found`);
+      const reversalShift = await scope.findOpenShiftForCashier(tenantId, actorUserId, pre.branchId);
+      if (reversalShift === null) {
+        throw new CashierShiftRequiredError(actorUserId, pre.branchId);
+      }
+
       const updated =
         to === 'voided'
           ? await scope.voidPayment(tenantId, paymentId, {
@@ -250,6 +261,8 @@ export class PaymentsEngine {
         after: { status: to },
       });
 
+      // FRESH snapshot AFTER the lifecycle write, so the payment-status
+      // recompute sees the updated payments.
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, existing.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${existing.orderId} not found`);
       const totals = computeOrderTotals(snapshot);

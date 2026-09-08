@@ -77,6 +77,8 @@ interface TieredUser {
 interface Till {
   readonly branchId: string;
   readonly cashierId: string;
+  /** The full cashier identity — holds payments:refund + payments:void (a senior cashier). */
+  readonly cashier: TieredUser;
   readonly shiftId: string;
 }
 
@@ -108,7 +110,6 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   let cashierUser: TieredUser;
   let discountUser: TieredUser;
   let overrideManager: TieredUser;
-  let refundUser: TieredUser;
   let voidServerUser: TieredUser;
   let reasonServer: string;
   let tillCounter = 0;
@@ -180,7 +181,6 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     cashierUser = await createPlainUser('3333');
     discountUser = await createTieredUser(['order:discount:apply'], '4444', { pct: '15.00', fixed: '20.00' });
     overrideManager = await createTieredUser(['order:discount:apply'], '5555', null);
-    refundUser = await createTieredUser(['payments:refund', 'payments:void'], '6666', null);
     voidServerUser = await createTieredUser(['order:void'], '9999', null);
     reasonServer = randomUUID();
     await withApp(T, (q) => q.query(
@@ -245,7 +245,10 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   async function setupTill(openCounts: readonly { denominationValue: string; quantity: number }[] = []): Promise<Till> {
     const branchId = randomUUID();
     const stationId = randomUUID();
-    const tillCashier = await createPlainUser('3333'); // fresh cashier per till: one open shift per cashier, ever
+    // Fresh cashier per till (one open shift per cashier, ever), holding the
+    // reversal permissions: refunds/voids are performed by the till's own
+    // senior cashier, standing in their open shift at the order's branch.
+    const tillCashier = await createTieredUser(['payments:refund', 'payments:void'], '3333', null);
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -261,7 +264,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       openedAt: new Date(),
       openCounts,
     });
-    return { branchId, cashierId: tillCashier.userId, shiftId: shift.id };
+    return { branchId, cashierId: tillCashier.userId, cashier: tillCashier, shiftId: shift.id };
   }
 
   /** Order of itemA (25.00) + itemB (15.00): subtotal 40.00, 15% VAT ⇒ total 46.00. */
@@ -611,20 +614,20 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T])).rows[0]?.payment_status).toBe('paid');
 
     // Void Payment (payments:void) → the order reopens for re-collection.
-    const voided = await payments.voidPayment(T, actor(refundUser), { paymentId: card.payment.id, reason: 'بطاقة مرفوضة' });
+    const voided = await payments.voidPayment(T, actor(till.cashier), { paymentId: card.payment.id, reason: 'بطاقة مرفوضة' });
     expect(voided.status).toBe('voided');
-    expect(voided.voidedById).toBe(refundUser.userId);
+    expect(voided.voidedById).toBe(till.cashier.userId);
     expect(voided.voidReason).toBe('بطاقة مرفوضة');
     expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T])).rows[0]?.payment_status).toBe('open');
 
     // Terminal statuses: a voided payment cannot move again.
-    await expect(payments.voidPayment(T, actor(refundUser), { paymentId: card.payment.id, reason: 'مرة أخرى' }))
+    await expect(payments.voidPayment(T, actor(till.cashier), { paymentId: card.payment.id, reason: 'مرة أخرى' }))
       .rejects.toMatchObject({ code: 'validation.failed' });
 
     // Refund (payments:refund — the spec-mandated SENSITIVE key): the missing
     // permission is refused; the holder refunds and the audit row is written.
     await expect(payments.refundPayment(T, actor(cashierUser), { paymentId: cash.payment.id })).rejects.toMatchObject({ code: 'forbidden' });
-    const refunded = await payments.refundPayment(T, actor(refundUser), { paymentId: cash.payment.id });
+    const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: cash.payment.id });
     expect(refunded.status).toBe('refunded');
     expect(refunded.voidedById).toBeNull(); // refund evidence lives in audit_log
     const audit = await owner.query<{ action: string }>(
@@ -636,13 +639,13 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // the ledger the order is NOT 'every payment refunded' — it reopens
     // (balance unpaid, re-collection required).
     const reCollected = await payments.recordPayment(T, { orderId: order.order.id, paymentMethodId: methodCardId, cashierUserId: till.cashierId, amountText: '20.00' });
-    await payments.refundPayment(T, actor(refundUser), { paymentId: reCollected.payment.id });
+    await payments.refundPayment(T, actor(till.cashier), { paymentId: reCollected.payment.id });
     expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T])).rows[0]?.payment_status).toBe('open');
 
     // A clean order whose EVERY payment is refunded ⇒ 'refunded' (full return of funds).
     const cleanOrder = await newOrder(till);
     const cleanPayment = await payments.recordPayment(T, { orderId: cleanOrder.order.id, paymentMethodId: methodCardId, cashierUserId: till.cashierId, amountText: '46.00' });
-    await payments.refundPayment(T, actor(refundUser), { paymentId: cleanPayment.payment.id });
+    await payments.refundPayment(T, actor(till.cashier), { paymentId: cleanPayment.payment.id });
     expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [cleanOrder.order.id, T])).rows[0]?.payment_status).toBe('refunded');
   });
 
@@ -654,10 +657,41 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       shiftId: till.shiftId, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
       closedAt: new Date(), closeCounts: [{ denominationValue: '246.00', quantity: 1 }], notes: null,
     });
-    await expect(payments.refundPayment(T, actor(refundUser), { paymentId: recorded.payment.id }))
+    // The acting cashier holds no OPEN shift at the order's branch anymore —
+    // the engine's same-branch reversal gate refuses with the explicit error.
+    await expect(payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id }))
+      .rejects.toBeInstanceOf(CashierShiftRequiredError);
+    await expect(payments.voidPayment(T, actor(till.cashier), { paymentId: recorded.payment.id, reason: 'x' }))
+      .rejects.toBeInstanceOf(CashierShiftRequiredError);
+    // Structurally, whatever the code path: the DB guard also refuses the
+    // lifecycle change once the shift is closed (the Z-Report numbers are final).
+    await expect(withApp(T, (q) => q.query("UPDATE payments SET status = 'refunded' WHERE id = $1 AND tenant_id = $2", [recorded.payment.id, T])))
       .rejects.toMatchObject({ code: '23514' });
-    await expect(payments.voidPayment(T, actor(refundUser), { paymentId: recorded.payment.id, reason: 'x' }))
-      .rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('a reversal is attributed to the SAME branch: an actor whose open shift is elsewhere is refused (fail-closed)', async () => {
+    const tillA = await setupTill();
+    const order = await newOrder(tillA);
+    const recorded = await payments.recordPayment(T, { orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: tillA.cashierId, amountText: '46.00' });
+
+    // A senior cashier holding the permissions AND a standing open shift —
+    // but at a DIFFERENT branch: the reversal of branch-A money must never be
+    // attributed to another branch's drawer.
+    const tillB = await setupTill();
+    await expect(payments.refundPayment(T, actor(tillB.cashier), { paymentId: recorded.payment.id }))
+      .rejects.toBeInstanceOf(CashierShiftRequiredError);
+    await expect(payments.voidPayment(T, actor(tillB.cashier), { paymentId: recorded.payment.id, reason: 'فرع خاطئ' }))
+      .rejects.toBeInstanceOf(CashierShiftRequiredError);
+
+    // Nothing moved: the payment is still completed and the order still paid.
+    const stored = await owner.query<{ status: string }>('SELECT status FROM payments WHERE id = $1 AND tenant_id = $2', [recorded.payment.id, T]);
+    expect(row(stored.rows).status).toBe('completed');
+    expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T])).rows[0]?.payment_status).toBe('paid');
+
+    // The same-branch actor — the till-A senior cashier standing in the open
+    // shift at the order's branch — performs the reversal fine.
+    const refunded = await payments.refundPayment(T, actor(tillA.cashier), { paymentId: recorded.payment.id });
+    expect(refunded.status).toBe('refunded');
   });
 
   it('the Phase-7 void flow after a payment reversal: Void Payment → Reopen → void item → re-collection', async () => {
@@ -677,7 +711,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
     // Void Payment (payments:void) ⇒ the order REOPENS for re-collection.
     const payment = await owner.query<{ id: string }>('SELECT id FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id]);
-    await payments.voidPayment(T, actor(refundUser), { paymentId: row(payment.rows).id, reason: 'خطأ في الطلب' });
+    await payments.voidPayment(T, actor(till.cashier), { paymentId: row(payment.rows).id, reason: 'خطأ في الطلب' });
     expect((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T])).rows[0]?.payment_status).toBe('open');
 
     // NOW the Phase-7 item void goes through on the reopened order…
