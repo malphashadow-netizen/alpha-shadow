@@ -381,9 +381,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // 5×10.00 + 3×50.00 = 200.00 SAR.
     const till = await setupTill([{ denominationValue: '10.00', quantity: 5 }, { denominationValue: '50.00', quantity: 3 }]);
     const shift = await shifts.xReport(T, till.shiftId);
-    expect(shift.shift.startingFloat).toBe('200.00');
+    expect(shift.shift.startingFloat).toBe('200.0000');
     expect(shift.counts.filter((c) => c.countType === 'open')).toHaveLength(2);
-    expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.00', '50.00']);
+    expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.0000', '50.0000']);
 
     // A post-hoc count row that breaks the sum is rejected AT COMMIT (the
     // deferred constraint trigger), whatever the code path.
@@ -421,9 +421,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       closedAt: new Date(), closeCounts: [{ denominationValue: '250.00', quantity: 1 }], notes: 'جرد صحي',
     });
     expect(closed.status).toBe('closed');
-    expect(closed.countedCash).toBe('250.00');
-    expect(closed.recordedCashSales).toBe('46.00');
-    expect(closed.variance).toBe('4.00');
+    expect(closed.countedCash).toBe('250.0000');
+    expect(closed.recordedCashSales).toBe('46.0000');
+    expect(closed.variance).toBe('4.0000');
     expect(closed.varianceType).toBe('overage');
 
     // #5: after the close, the row is immutable — UPDATE and DELETE are rejected.
@@ -453,7 +453,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(x1.shift.status).toBe('open');
     expect(x1.shift.countedCash).toBeNull();
     expect(x1.shift.recordedCashSales).toBeNull();
-    expect(x1.recordedCashSales).toBe('46.00'); // live figure, nothing stored
+    expect(x1.recordedCashSales).toBe('46.0000'); // live figure, nothing stored
     expect(x1.computedVariance).toBe('-146.00'); // live: counted 0 − float 100 − sales 46
     expect(x1.computedVarianceType).toBe('shortage');
     const after = await owner.query<{ sig: string }>(signatureSql, [till.shiftId, T]);
@@ -464,7 +464,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       shiftId: till.shiftId, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
       closedAt: new Date(), closeCounts: [{ denominationValue: '145.00', quantity: 1 }], notes: null,
     });
-    expect(closed.variance).toBe('-1.00');
+    expect(closed.variance).toBe('-1.0000');
     expect(closed.varianceType).toBe('shortage');
   });
 
@@ -541,9 +541,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '50.00',
     });
     expect(recorded.changeGivenMinor).toBe(400n);
-    expect(recorded.payment.amount).toBe('50.00');
-    expect(recorded.payment.amountInBaseCurrency).toBe('46.00');
-    expect(recorded.payment.changeGivenAmount).toBe('4.00');
+    expect(recorded.payment.amount).toBe('50.0000');
+    expect(recorded.payment.amountInBaseCurrency).toBe('46.0000');
+    expect(recorded.payment.changeGivenAmount).toBe('4.0000');
     expect(recorded.payment.exchangeRateSnapshot).toBeNull();
     expect(recorded.payment.status).toBe('completed');
     expect(recorded.remainingBalanceMinor).toBe(0n);
@@ -564,10 +564,10 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const recorded = await payments.recordPayment(T, {
       orderId: order.order.id, paymentMethodId: methodUsdId, cashierUserId: till.cashierId, amountText: '20.00',
     });
-    expect(recorded.payment.amount).toBe('20.00');
+    expect(recorded.payment.amount).toBe('20.0000');
     expect(recorded.payment.exchangeRateSnapshot).toBe('3.75000000');
-    expect(recorded.payment.amountInBaseCurrency).toBe('46.00');
-    expect(recorded.payment.changeGivenAmount).toBe('29.00');
+    expect(recorded.payment.amountInBaseCurrency).toBe('46.0000');
+    expect(recorded.payment.changeGivenAmount).toBe('29.0000');
     expect(recorded.changeGivenMinor).toBe(2900n);
     expect(recorded.remainingBalanceMinor).toBe(0n);
 
@@ -774,7 +774,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       managerOverride: { managerUserId: overrideManager.userId, managerOverridePin: overrideManager.pin },
     });
     expect(zeroed.requiredManagerOverride).toBe(true);
-    expect(zeroed.discountAmountApplied).toBe('40.00');
+    expect(zeroed.discountAmountApplied).toBe('40.0000');
     expect(zeroed.managerOverrideAttemptId).not.toBeNull();
     const attempt = await owner.query<{ outcome: string; initiating_actor_user_id: string; order_id: string; context_type: string }>(
       'SELECT outcome, initiating_actor_user_id, order_id, context_type FROM manager_override_attempts WHERE id = $1 AND tenant_id = $2',
@@ -851,7 +851,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order.order.id, mechanism: 'manual', discountKind: 'percentage', discountValueText: '10.0000',
     });
     expect(applied.requiredManagerOverride).toBe(false);
-    expect(applied.discountAmountApplied).toBe('4.00');
+    expect(applied.discountAmountApplied).toBe('4.0000');
     expect(applied.managerOverrideAttemptId).toBeNull();
 
     // The DB re-verifies the caps: a non-escalated row above the cap is refused.
@@ -900,7 +900,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       managerOverride: { managerUserId: overrideManager.userId, managerOverridePin: overrideManager.pin },
     });
     expect(escalated.requiredManagerOverride).toBe(true);
-    expect(escalated.discountAmountApplied).toBe('18.00');
+    expect(escalated.discountAmountApplied).toBe('18.0000');
     expect(escalated.managerOverrideAttemptId).not.toBeNull();
 
     // A fixed 5.00 (12.5% of the basis, inside BOTH caps) never escalates.
@@ -909,7 +909,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order2.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '5.0000',
     });
     expect(plain.requiredManagerOverride).toBe(false);
-    expect(plain.discountAmountApplied).toBe('5.00');
+    expect(plain.discountAmountApplied).toBe('5.0000');
   });
 
   it('#3 stacking: rejected while disabled, coupon → manual while enabled, tax on the discounted base', async () => {
@@ -921,7 +921,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const couponApplied = await discounts.applyDiscount(T, actor(discountUser), {
       orderId: order.order.id, mechanism: 'coupon', discountKind: 'percentage', discountValueText: '10.0000', couponCode: coupon.code,
     });
-    expect(couponApplied.discountAmountApplied).toBe('4.00');
+    expect(couponApplied.discountAmountApplied).toBe('4.0000');
     expect(couponApplied.mechanism).toBe('coupon');
     // …and the SECOND is rejected outright (the DB stacking gate).
     await expect(discounts.applyDiscount(T, actor(discountUser), {
@@ -939,7 +939,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       const manual = await discounts.applyDiscount(T, actor(discountUser), {
         orderId: order2.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '5.0000',
       }); // −5.00 of the REMAINING 36.00 ⇒ 31.00
-      expect(manual.discountAmountApplied).toBe('5.00');
+      expect(manual.discountAmountApplied).toBe('5.0000');
 
       // Tax is recomputed on the DISCOUNTED bases: the 9.00 total discount is
       // allocated proportionally across the lines (A 25.00→19.37/19.38,
@@ -976,7 +976,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const applied = await discounts.applyDiscount(T, actor(discountUser), {
       orderId: order.order.id, mechanism: 'coupon', discountKind: 'fixed_amount', discountValueText: '5.0000', couponCode: single.code,
     });
-    expect(applied.discountAmountApplied).toBe('5.00');
+    expect(applied.discountAmountApplied).toBe('5.0000');
     const uses = await owner.query<{ uses_count: number }>('SELECT uses_count FROM coupons WHERE id = $1 AND tenant_id = $2', [single.id, T]);
     expect(row(uses.rows).uses_count).toBe(1);
     // …the second use is refused (engine coupon check; the DB re-verifies).
@@ -1026,12 +1026,15 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const sar = await owner.query<{ value: string; label: string }>(
       "SELECT value::text AS value, label FROM currency_denominations cd WHERE cd.currency_code = 'SAR' ORDER BY cd.value",
     );
-    expect(sar.rows.map((r) => r.value)).toContain('100.00');
+    expect(sar.rows.map((r) => r.value)).toContain('100.0000');
     expect(sar.rows.length).toBeGreaterThanOrEqual(10);
     const kwd = await owner.query<{ value: string }>(
       "SELECT value::text AS value FROM currency_denominations cd WHERE cd.currency_code = 'KWD' ORDER BY cd.value",
     );
-    // Only 2-decimal-representable KWD denominations exist (spec: NUMERIC(18,2)).
-    expect(kwd.rows.map((r) => r.value)).toEqual(['0.05', '0.10', '0.25', '0.50', '1.00', '5.00', '10.00', '20.00']);
+    // B1 (migration 0044): the registry holds 4-decimal scale and the KWD
+    // sub-cent circulation coins (5/10/20 fils) the NUMERIC(18,2) era excluded.
+    expect(kwd.rows.map((r) => r.value)).toEqual([
+      '0.0050', '0.0100', '0.0200', '0.0500', '0.1000', '0.2500', '0.5000', '1.0000', '5.0000', '10.0000', '20.0000',
+    ]);
   });
 });

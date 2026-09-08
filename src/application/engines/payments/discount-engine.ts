@@ -43,6 +43,7 @@ import {
   minorToDecimalText,
   nonNegativeDecimalTextToMinor,
   percentTextToDbps,
+  storageMinorUnitDigits,
 } from '../../../shared/decimal-text.ts';
 import {
   CouponUnavailableError,
@@ -53,7 +54,7 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../../shared/errors.ts';
-import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
+import { currencyCode } from '../../../shared/money.ts';
 import { computeDiscountStage, discountOverrideRequirement, parseDiscountCaps, parseDiscountRequest } from './discount-math.ts';
 import { computeOrderTotals } from './order-totals.ts';
 
@@ -106,7 +107,7 @@ export class DiscountEngine {
     const pre = await this.dependencies.store.run(tenantId, async (scope) => {
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
-      const baseDigits = minorUnitScale(currencyCode(snapshot.baseCurrencyCode));
+      const baseDigits = storageMinorUnitDigits(currencyCode(snapshot.baseCurrencyCode));
       const totals = computeOrderTotals(snapshot);
       const remainingSubtotal = totals.subtotalMinor - totals.discountTotalMinor;
       const request = parseDiscountRequest(input.discountKind, input.discountValueText, baseDigits);
@@ -198,7 +199,7 @@ export class DiscountEngine {
         couponId,
         discountKind: input.discountKind,
         discountValue: canonicalValueText(input.discountKind, input.discountValueText),
-        discountAmountApplied: minorToDecimalText(stage.appliedMinor, 2),
+        discountAmountApplied: minorToDecimalText(stage.appliedMinor, pre.baseDigits),
         requiredManagerOverride: requirement.required,
         managerOverrideAttemptId,
         appliedBy: actor.userId,

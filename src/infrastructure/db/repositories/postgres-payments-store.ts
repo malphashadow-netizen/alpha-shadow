@@ -40,8 +40,8 @@ import type {
 } from '../../../domain/contracts/inventory.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { insertStockMovementRow } from './stock-ledger-rows.ts';
-import { decimalTextToMinor } from '../../../shared/decimal-text.ts';
-import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
+import { decimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
+import { currencyCode } from '../../../shared/money.ts';
 
 interface PaymentMethodRow {
   id: string;
@@ -212,7 +212,7 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       );
       const h = header.rows[0];
       if (h === undefined) return null;
-      const baseDigits = minorUnitScale(currencyCode(h.base_currency));
+      const baseDigits = storageMinorUnitDigits(currencyCode(h.base_currency));
 
       const items = await q.query<{ id: string; unit_price_minor: string; quantity: number }>(
         `SELECT id, unit_price_minor, quantity FROM order_items

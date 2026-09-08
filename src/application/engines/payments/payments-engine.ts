@@ -37,7 +37,7 @@ import type {
 import type { OrderPaymentStatus } from '../../../domain/contracts/orders.ts';
 import { STOCK_QUANTITY_SCALE } from '../../../domain/contracts/inventory.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
-import { minorToDecimalText, nonNegativeDecimalTextToMinor } from '../../../shared/decimal-text.ts';
+import { minorToDecimalText, nonNegativeDecimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
 import {
   CashierShiftRequiredError,
   NotFoundError,
@@ -46,7 +46,7 @@ import {
   PaymentStatusTransitionError,
   ValidationError,
 } from '../../../shared/errors.ts';
-import { convertMoneyAtRate, currencyCode, minorUnitScale, money } from '../../../shared/money.ts';
+import { convertMoneyAtRate, currencyCode, money } from '../../../shared/money.ts';
 import { computeOrderTotals } from './order-totals.ts';
 
 const PAYMENTS_VOID_PERMISSION_KEY = 'payments:void';
@@ -65,7 +65,8 @@ export interface RecordPaymentInput {
   /**
    * The tendered amount as canonical decimal text, in the payment currency:
    * the method's foreign currency for foreign_currency_cash, else the branch
-   * base currency. Scale ≤ 2 fraction digits (the NUMERIC(18,2) column).
+   * base currency. Scale ≤ the payment currency's ISO 4217 minor-unit digits
+   * (B1: the NUMERIC(18,4) columns hold every ISO scale natively).
    */
   readonly amountText: string;
   /** Optional explicit change (base-currency minor units); default: auto-computed from the balance. */
@@ -125,31 +126,36 @@ export class PaymentsEngine {
       }
 
       const baseCurrency = currencyCode(snapshot.baseCurrencyCode);
-      const baseDigits = minorUnitScale(baseCurrency);
+      const baseDigits = storageMinorUnitDigits(baseCurrency);
       const isForeignCash = method.type === 'foreign_currency_cash';
       const isCashLike = method.type === 'cash' || isForeignCash;
 
-      // Gross tendered value in base-currency minor units.
+      // Gross tendered value in base-currency minor units. The tendered
+      // amount is denominated in the PAYMENT currency (B1): parsed and stored
+      // at that currency's own ISO scale — never a hardcoded column scale.
       let grossBaseMinor: bigint;
+      let tenderedMinor: bigint;
+      let tenderedDigits: number;
       let exchangeRateSnapshot: string | null = null;
       if (isForeignCash) {
         if (method.fixedExchangeRate === null || method.currencyCode === null) {
           throw new PaymentMethodUnavailableError(method.id, 'foreign cash method without a fixed rate/currency');
         }
-        // Payment amounts are stored at NUMERIC(18,2) — the source scale of
-        // the conversion is the COLUMN scale (2), whatever the currency's ISO
-        // minor-unit digits.
-        const tenderedAtColumnScale = nonNegativeDecimalTextToMinor(input.amountText, 2, 'amount');
+        const foreignCurrency = currencyCode(method.currencyCode);
+        tenderedDigits = storageMinorUnitDigits(foreignCurrency);
+        tenderedMinor = nonNegativeDecimalTextToMinor(input.amountText, tenderedDigits, 'amount');
         exchangeRateSnapshot = method.fixedExchangeRate;
         grossBaseMinor = convertMoneyAtRate(
-          money(tenderedAtColumnScale, currencyCode(method.currencyCode)),
+          money(tenderedMinor, foreignCurrency),
           method.fixedExchangeRate,
           baseCurrency,
           baseDigits,
-          2,
+          tenderedDigits,
         ).amountMinor;
       } else {
-        grossBaseMinor = nonNegativeDecimalTextToMinor(input.amountText, baseDigits, 'amount');
+        tenderedDigits = baseDigits;
+        tenderedMinor = nonNegativeDecimalTextToMinor(input.amountText, baseDigits, 'amount');
+        grossBaseMinor = tenderedMinor;
       }
 
       // Change: always in the branch base currency, only on cash methods.
@@ -178,10 +184,10 @@ export class PaymentsEngine {
         id: randomUUID(),
         orderId: input.orderId,
         paymentMethodId: method.id,
-        amount: minorToDecimalText(nonNegativeDecimalTextToMinor(input.amountText, 2, 'amount'), 2),
-        amountInBaseCurrency: minorToDecimalText(netBaseMinor, 2),
+        amount: minorToDecimalText(tenderedMinor, tenderedDigits),
+        amountInBaseCurrency: minorToDecimalText(netBaseMinor, baseDigits),
         exchangeRateSnapshot,
-        changeGivenAmount: isCashLike && changeMinor > 0n ? minorToDecimalText(changeMinor, 2) : null,
+        changeGivenAmount: isCashLike && changeMinor > 0n ? minorToDecimalText(changeMinor, baseDigits) : null,
         shiftId: shift.id,
         createdBy: input.cashierUserId,
       });

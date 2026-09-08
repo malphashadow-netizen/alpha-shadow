@@ -2,7 +2,8 @@
  * Canonical decimal-text ↔ BigInt minor-unit conversion (Phase 8).
  *
  * The Phase-8 payments schema stores money in PostgreSQL NUMERIC columns
- * (NUMERIC(18,2)/(18,4)/(18,8) per the closed spec). PostgreSQL returns NUMERIC
+ * (NUMERIC(18,4)/(18,8) since B1 widened the (18,2) money columns to hold
+ * every ISO 4217 scale natively). PostgreSQL returns NUMERIC
  * as exact decimal TEXT; this module is the ONE place that text crosses into
  * the engine's BigInt minor-unit world — no JavaScript number ever touches an
  * amount.
@@ -13,18 +14,45 @@
  *    rejected — a numeric that somehow took that shape can never silently
  *    convert.
  *  - `digits` is the target minor-unit scale (0–8), stated EXPLICITLY at
- *    every call site (ISO currency scale for base-currency math; 2 for the
- *    spec's NUMERIC(18,2) payment columns).
+ *    every call site. For Phase-8 money-major storage the scale is ALWAYS
+ *    storageMinorUnitDigits(currency) (the row currency's own ISO scale) —
+ *    never a hardcoded 2 (B1: hardcoded 2 inflated KWD 10x, shrank JPY 100x).
  *  - When the fraction has more digits than the target scale, the value is
  *    rounded ONCE with round-half-to-even (banker's) — the same single
  *    rounding rule as shared/money.ts.
  */
 
 import { ValidationError } from './errors.ts';
-import { divideRoundHalfToEven } from './money.ts';
+import { divideRoundHalfToEven, minorUnitScale, type CurrencyCode } from './money.ts';
 
 const CANONICAL_DECIMAL = /^(0|[1-9]\d*)(?:\.(\d+))?$/;
 const MAX_SCALE = 8;
+
+/**
+ * Maximum fraction digits the Phase-8 money-major storage columns hold
+ * (NUMERIC(18,4) since migration 0044 — 4 is the largest ISO 4217 minor
+ * scale of any active currency: CLF/UYW; every other active code is 0–3).
+ */
+export const STORAGE_MAX_FRACTION_DIGITS = 4;
+
+/**
+ * The storage scale for money-major values denominated in `currency`: the
+ * currency's own ISO 4217 minor-unit digits (KWD → 3, SAR/USD → 2, JPY → 0).
+ * The B1 boundary — every Phase-8 format/parse site states this explicitly
+ * instead of a hardcoded 2, so non-2-decimal currencies round-trip exactly.
+ * The STORAGE_MAX_FRACTION_DIGITS pin fails closed if the ISO table ever
+ * gains a code the NUMERIC(18,4) columns cannot represent.
+ */
+export function storageMinorUnitDigits(currency: CurrencyCode): number {
+  const digits = minorUnitScale(currency);
+  if (digits > STORAGE_MAX_FRACTION_DIGITS) {
+    throw new ValidationError(
+      `Currency "${currency}" needs ${String(digits)} fraction digits; storage holds ${String(STORAGE_MAX_FRACTION_DIGITS)}`,
+      'currency',
+    );
+  }
+  return digits;
+}
 
 function mustMatch(text: string, field: string): RegExpExecArray {
   const match = CANONICAL_DECIMAL.exec(text);

@@ -39,7 +39,8 @@ against its reduced base. Only EXCLUSIVE taxes enter the total.
   the `payment_methods` trigger (0033).
 * Payments never exceed the remaining balance (engine fail-closed).
 * Percentage discounts are stored at NUMERIC(18,4) precision
-  (`dbps` internally); amounts at NUMERIC(18,2) minor units.
+  (`dbps` internally); money amounts at NUMERIC(18,4) parsed and formatted
+  at the owning currency's ISO 4217 scale (B1: KWD keeps 3 decimals, JPY 0).
 
 ## Manager-override evidence is context-scoped (locked)
 
