@@ -269,3 +269,23 @@ checks these tables, not just tables discovered by a tenant_id column.
 
 Run `roles/009_phase8_payments.sql` separately with DBA authority after 0035
 (same manual provisioning contract as `roles/006`–`roles/008`).
+
+## Phase 9: 0037–0041 (inventory, recipes, stock ledger)
+
+| Migration | Purpose |
+| --- | --- |
+| 0037 | `inventory_items` (per-branch stock: localized name, free-text `base_unit`, `NUMERIC(18,4)` balance, nullable low-stock threshold, `is_active`) + the global `inventory:read` / `inventory:receive` / `inventory:adjust` (sensitive) permission keys |
+| 0038 | `unit_conversions` (tenant-level purchase→base factors; receiving-time use ONLY, never on the order-creation hot path) |
+| 0039a | `menu_item_recipes` (real FKs to `menu_items` + `inventory_items`; `quantity_required` always in base units) |
+| 0039b | `modifier_recipes` (same shape, real FK to `modifiers`) + the `recipe_ingredients` read view (`UNION ALL`, `security_invoker = true` so the caller's RLS applies — PostgreSQL 18) |
+| 0040 | `stock_override_claims` (single-use claim: one override attempt authorizes exactly one order — the PK makes double-claim structurally impossible) + the append-only `stock_movements` ledger (per-kind sign CHECKs, order-link CHECKs, override-scope CHECK) + `validate_stock_movement` (branch match, active actor, inventory-key assertions for manual moves, 0036-shaped override evidence via the claim, the MANDATORY negative-balance gate with `FOR UPDATE` row lock) + `apply_stock_movement` (the ONLY writer of `current_quantity`) + `guard_inventory_item_writes` |
+| 0041 | `manager_override_attempts.context_type` widened with `'stock_override'` under an explicit stable CHECK name; lockout tables untouched (cross-context, same rationale as 0036); no new index (the 0036 evidence index already keys on `context_type`) |
+
+Balance design: `current_quantity` carries NO non-negative CHECK on purpose — a
+manager-approved sale into shortage legitimately drives it below zero (a
+shortage signal for reports). Negativity WITHOUT a `manager_override_id` is
+rejected by the trigger itself (`stock: insufficient quantity…`, `23514`,
+stable prefix — the orders store maps it to `InsufficientStockError`).
+
+Run `roles/010_phase9_inventory.sql` separately with DBA authority after 0040
+(same manual provisioning contract as `roles/006`–`roles/009`).
