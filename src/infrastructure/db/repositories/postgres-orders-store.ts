@@ -30,8 +30,24 @@ import type {
 } from '../../../domain/contracts/orders.ts';
 import { parseOrderBehaviorFlags } from '../../../domain/contracts/orders.ts';
 import type { LocalizedText } from '../../../domain/contracts/catalog.ts';
+import type {
+  ClaimStockOverrideInput,
+  InsertStockMovementInput,
+  InventoryItemRecord,
+  RecipeOwnerRef,
+  RecipeOwnerType,
+  RecipeRequirementLine,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+} from '../../../domain/contracts/inventory.ts';
 import type { TaxResolution } from '../../../domain/contracts/tax.ts';
-import { NotFoundError, OrderWorkflowNotConfiguredError, WorkflowStateInUseError } from '../../../shared/errors.ts';
+import {
+  InsufficientStockError,
+  NotFoundError,
+  OrderWorkflowNotConfiguredError,
+  WorkflowStateInUseError,
+} from '../../../shared/errors.ts';
+import { insertStockMovementRow, mapInventoryItem, type InventoryItemRow } from './stock-ledger-rows.ts';
 import { TaxResolutionEngine } from '../../../application/engines/tax/tax-resolution-engine.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
@@ -156,6 +172,24 @@ function mapOutboxEvent(r: OutboxRow): OrderOutboxEvent {
     payload: r.payload,
     createdAt: r.created_at,
   };
+}
+
+/**
+ * Stable prefix of the 0040 negative-balance rejection
+ * ('stock: insufficient quantity …'). Pinned here AND in the migration AND in
+ * the unit test — never reword one without the other two.
+ */
+export const STOCK_SHORTAGE_MESSAGE_PREFIX = 'stock: insufficient quantity';
+
+/**
+ * True only for the trigger's shortage rejection: code 23514 AND the stable
+ * prefix. Every other database error (including any other 23514) propagates
+ * untouched — fail-closed, never mislabelled.
+ */
+export function isStockShortageTriggerError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if (!('code' in error) || !('message' in error)) return false;
+  return error.code === '23514' && typeof error.message === 'string' && error.message.startsWith(STOCK_SHORTAGE_MESSAGE_PREFIX);
 }
 
 export interface PostgresOrdersStoreDependencies {
@@ -655,6 +689,104 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         notes: r.notes,
         occurredAt: r.occurred_at,
       };
+    },
+
+    async loadRecipeRequirements(tid: string, owners: readonly RecipeOwnerRef[]): Promise<readonly RecipeRequirementLine[]> {
+      if (owners.length === 0) return [];
+      // One statement over the recipe_ingredients view (the single read
+      // source for products + modifiers); tuple-IN, one round trip.
+      const values: string[] = [tid];
+      const tuples = owners.map((owner) => {
+        values.push(owner.ownerType, owner.ownerId);
+        return `($${values.length - 1}, $${values.length})`;
+      });
+      const result = await q.query<{
+        owner_type: RecipeOwnerType;
+        owner_id: string;
+        inventory_item_id: string;
+        quantity_required: string;
+      }>(
+        `SELECT owner_type, owner_id, inventory_item_id, quantity_required
+           FROM recipe_ingredients WHERE tenant_id = $1 AND (owner_type, owner_id) IN (${tuples.join(', ')})`,
+        values,
+      );
+      return result.rows.map((r) => ({
+        ownerType: r.owner_type,
+        ownerId: r.owner_id,
+        inventoryItemId: r.inventory_item_id,
+        quantityRequired: r.quantity_required,
+      }));
+    },
+
+    async loadInventoryItems(tid: string, branchId: string, inventoryItemIds: readonly string[]): Promise<readonly InventoryItemRecord[]> {
+      if (inventoryItemIds.length === 0) return [];
+      const result = await q.query<InventoryItemRow>(
+        `SELECT id, tenant_id, branch_id, name, base_unit, current_quantity, low_stock_threshold, is_active
+           FROM inventory_items WHERE tenant_id = $1 AND branch_id = $2 AND id = ANY($3::uuid[])`,
+        [tid, branchId, inventoryItemIds],
+      );
+      return result.rows.map(mapInventoryItem);
+    },
+
+    async insertStockMovement(tid: string, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
+      try {
+        return await insertStockMovementRow(q, tid, movement);
+      } catch (error: unknown) {
+        // The shortage gate lives in the trigger (the backstop for races);
+        // map it to the cashier-facing error (same discipline as
+        // rethrowCatalogWriteError — code + stable message prefix, nothing
+        // else; every other error propagates untouched).
+        if (isStockShortageTriggerError(error)) {
+          throw new InsufficientStockError(movement.inventoryItemDisplayName, movement.inventoryItemId, movement.branchId, {
+            cause: error instanceof Error ? error : undefined,
+          });
+        }
+        throw error;
+      }
+    },
+
+    async insertStockOverrideClaim(tid: string, claim: ClaimStockOverrideInput): Promise<void> {
+      // Single-use claim (0040): the PRIMARY KEY rejects any second claim of
+      // the same attempt (23505, fail-closed) — the engine only ever claims
+      // the attempt id its own verifyLiveChallengeWithId call just returned.
+      await q.query('INSERT INTO stock_override_claims (manager_override_id, tenant_id, order_id) VALUES ($1, $2, $3)', [
+        claim.managerOverrideId,
+        tid,
+        claim.orderId,
+      ]);
+    },
+
+    async loadSaleDeductionsForOrderItems(tid: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]> {
+      if (orderItemIds.length === 0) return [];
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string; total_deducted: string }>(
+        `SELECT order_item_id, inventory_item_id, SUM(quantity_delta) AS total_deducted
+           FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'sale_deduction'
+          GROUP BY order_item_id, inventory_item_id`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({
+        orderItemId: r.order_item_id,
+        inventoryItemId: r.inventory_item_id,
+        totalDeducted: r.total_deducted,
+      }));
+    },
+
+    async loadItemsWithKitchenTicketFired(tid: string, orderItemIds: readonly string[]): Promise<readonly string[]> {
+      if (orderItemIds.length === 0) return [];
+      // "Has this item EVER been in a ticket-firing state" — across the FULL
+      // immutable event history (initial event included), resolved through
+      // the tenant's workflow states to the platform kind flags.
+      const result = await q.query<{ order_item_id: string }>(
+        `SELECT DISTINCT e.order_item_id
+           FROM order_item_status_events e
+           JOIN tenant_order_workflow_states s ON s.id = e.to_status_kind_id AND s.tenant_id = e.tenant_id
+           JOIN order_status_kinds k ON k.code = s.kind_code
+          WHERE e.tenant_id = $1 AND e.order_item_id = ANY($2::uuid[])
+            AND (k.behavior_flags ->> 'fires_kitchen_ticket')::boolean IS TRUE`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => r.order_item_id);
     },
   };
 }

@@ -32,7 +32,14 @@ import type {
   UpdatePaymentMethodInput,
   UserDiscountCaps,
 } from '../../../domain/contracts/payments.ts';
+import type {
+  InsertStockMovementInput,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+  WasteRefundKey,
+} from '../../../domain/contracts/inventory.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
+import { insertStockMovementRow } from './stock-ledger-rows.ts';
 import { decimalTextToMinor } from '../../../shared/decimal-text.ts';
 import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
 
@@ -423,6 +430,47 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       const r = result.rows[0];
       if (r === undefined) throw new Error(`Payment method ${paymentMethodId} could not be updated`);
       return mapMethod(r);
+    },
+
+    async loadNonVoidedOrderItemIds(tid, orderId): Promise<readonly string[]> {
+      // Refund waste covers the live lines only: voided lines were already
+      // restored-or-wasted by the void path (never double-counted).
+      const result = await q.query<{ id: string }>(
+        'SELECT id FROM order_items WHERE tenant_id = $1 AND order_id = $2 AND NOT is_voided ORDER BY created_at ASC, id ASC',
+        [tid, orderId],
+      );
+      return result.rows.map((r) => r.id);
+    },
+
+    async loadSaleDeductionsForOrderItems(tid, orderItemIds): Promise<readonly SaleDeductionAggregate[]> {
+      if (orderItemIds.length === 0) return [];
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string; total_deducted: string }>(
+        `SELECT order_item_id, inventory_item_id, SUM(quantity_delta) AS total_deducted
+           FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'sale_deduction'
+          GROUP BY order_item_id, inventory_item_id`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({
+        orderItemId: r.order_item_id,
+        inventoryItemId: r.inventory_item_id,
+        totalDeducted: r.total_deducted,
+      }));
+    },
+
+    async loadWasteRefundKeys(tid, orderId): Promise<readonly WasteRefundKey[]> {
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string }>(
+        `SELECT order_item_id, inventory_item_id FROM stock_movements
+          WHERE tenant_id = $1 AND order_id = $2 AND movement_type = 'waste_refund'`,
+        [tid, orderId],
+      );
+      return result.rows.map((r) => ({ orderItemId: r.order_item_id, inventoryItemId: r.inventory_item_id }));
+    },
+
+    async insertStockMovement(tid, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
+      // Waste rows carry a ZERO delta and can never trip the sale-only
+      // shortage gate — plain insert, no error mapping.
+      return insertStockMovementRow(q, tid, movement);
     },
   };
 }

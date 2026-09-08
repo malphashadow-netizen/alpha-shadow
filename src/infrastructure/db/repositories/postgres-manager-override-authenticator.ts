@@ -44,8 +44,17 @@
  * PIN throws ManagerOverrideAuthenticationError the same way. Both errors are
  * raised outside the tenant transaction because withTenantContext rolls back
  * on any throw — the audit/counters commit first, the error surfaces after.
+ *
+ * Phase 9 adds verifyLiveChallengeWithId: the IDENTICAL transaction (same
+ * rate-limiting semantics, same errors) that additionally returns the attempt
+ * row id, so a creation-time stock override can bind its single-use claim to
+ * the exact attempt it just verified — no "latest attempt" lookup, no race.
  */
-import type { ManagerOverrideAuthenticator, ManagerOverrideContextType } from '../../../domain/contracts/orders.ts';
+import type {
+  ManagerOverrideAuthenticator,
+  ManagerOverrideContextType,
+  VerifiedManagerOverride,
+} from '../../../domain/contracts/orders.ts';
 import { verifyPin } from '../../../shared/auth/pin.ts';
 import { ManagerOverrideAuthenticationError, ManagerOverrideRateLimitedError } from '../../../shared/errors.ts';
 import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
@@ -98,7 +107,49 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
     contextType: ManagerOverrideContextType,
     orderId?: string,
   ): Promise<Date> {
-    const decision = await this.dependencies.withTenantContext(tenantId, async (q) => {
+    const { decision } = await this.runChallenge(
+      tenantId,
+      managerUserId,
+      managerOverridePin,
+      initiatingActorUserId,
+      contextType,
+      orderId,
+    );
+    return resolveChallengeDecision(decision);
+  }
+
+  async verifyLiveChallengeWithId(
+    tenantId: string,
+    managerUserId: string,
+    managerOverridePin: string,
+    initiatingActorUserId: string,
+    contextType: ManagerOverrideContextType,
+    orderId?: string,
+  ): Promise<VerifiedManagerOverride> {
+    const { decision, attemptId } = await this.runChallenge(
+      tenantId,
+      managerUserId,
+      managerOverridePin,
+      initiatingActorUserId,
+      contextType,
+      orderId,
+    );
+    return { authenticatedAt: resolveChallengeDecision(decision), attemptId };
+  }
+
+  /**
+   * The single challenge transaction. Steps 1–7 above are UNMODIFIED; the
+   * only addition is RETURNING the attempt row id alongside the decision.
+   */
+  private runChallenge(
+    tenantId: string,
+    managerUserId: string,
+    managerOverridePin: string,
+    initiatingActorUserId: string,
+    contextType: ManagerOverrideContextType,
+    orderId?: string,
+  ): Promise<{ readonly decision: ChallengeDecision; readonly attemptId: string }> {
+    return this.dependencies.withTenantContext(tenantId, async (q) => {
       // ONE clock source for the whole transaction: window_started_at is
       // written as a JS parameter while created_at/locked_until come from the
       // DB now() — using the DB clock here keeps the >= comparisons exact.
@@ -123,8 +174,14 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
         // Refuse IMMEDIATELY — users is not even read. Audited, but neither
         // re-counted nor extended (a hammering employee cannot keep a lock
         // open forever; the actor lock is what stops the hammering itself).
-        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
-        return { kind: 'rate_limited', retryAfterMs: must(actorState.locked_until, 'actor locked_until').getTime() - now.getTime() } satisfies ChallengeDecision;
+        const attemptId = await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
+        return {
+          decision: {
+            kind: 'rate_limited',
+            retryAfterMs: must(actorState.locked_until, 'actor locked_until').getTime() - now.getTime(),
+          } satisfies ChallengeDecision,
+          attemptId,
+        };
       }
 
       // ── Step 2: the TARGET MANAGER's counter, locked second.
@@ -135,8 +192,14 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
       );
       const managerState = await lockStateRow(q, 'manager_override_lockout_state', 'manager_user_id', tenantId, managerUserId);
       if (isActiveLock(managerState, now)) {
-        await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
-        return { kind: 'rate_limited', retryAfterMs: must(managerState.locked_until, 'manager locked_until').getTime() - now.getTime() } satisfies ChallengeDecision;
+        const attemptId = await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, 'rejected_locked');
+        return {
+          decision: {
+            kind: 'rate_limited',
+            retryAfterMs: must(managerState.locked_until, 'manager locked_until').getTime() - now.getTime(),
+          } satisfies ChallengeDecision,
+          attemptId,
+        };
       }
 
       // ── Step 3: the live verification itself (no active lock).
@@ -160,7 +223,7 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
 
       // ── Step 4: permanent audit ledger (committed even when the challenge
       // ultimately fails — that is the point of the ledger).
-      await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, outcome);
+      const attemptId = await appendAttempt(q, tenantId, managerUserId, initiatingActorUserId, contextType, orderId, outcome);
 
       // ── Step 5: manager counter. Success resets ONLY this counter.
       if (outcome === 'succeeded') {
@@ -231,23 +294,32 @@ export class PostgresManagerOverrideAuthenticator implements ManagerOverrideAuth
         }
       }
 
-      return outcome === 'succeeded'
-        ? { kind: 'authenticated', authenticatedAt: now } satisfies ChallengeDecision
-        : { kind: 'failed_authentication' } satisfies ChallengeDecision;
+      return {
+        decision:
+          outcome === 'succeeded'
+            ? ({ kind: 'authenticated', authenticatedAt: now } satisfies ChallengeDecision)
+            : ({ kind: 'failed_authentication' } satisfies ChallengeDecision),
+        attemptId,
+      };
     });
-
-    // Errors are thrown AFTER the transaction committed: the attempt ledger
-    // row and the counters must survive the failure they record.
-    if (decision.kind === 'rate_limited') {
-      throw new ManagerOverrideRateLimitedError(Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
-    }
-    if (decision.kind === 'failed_authentication') {
-      // ONE indistinguishable message for wrong-PIN and unknown-manager: the
-      // client must never learn which one it was.
-      throw new ManagerOverrideAuthenticationError('Manager override rejected: the live PIN challenge failed');
-    }
-    return decision.authenticatedAt;
   }
+}
+
+/**
+ * Post-commit decision mapping (UNMODIFIED): errors are thrown AFTER the
+ * transaction committed — the attempt ledger row and the counters must
+ * survive the failure they record.
+ */
+function resolveChallengeDecision(decision: ChallengeDecision): Date {
+  if (decision.kind === 'rate_limited') {
+    throw new ManagerOverrideRateLimitedError(Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
+  }
+  if (decision.kind === 'failed_authentication') {
+    // ONE indistinguishable message for wrong-PIN and unknown-manager: the
+    // client must never learn which one it was.
+    throw new ManagerOverrideAuthenticationError('Manager override rejected: the live PIN challenge failed');
+  }
+  return decision.authenticatedAt;
 }
 
 /** Locks and returns the (pre-existing, just-upserted) counter row. */
@@ -291,13 +363,15 @@ async function appendAttempt(
   contextType: ManagerOverrideContextType,
   orderId: string | undefined,
   outcome: AttemptOutcome,
-): Promise<void> {
-  await q.query(
+): Promise<string> {
+  const result = await q.query<{ id: string }>(
     `INSERT INTO manager_override_attempts
        (tenant_id, target_manager_user_id, initiating_actor_user_id, context_type, order_id, outcome)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id`,
     [tenantId, targetManagerUserId, initiatingActorUserId, contextType, orderId ?? null, outcome],
   );
+  return must(result.rows[0], 'manager_override_attempts id').id;
 }
 
 function must<T>(value: T | undefined | null, what: string): T {

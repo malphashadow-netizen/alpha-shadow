@@ -30,6 +30,12 @@
  */
 
 import type { ManagerOverrideContextType } from './orders.ts';
+import type {
+  InsertStockMovementInput,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+  WasteRefundKey,
+} from './inventory.ts';
 
 // ── Vocabularies (fixed by the Phase-8 spec) ───────────────────────────────
 
@@ -275,6 +281,12 @@ export interface PaymentsTxScope {
   // Payment-method administration.
   insertPaymentMethod(tenantId: string, input: NewPaymentMethodInput): Promise<PaymentMethodRecord>;
   updatePaymentMethod(tenantId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord>;
+
+  // Stock ledger (Phase 9: refund waste lines mirror recorded deductions).
+  loadNonVoidedOrderItemIds(tenantId: string, orderId: string): Promise<readonly string[]>;
+  loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
+  loadWasteRefundKeys(tenantId: string, orderId: string): Promise<readonly WasteRefundKey[]>;
+  insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
 }
 
 export interface PaymentsStore {

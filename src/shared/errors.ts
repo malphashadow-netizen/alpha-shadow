@@ -226,6 +226,29 @@ export class CashierShiftRequiredError extends DomainError {
 }
 
 /**
+ * Phase-9 stock gate: the order would drive a component below zero and
+ * carries no manager-override evidence. The creation engine raises this from
+ * its pre-flight read; the database trigger re-enforces the same gate (23514
+ * + the 'stock: insufficient quantity' prefix) and the orders store maps that
+ * trigger rejection back to this error — the cashier always sees a
+ * meaningful message naming the component and branch, never a raw code.
+ */
+export class InsufficientStockError extends DomainError {
+  readonly code = 'inventory.insufficient_stock' as const;
+  constructor(
+    readonly inventoryItemDisplayName: string,
+    readonly inventoryItemId: string,
+    readonly branchId: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `Insufficient stock of "${inventoryItemDisplayName}" at branch ${branchId}: a manager override is required to sell into shortage`,
+      options,
+    );
+  }
+}
+
+/**
  * Loyalty points are a DELIBERATELY DEFERRED Phase-8 item. The
  * order_discounts mechanism vocabulary reserves 'points' and the stacking
  * sequence reserves the points stage, but no points balance/redemption
@@ -425,6 +448,11 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // Phase 8: loyalty points are a deliberately deferred phase — explicit,
     // never a silent zero.
     case 'payments.loyalty_points_deferred':
+      return { status: 409, code: error.code, message: error.message };
+    // Phase 9: the stock gate — a sale into shortage needs a live manager
+    // override (retryable with one); the client-safe message names the
+    // component and branch.
+    case 'inventory.insufficient_stock':
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };

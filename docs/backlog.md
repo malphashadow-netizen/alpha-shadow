@@ -253,6 +253,11 @@ legacy UUID preflight and the mandatory branch-country backfill.
 allowed). Inventory (a later phase) will join on `(tenant_id, sku)` — the
 catalog engine does not track stock.
 
+Phase-9 note: consumption tracking arrived via recipes instead
+(`menu_item_recipes` / `modifier_recipes` deduct components per unit sold);
+`sku` stays reserved for a future resale-goods flow (selling stocked units
+directly), not for recipe consumption.
+
 ### Catalog permissions are not sensitive
 `catalog:read`, `catalog:write`, `catalog:archive` are registered in
 `permissions_registry` with `is_sensitive = false`. Editing a menu is not live

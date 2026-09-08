@@ -21,6 +21,15 @@
  *   * A manager override is a LIVE PIN challenge at void time — never a name.
  */
 import type { LocalizedText } from './catalog.ts';
+import type {
+  ClaimStockOverrideInput,
+  InsertStockMovementInput,
+  InventoryItemRecord,
+  RecipeOwnerRef,
+  RecipeRequirementLine,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+} from './inventory.ts';
 import type { TaxResolution } from './tax.ts';
 
 export type OrderType = 'dine_in' | 'takeaway' | 'delivery';
@@ -213,6 +222,14 @@ export interface NewOrderInput {
   readonly splitPeopleCount?: number | null;
   readonly items: readonly NewOrderItemLine[];
   readonly occurredAt?: Date;
+  /**
+   * Optional creation-time stock override (Phase 9): when the order would
+   * drive any component below zero, the approving manager's live PIN
+   * challenge authorizes this single order (context 'stock_override'). The
+   * challenge commits its own transaction BEFORE the write transaction
+   * starts, and is bound to the order via a single-use claim.
+   */
+  readonly managerOverride?: ManagerOverrideChallenge;
 }
 
 export interface CreatedOrderItem {
@@ -288,20 +305,28 @@ export interface VoidActor {
  * A locked challenge (either shape) fails with ManagerOverrideRateLimitedError
  * carrying a client-safe retryAfterSeconds.
  *
- * Context (Phase 8): every attempt records its business context ('void' |
- * 'discount') so EVIDENCE is context-scoped — but the RATE LIMITING above is
- * deliberately NOT: the counters stay shared across all contexts per manager
- * and per initiating actor, otherwise an active lock could be bypassed by
- * simply alternating between Void and Discount challenges.
+ * Context (Phase 8, extended in Phase 9): every attempt records its business
+ * context ('void' | 'discount' | 'stock_override') so EVIDENCE is
+ * context-scoped — but the RATE LIMITING above is deliberately NOT: the
+ * counters stay shared across all contexts per manager and per initiating
+ * actor, otherwise an active lock could be bypassed by simply alternating
+ * between challenge contexts.
  */
 /**
  * The business context a manager-override challenge is issued for. Every
  * attempt row on the Phase-7b ledger records its context, so override
  * evidence can never cross contexts: a successful 'void' challenge does not
- * authorize a discount, and a successful 'discount' challenge does not
- * authorize a void.
+ * authorize a discount, a successful 'discount' challenge does not authorize
+ * a void, and only a 'stock_override' challenge authorizes a sale into
+ * shortage (bound to exactly one order via a single-use claim).
  */
-export type ManagerOverrideContextType = 'void' | 'discount';
+export type ManagerOverrideContextType = 'void' | 'discount' | 'stock_override';
+
+/** A verified challenge PLUS the attempt row id (for single-use claim binding). */
+export interface VerifiedManagerOverride {
+  readonly authenticatedAt: Date;
+  readonly attemptId: string;
+}
 
 export interface ManagerOverrideAuthenticator {
   verifyLiveChallenge(
@@ -314,6 +339,19 @@ export interface ManagerOverrideAuthenticator {
     /** Optional order link, recorded on the attempt ledger when provided. */
     orderId?: string,
   ): Promise<Date>;
+  /**
+   * Phase 9: the IDENTICAL challenge transaction (same rate limiting, same
+   * errors) that additionally returns the attempt id, so the caller binds
+   * its evidence to the exact attempt it just verified — never a lookup.
+   */
+  verifyLiveChallengeWithId(
+    tenantId: string,
+    managerUserId: string,
+    managerOverridePin: string,
+    initiatingActorUserId: string,
+    contextType: ManagerOverrideContextType,
+    orderId?: string,
+  ): Promise<VerifiedManagerOverride>;
 }
 
 // ── Side effects (claim-then-execute) ───────────────────────────────────────
@@ -386,6 +424,23 @@ export interface OrdersTxScope {
   markOrderItemsVoided(tenantId: string, orderItemIds: readonly string[]): Promise<void>;
   recomputeOrderStatus(tenantId: string, orderId: string): Promise<string | null>;
   insertOrderVoid(tenantId: string, record: { id: string; orderId: string; orderItemId: string | null; actorUserId: string; actorPermissionTier: VoidPermissionTier; voidReasonId: string; requiredManagerOverride: boolean; managerUserId: string | null; overrideAuthenticatedAt: Date | null; orderPaymentStatusAtVoidTime: OrderPaymentStatus; notes: string | null }): Promise<OrderVoidAuditRecord>;
+
+  // Stock ledger (Phase 9).
+  /** Single read over the recipe_ingredients view for the given owners. */
+  loadRecipeRequirements(tenantId: string, owners: readonly RecipeOwnerRef[]): Promise<readonly RecipeRequirementLine[]>;
+  /** Branch-scoped component rows for availability math. */
+  loadInventoryItems(tenantId: string, branchId: string, inventoryItemIds: readonly string[]): Promise<readonly InventoryItemRecord[]>;
+  /**
+   * Appends ONE movement row. A trigger shortage rejection (23514 + the
+   * 'stock: insufficient quantity' prefix) is mapped to InsufficientStockError.
+   */
+  insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  /** Binds one override attempt to exactly one order (single-use claim). */
+  insertStockOverrideClaim(tenantId: string, claim: ClaimStockOverrideInput): Promise<void>;
+  /** Recorded sale deductions per (order item, component) — restoration mirrors these exactly. */
+  loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
+  /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
+  loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
 }
 
 export interface OrdersStore {
