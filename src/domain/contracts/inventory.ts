@@ -67,9 +67,11 @@ export interface InsertStockMovementInput {
   /**
    * Engine-resolved display name for InsufficientStockError messages. Carried
    * alongside the row so the store mapper never parses localized JSON — it is
-   * NOT stored on the movement row.
+   * NOT stored on the movement row. Optional: writers whose rows can never
+   * trip the sale-only shortage gate (void/refund/manual) omit it and the
+   * mapper falls back to the item id.
    */
-  readonly inventoryItemDisplayName: string;
+  readonly inventoryItemDisplayName?: string;
   readonly movementType: StockMovementType;
   /** Signed delta, exact decimal text (scale 4); the sign is CHECKed per kind. */
   readonly quantityDelta: string;
@@ -135,4 +137,13 @@ export interface InventoryTxScope {
 export interface InventoryStore {
   /** Runs fn in ONE transaction scoped to the tenant (repeatable read). */
   run<T>(tenantId: string, fn: (scope: InventoryTxScope) => Promise<T>): Promise<T>;
+}
+
+/** Quantity scale for all stock math (NUMERIC(18,4) columns) — single source. */
+export const STOCK_QUANTITY_SCALE = 4;
+
+/** The actor receiving/adjusting stock (same shape as VoidActor/PaymentActor). */
+export interface InventoryActor {
+  readonly userId: string;
+  readonly tokenSecV: string;
 }

@@ -737,9 +737,12 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         // rethrowCatalogWriteError — code + stable message prefix, nothing
         // else; every other error propagates untouched).
         if (isStockShortageTriggerError(error)) {
-          throw new InsufficientStockError(movement.inventoryItemDisplayName, movement.inventoryItemId, movement.branchId, {
-            cause: error instanceof Error ? error : undefined,
-          });
+          throw new InsufficientStockError(
+            movement.inventoryItemDisplayName ?? movement.inventoryItemId,
+            movement.inventoryItemId,
+            movement.branchId,
+            { cause: error instanceof Error ? error : undefined },
+          );
         }
         throw error;
       }

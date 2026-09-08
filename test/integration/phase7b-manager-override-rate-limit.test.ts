@@ -132,7 +132,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -152,7 +152,11 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
-    creation = new OrderCreationEngine({ store });
+    creation = new OrderCreationEngine({
+      store,
+      authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }),
+      managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
+    });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     voids = new VoidModificationEngine({

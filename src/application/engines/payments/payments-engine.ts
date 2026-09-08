@@ -32,8 +32,10 @@ import type {
   PaymentActor,
   PaymentRecord,
   PaymentsStore,
+  PaymentsTxScope,
 } from '../../../domain/contracts/payments.ts';
 import type { OrderPaymentStatus } from '../../../domain/contracts/orders.ts';
+import { STOCK_QUANTITY_SCALE } from '../../../domain/contracts/inventory.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { minorToDecimalText, nonNegativeDecimalTextToMinor } from '../../../shared/decimal-text.ts';
 import {
@@ -267,8 +269,51 @@ export class PaymentsEngine {
       if (snapshot === null) throw new NotFoundError(`Order ${existing.orderId} not found`);
       const totals = computeOrderTotals(snapshot);
       await scope.setOrderPaymentStatus(tenantId, existing.orderId, nextOrderPaymentStatus(totals, snapshot));
+      if (to === 'refunded') {
+        // Phase-9 stock: a refunded order is waste, never restocked — same
+        // transaction as the lifecycle change. (Payment VOIDs are cashier
+        // corrections on a standing order: no stock effect by design.)
+        await this.writeRefundWaste(scope, tenantId, pre.branchId, existing.orderId, actorUserId);
+      }
       return updated;
     });
+  }
+
+  /**
+   * Phase-9 refund stock: one zero-delta waste_refund line per deducted
+   * component of every LIVE (non-voided) line — voided lines were already
+   * restored-or-wasted by the void path. NOT EXISTS-guarded, so refunding a
+   * second payment on the same order adds no duplicate waste lines.
+   */
+  private async writeRefundWaste(
+    scope: PaymentsTxScope,
+    tenantId: string,
+    branchId: string,
+    orderId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const itemIds = await scope.loadNonVoidedOrderItemIds(tenantId, orderId);
+    if (itemIds.length === 0) return;
+    const deductions = await scope.loadSaleDeductionsForOrderItems(tenantId, itemIds);
+    if (deductions.length === 0) return;
+    const recorded = new Set(
+      (await scope.loadWasteRefundKeys(tenantId, orderId)).map((key) => `${key.orderItemId}:${key.inventoryItemId}`),
+    );
+    const occurredAt = new Date();
+    for (const deduction of deductions) {
+      if (recorded.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
+      await scope.insertStockMovement(tenantId, {
+        branchId,
+        inventoryItemId: deduction.inventoryItemId,
+        movementType: 'waste_refund',
+        quantityDelta: minorToDecimalText(0n, STOCK_QUANTITY_SCALE),
+        orderId,
+        orderItemId: deduction.orderItemId,
+        actorUserId,
+        managerOverrideId: null,
+        occurredAt,
+      });
+    }
   }
 }
 

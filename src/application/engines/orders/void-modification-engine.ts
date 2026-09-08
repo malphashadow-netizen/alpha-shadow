@@ -44,6 +44,8 @@ import {
   VoidTimeLimitExceededError,
 } from '../../../shared/errors.ts';
 import { assertVoidAllowedUnderPaymentStatus } from '../payments/index.ts';
+import { STOCK_QUANTITY_SCALE } from '../../../domain/contracts/inventory.ts';
+import { decimalTextToMinor, minorToDecimalText } from '../../../shared/decimal-text.ts';
 
 export interface VoidModificationEngineDependencies {
   readonly store: OrdersStore;
@@ -209,6 +211,8 @@ export class VoidModificationEngine {
         for (const item of await scope.loadActiveOrderItems(tenantId, order.id)) voidedItemIds.push(item.id);
       }
       await scope.markOrderItemsVoided(tenantId, voidedItemIds);
+      // Phase-9 stock: restoration-or-waste per voided line, same transaction.
+      await this.writeVoidStockMovements(scope, tenantId, order, voidedItemIds, actor.userId);
       for (const itemId of voidedItemIds) {
         await scope.appendEvent(tenantId, order.branchId, 'order_item.voided', {
           order_id: order.id,
@@ -228,5 +232,43 @@ export class VoidModificationEngine {
 
       return record;
     });
+  }
+
+  /**
+   * Phase-9 void stock: per voided line, restoration mirrors the RECORDED
+   * sale deductions exactly (never recomputed from live recipes — immune to
+   * recipe edits between sale and void) — but ONLY when the line never
+   * entered a fires_kitchen_ticket state; a prepared line is waste (zero
+   * delta, the consumed quantity stays consumed). Lines with no recorded
+   * deductions (pre-Phase-9 orders, recipe-less lines) yield no rows at all.
+   */
+  private async writeVoidStockMovements(
+    scope: OrdersTxScope,
+    tenantId: string,
+    order: OrderRecord,
+    voidedItemIds: readonly string[],
+    actorUserId: string,
+  ): Promise<void> {
+    if (voidedItemIds.length === 0) return;
+    const deductions = await scope.loadSaleDeductionsForOrderItems(tenantId, voidedItemIds);
+    if (deductions.length === 0) return;
+    const fired = new Set(await scope.loadItemsWithKitchenTicketFired(tenantId, voidedItemIds));
+    const occurredAt = new Date();
+    for (const deduction of deductions) {
+      const restores = !fired.has(deduction.orderItemId);
+      await scope.insertStockMovement(tenantId, {
+        branchId: order.branchId,
+        inventoryItemId: deduction.inventoryItemId,
+        movementType: restores ? 'void_restoration' : 'waste_void',
+        quantityDelta: restores
+          ? minorToDecimalText(-decimalTextToMinor(deduction.totalDeducted, STOCK_QUANTITY_SCALE, 'totalDeducted'), STOCK_QUANTITY_SCALE)
+          : minorToDecimalText(0n, STOCK_QUANTITY_SCALE),
+        orderId: order.id,
+        orderItemId: deduction.orderItemId,
+        actorUserId,
+        managerOverrideId: null,
+        occurredAt,
+      });
+    }
   }
 }

@@ -121,7 +121,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -142,12 +142,12 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    creation = new OrderCreationEngine({ store: ordersStore });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
 
