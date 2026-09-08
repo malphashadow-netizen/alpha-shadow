@@ -153,6 +153,16 @@ function buildScope(q: TenantQuery): ShiftsTxScope {
       return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
     },
 
+    // B2: the uniform serialization point — lock FIRST, bump, then decide.
+    async lockShift(tid, shiftId) {
+      const result = await q.query<ShiftRow>('SELECT * FROM shift_reconciliations WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, shiftId]);
+      return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
+    },
+
+    async bumpShiftRevision(tid, shiftId) {
+      await q.query('UPDATE shift_reconciliations SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, shiftId]);
+    },
+
     async loadCashCounts(tid, shiftId) {
       const result = await q.query<CashCountRow>(
         'SELECT * FROM cash_count_details WHERE tenant_id = $1 AND shift_reconciliation_id = $2 ORDER BY created_at ASC, id ASC',

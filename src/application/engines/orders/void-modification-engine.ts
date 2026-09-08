@@ -188,6 +188,20 @@ export class VoidModificationEngine {
         managerUserId = challenge.managerUserId;
       }
 
+      // B2: the order lock + revision bump serialize this void against every
+      // concurrent mutation of the order (exactly one wins; the loser gets a
+      // 40001 serialization failure, retryable — B3). Positioned AFTER the
+      // live challenge ON PURPOSE: the challenge runs in its own transaction
+      // on a second connection, and its attempt row carries an FK to orders —
+      // holding FOR UPDATE across it deadlocks the FK check in a way the
+      // detector cannot see (this tx waits in JS, the challenge waits on the
+      // lock) and hangs forever. Under REPEATABLE READ the late lock loses
+      // nothing: any interleaved mutation bumped the row, so a stale void
+      // still 40001s here, and the snapshot is identical before/after.
+      const lockedOrder = await scope.lockOrder(tenantId, order.id);
+      if (lockedOrder === null) throw new NotFoundError(`Order ${order.id} not found`);
+      await scope.bumpOrderRevision(tenantId, order.id);
+
       const record = await scope.insertOrderVoid(tenantId, {
         id: randomUUID(),
         orderId: order.id,

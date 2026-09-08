@@ -95,13 +95,20 @@ export class WorkflowTransitionEngine {
 
   async transitionItem(tenantId: string, input: ItemStatusTransitionInput): Promise<ItemStatusTransitionResult> {
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // B2: resolve the order id, then lock FIRST and re-read under the lock.
+      // The order lock + revision bump serialize every concurrent mutation of
+      // this order (exactly one wins; the loser gets a 40001 serialization
+      // failure, retryable — B3).
+      const probe = await scope.loadOrderItem(tenantId, input.orderItemId);
+      if (probe === null) throw new NotFoundError(`Order item ${input.orderItemId} not found`);
+      const order = await scope.lockOrder(tenantId, probe.orderId);
+      if (order === null) throw new NotFoundError(`Order ${probe.orderId} not found`);
+      await scope.bumpOrderRevision(tenantId, order.id);
       const item = await scope.loadOrderItem(tenantId, input.orderItemId);
       if (item === null) throw new NotFoundError(`Order item ${input.orderItemId} not found`);
       if (item.isVoided) {
         throw new WorkflowTransitionError(`Order item ${input.orderItemId} is voided; voided items no longer transition`);
       }
-      const order = await scope.loadOrder(tenantId, item.orderId);
-      if (order === null) throw new NotFoundError(`Order ${item.orderId} not found`);
 
       const states = await scope.loadWorkflowStates(tenantId, true);
       const fromState = states.find((s) => s.id === item.currentStatusKindId);

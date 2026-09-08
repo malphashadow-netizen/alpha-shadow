@@ -257,6 +257,25 @@ export interface AuditEvidenceInput {
 export interface PaymentsTxScope {
   // Reads for the totals/gateway engine.
   loadOrderFinancialSnapshot(tenantId: string, orderId: string): Promise<OrderFinancialSnapshot | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on the orders row — the FIRST statement of every
+   * order-mutating payments transaction (uniform lock order: orders →
+   * shift_reconciliations; see OrdersTxScope.lockOrder). Returns the locked
+   * id, or null when the order does not exist. Always followed by
+   * bumpOrderRevision before any decision read.
+   */
+  lockOrder(tenantId: string, orderId: string): Promise<{ id: string } | null>;
+  /** B2: UPDATE orders SET revision = revision + 1 (see OrdersTxScope.bumpOrderRevision). */
+  bumpOrderRevision(tenantId: string, orderId: string): Promise<void>;
+  /**
+   * B2: SELECT … FOR UPDATE on a shift_reconciliations row — taken (after
+   * the order lock) by collect, and FIRST by close. Always followed by
+   * bumpShiftRevision; serializes close-vs-collect so the Z-Report SUM can
+   * never miss a concurrent payment (the loser gets 40001, retryable — B3).
+   */
+  lockShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /** B2: UPDATE shift_reconciliations SET revision = revision + 1. */
+  bumpShiftRevision(tenantId: string, shiftId: string): Promise<void>;
   loadPaymentMethod(tenantId: string, paymentMethodId: string): Promise<PaymentMethodRecord | null>;
   findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<ShiftRecord | null>;
   loadPayment(tenantId: string, paymentId: string): Promise<PaymentRecord | null>;
@@ -321,6 +340,14 @@ export interface ShiftsTxScope {
   /** Tenant-wide probe (any branch) — backs the no-parallel-shifts rule. */
   findAnyOpenShiftForCashier(tenantId: string, cashierUserId: string): Promise<ShiftRecord | null>;
   loadShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on a shift_reconciliations row — the FIRST
+   * statement of closeShift (see PaymentsTxScope.lockShift for the
+   * close-vs-collect race). Always followed by bumpShiftRevision.
+   */
+  lockShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /** B2: UPDATE shift_reconciliations SET revision = revision + 1. */
+  bumpShiftRevision(tenantId: string, shiftId: string): Promise<void>;
   loadCashCounts(tenantId: string, shiftId: string): Promise<readonly CashCountDetailRecord[]>;
   insertShift(tenantId: string, input: { id: string; branchId: string; cashierId: string; openedById: string; openVerifiedById: string; openedAt: Date; startingFloat: string }): Promise<ShiftRecord>;
   insertCashCountDetails(tenantId: string, shiftId: string, countType: CashCountType, lines: readonly CashCountLineInput[]): Promise<void>;

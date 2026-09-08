@@ -380,6 +380,21 @@ export interface OrdersTxScope {
   // Workflow configuration + reads.
   loadWorkflowStates(tenantId: string, enabledOnly: boolean): Promise<readonly TenantWorkflowState[]>;
   loadOrder(tenantId: string, orderId: string): Promise<OrderRecord | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on the orders row — the FIRST statement of every
+   * order-mutating transaction (uniform lock order: orders →
+   * shift_reconciliations). Under REPEATABLE READ the lock alone is not
+   * enough (the waiter's snapshot stays stale), so every locker also calls
+   * bumpOrderRevision: exactly one concurrent mutation wins, the loser gets a
+   * 40001 serialization failure (retryable — see B3).
+   */
+  lockOrder(tenantId: string, orderId: string): Promise<OrderRecord | null>;
+  /**
+   * B2: UPDATE orders SET revision = revision + 1 — the conflict generator
+   * that makes the order lock decisive under REPEATABLE READ. Called
+   * immediately after lockOrder, before any decision read.
+   */
+  bumpOrderRevision(tenantId: string, orderId: string): Promise<void>;
   loadOrderItem(tenantId: string, orderItemId: string): Promise<OrderItemRecord | null>;
   loadActiveOrderItems(tenantId: string, orderId: string): Promise<readonly OrderItemRecord[]>;
   loadMenuItem(tenantId: string, menuItemId: string): Promise<{ id: string; name: LocalizedText; basePriceMinor: bigint; isActive: boolean } | null>;

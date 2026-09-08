@@ -131,8 +131,14 @@ export class ShiftEngine {
     }
 
     return this.dependencies.store.run(tenantId, async (scope) => {
-      const shift = await scope.loadShift(tenantId, input.shiftId);
+      // B2: lock FIRST, then decide. The shift lock + revision bump serialize
+      // close-vs-close and close-vs-collect (uniform order: orders → shifts;
+      // collect takes the order lock first, so no cycle is possible): exactly
+      // one wins, the loser gets a 40001 serialization failure (retryable —
+      // B3), and the Z-Report SUM below can never miss a concurrent payment.
+      const shift = await scope.lockShift(tenantId, input.shiftId);
       if (shift === null) throw new NotFoundError(`Shift ${input.shiftId} not found`);
+      await scope.bumpShiftRevision(tenantId, input.shiftId);
       if (shift.status !== 'open') throw new ShiftNotOpenError(input.shiftId);
       const branch = await scope.loadBranchForShift(tenantId, shift.branchId);
       if (branch === null) throw new NotFoundError(`Branch ${shift.branchId} is not a branch of tenant ${tenantId}`);

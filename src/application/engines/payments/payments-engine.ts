@@ -99,6 +99,12 @@ export class PaymentsEngine {
 
   async recordPayment(tenantId: string, input: RecordPaymentInput): Promise<RecordedPayment> {
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // B2: lock FIRST, then decide. The order lock + revision bump serialize
+      // every concurrent mutation of this order (exactly one wins; the loser
+      // gets a 40001 serialization failure, retryable — B3).
+      const locked = await scope.lockOrder(tenantId, input.orderId);
+      if (locked === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      await scope.bumpOrderRevision(tenantId, input.orderId);
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
       if (snapshot.paymentStatus === 'refunded' || snapshot.paymentStatus === 'refund_pending') {
@@ -115,10 +121,18 @@ export class PaymentsEngine {
 
       // The shift GATEWAY: the collecting cashier must hold the standing OPEN
       // shift at the order's branch (the DB trigger re-verifies structurally).
-      const shift = await scope.findOpenShiftForCashier(tenantId, input.cashierUserId, snapshot.branchId);
-      if (shift === null) {
+      // B2: resolve, then lock the shift row (uniform order: orders → shifts)
+      // and re-verify OPEN on the LOCKED row — this serializes collect-vs-
+      // close so the Z-Report SUM can never miss this payment.
+      const gateway = await scope.findOpenShiftForCashier(tenantId, input.cashierUserId, snapshot.branchId);
+      if (gateway === null) {
         throw new CashierShiftRequiredError(input.cashierUserId, snapshot.branchId);
       }
+      const shift = await scope.lockShift(tenantId, gateway.id);
+      if (shift?.status !== 'open') {
+        throw new CashierShiftRequiredError(input.cashierUserId, snapshot.branchId);
+      }
+      await scope.bumpShiftRevision(tenantId, shift.id);
 
       const totals = computeOrderTotals(snapshot);
       if (totals.remainingBalanceMinor <= 0n) {
@@ -241,6 +255,20 @@ export class PaymentsEngine {
     }
 
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // B2: lock FIRST, then decide — and re-read the payment UNDER the lock.
+      // The pre-read above (its own transaction) is a fail-fast only; the
+      // order lock + revision bump serialize every concurrent mutation of
+      // this order (exactly one wins; the loser gets a 40001 serialization
+      // failure, retryable — B3), so the re-check below closes the
+      // double-void/double-refund race the blind store UPDATE cannot see.
+      const locked = await scope.lockOrder(tenantId, existing.orderId);
+      if (locked === null) throw new NotFoundError(`Order ${existing.orderId} not found`);
+      await scope.bumpOrderRevision(tenantId, existing.orderId);
+      const fresh = await scope.loadPayment(tenantId, paymentId);
+      if (fresh === null) throw new NotFoundError(`Payment ${paymentId} not found`);
+      if (fresh.status !== 'completed') {
+        throw new PaymentStatusTransitionError(fresh.status, to);
+      }
       // The reversal's drawer impact must land on a standing OPEN shift at
       // the ORIGINAL ORDER's branch — never on whatever open shift the
       // acting cashier may hold at ANOTHER branch. Fail closed with the

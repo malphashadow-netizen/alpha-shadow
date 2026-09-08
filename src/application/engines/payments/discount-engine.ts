@@ -154,6 +154,13 @@ export class DiscountEngine {
     }
 
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // B2: lock FIRST, then decide. The order lock + revision bump serialize
+      // every concurrent mutation of this order (exactly one wins; the loser
+      // gets a 40001 serialization failure, retryable — B3), so the fresh
+      // re-computation below runs on race-free data.
+      const locked = await scope.lockOrder(tenantId, input.orderId);
+      if (locked === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      await scope.bumpOrderRevision(tenantId, input.orderId);
       // FRESH re-computation (the write transaction's own snapshot): the
       // order may have changed since the pre-pass.
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);

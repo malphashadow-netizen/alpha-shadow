@@ -254,6 +254,16 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       return result.rows[0] === undefined ? null : mapOrder(result.rows[0]);
     },
 
+    // B2: the uniform serialization point — lock FIRST, bump, then decide.
+    async lockOrder(tid: string, orderId: string): Promise<OrderRecord | null> {
+      const result = await q.query<OrderRow>('SELECT * FROM orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, orderId]);
+      return result.rows[0] === undefined ? null : mapOrder(result.rows[0]);
+    },
+
+    async bumpOrderRevision(tid: string, orderId: string): Promise<void> {
+      await q.query('UPDATE orders SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, orderId]);
+    },
+
     async loadOrderItem(tid: string, orderItemId: string): Promise<OrderItemRecord | null> {
       const result = await q.query<OrderItemRow>('SELECT * FROM order_items WHERE tenant_id = $1 AND id = $2', [tid, orderItemId]);
       return result.rows[0] === undefined ? null : mapOrderItem(result.rows[0]);
