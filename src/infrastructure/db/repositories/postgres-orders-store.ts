@@ -411,7 +411,9 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
           JSON.stringify(item.itemNameSnapshot),
           item.unitPriceMinor.toString(),
           item.quantity,
-          JSON.stringify(item.modifiersSnapshot),
+          // The snapshot carries bigint minor amounts, which JSON.stringify rejects;
+          // serialize them as exact decimal strings (pass-through evidence, never math input).
+          JSON.stringify(item.modifiersSnapshot, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value),
           item.initialStatusKindId,
           item.stationId,
           item.splitGroupId,
