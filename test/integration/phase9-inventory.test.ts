@@ -69,11 +69,14 @@ import { sha256Hex } from '../../src/shared/crypto.ts';
 import {
   AdjustmentReasonUnavailableError,
   CashierShiftRequiredError,
+  ConcurrencyRetryableError,
   ForbiddenError,
   InsufficientStockError,
   ManagerOverrideAuthenticationError,
   NotFoundError,
   ValidationError,
+  isConcurrencyRetryableError,
+  toErrorResponse,
 } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -717,6 +720,50 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       [T, flour],
     )).rows).net;
     expect(net).toBe('-2.0000');
+  });
+
+  it('4b/ B3 pin: the inventory-path race loser is a retryable 503 (never raw 500, never a mislabelled 409)', async () => {
+    const till = await setupTill();
+    // AMPLE stock (100 units, 1 per order): a genuine stockout (409) is
+    // ARITHMETICALLY IMPOSSIBLE in this scenario — the (a)-vs-(b) split is
+    // structural, not probabilistic. Any loser here failed at the trigger's
+    // SELECT FOR UPDATE gate (40001: lock/serialization BEFORE the
+    // sufficiency arithmetic runs) — the B3 case — or is a leak (bug).
+    // The (a) shape stays pinned by the InsufficientStockError legs above.
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '100.0000');
+    await addMenuRecipe(itemMeal, flour, '1.0000');
+    try {
+      const attempt = () => placeOrder(till.cashier.userId, till, [
+        { menuItemId: itemMeal, quantity: 1 },
+      ]);
+      // Overlap is the norm for two simultaneous multi-statement txs, but a
+      // fully-serialized round (both win) is legal — loop until a round
+      // yields a loser, bounded. Two losers in one round is arithmetically
+      // impossible and fails the round outright.
+      const MAX_ROUNDS = 10;
+      let decided: { readonly loser: unknown } | null = null;
+      let totalWins = 0;
+      for (let round = 0; round < MAX_ROUNDS && decided === null; round++) {
+        const results = await Promise.allSettled([attempt(), attempt()]);
+        const losers = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        totalWins += results.length - losers.length;
+        if (losers.length > 0) {
+          expect(losers).toHaveLength(1);
+          decided = { loser: losers[0]?.reason };
+        }
+      }
+      if (decided === null) throw new Error(`no overlapped round within ${String(MAX_ROUNDS)} attempts`);
+      // The B3 contract, on the inventory path specifically — the PREDICATE,
+      // not just the code, so future client retry loops work here too.
+      expect(decided.loser).toBeInstanceOf(ConcurrencyRetryableError);
+      expect(isConcurrencyRetryableError(decided.loser)).toBe(true);
+      expect(toErrorResponse(decided.loser, () => undefined)).toMatchObject({ status: 503, code: 'concurrency.retryable_conflict' });
+      // The loser's transaction rolled back CLEANLY (B3's retry-safety
+      // claim): stock equals exactly the winners' deductions, nothing more.
+      expect(await stockOf(flour)).toBe(`${String(100 - totalWins)}.0000`);
+    } finally {
+      await removeMenuRecipe(itemMeal, flour);
+    }
   });
 
   // ── Case 5: void before / after the kitchen ticket ───────────────────────
