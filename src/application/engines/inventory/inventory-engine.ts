@@ -20,7 +20,9 @@ import {
   STOCK_QUANTITY_SCALE,
   type InsertStockMovementInput,
   type InventoryActor,
+  type InventoryOutboxEvent,
   type InventoryStore,
+  type LowStockAlert,
   type StockMovementRecord,
 } from '../../../domain/contracts/inventory.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
@@ -155,6 +157,65 @@ export class InventoryEngine {
       };
       return scope.insertStockMovement(tenantId, movement);
     });
+  }
+
+  /**
+   * I3: mute a branch's low-stock ALERTS. Hiding shrinkage signals is
+   * sensitive — the same 'inventory:adjust' key as manual adjustments gates
+   * it. The outbox history is NEVER filtered by a mute.
+   */
+  async muteLowStockAlerts(tenantId: string, actor: InventoryActor, branchId: string): Promise<void> {
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: actor.userId,
+      permissionKey: ADJUST_PERMISSION_KEY,
+      tokenSecV: actor.tokenSecV,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
+    await this.dependencies.store.run(tenantId, async (scope) => {
+      if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {
+        throw new NotFoundError(`Branch ${branchId} not found`);
+      }
+      await scope.muteLowStockAlerts(tenantId, branchId, actor.userId);
+    });
+  }
+
+  /** I3: unmute a branch's low-stock alerts (same sensitive gate). */
+  async unmuteLowStockAlerts(tenantId: string, actor: InventoryActor, branchId: string): Promise<void> {
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: actor.userId,
+      permissionKey: ADJUST_PERMISSION_KEY,
+      tokenSecV: actor.tokenSecV,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
+    await this.dependencies.store.run(tenantId, async (scope) => {
+      if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {
+        throw new NotFoundError(`Branch ${branchId} not found`);
+      }
+      await scope.unmuteLowStockAlerts(tenantId, branchId);
+    });
+  }
+
+  /**
+   * I3: live actionable alerts for a branch — below-threshold components of
+   * UNMUTED branches only. A read: RLS scopes the tenant, no permission key
+   * (orderTotals precedent).
+   */
+  async listLowStockAlerts(tenantId: string, branchId: string): Promise<readonly LowStockAlert[]> {
+    return this.dependencies.store.run(tenantId, (scope) => scope.loadLowStockAlerts(tenantId, branchId));
+  }
+
+  /** I3: crossing history for a branch — NEVER mute-filtered, gapless per branch. */
+  async listInventoryEvents(
+    tenantId: string,
+    branchId: string,
+    afterSequenceId: number,
+    limit: number,
+  ): Promise<readonly InventoryOutboxEvent[]> {
+    return this.dependencies.store.run(tenantId, (scope) =>
+      scope.loadInventoryEvents(tenantId, branchId, afterSequenceId, limit),
+    );
   }
 }
 

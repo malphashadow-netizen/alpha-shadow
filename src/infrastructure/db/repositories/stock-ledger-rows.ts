@@ -21,7 +21,7 @@ import type {
 import type { LocalizedText } from '../../../domain/contracts/catalog.ts';
 import type { TenantQuery } from '../tenant-context.ts';
 
-function localized(value: unknown): LocalizedText {
+export function localized(value: unknown): LocalizedText {
   return (value ?? {}) as LocalizedText;
 }
 

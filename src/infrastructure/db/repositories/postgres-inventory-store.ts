@@ -22,6 +22,7 @@ import type {
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import {
   insertStockMovementRow,
+  localized,
   mapInventoryItem,
   type InventoryItemRow,
 } from './stock-ledger-rows.ts';
@@ -90,6 +91,91 @@ function buildScope(q: TenantQuery): InventoryTxScope {
       return r === undefined
         ? null
         : { id: r.id, isEnabled: r.is_enabled, kindCode: r.kind_code, kindSettingEnabled: r.kind_setting_enabled };
+    },
+
+    // ── I3: low-stock crossings + branch mutes ───────────────────────────
+    async branchBelongsToTenant(tid: string, branchId: string) {
+      const result = await q.query<{ one: number }>(
+        'SELECT 1 AS one FROM branches WHERE tenant_id = $1 AND id = $2',
+        [tid, branchId],
+      );
+      return result.rows.length > 0;
+    },
+
+    async muteLowStockAlerts(tid: string, branchId: string, actorUserId: string) {
+      await q.query(
+        `INSERT INTO low_stock_mutes (tenant_id, branch_id, muted_by)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, branch_id) DO UPDATE SET muted_by = EXCLUDED.muted_by, muted_at = now()`,
+        [tid, branchId, actorUserId],
+      );
+    },
+
+    async unmuteLowStockAlerts(tid: string, branchId: string) {
+      await q.query(
+        'DELETE FROM low_stock_mutes WHERE tenant_id = $1 AND branch_id = $2',
+        [tid, branchId],
+      );
+    },
+
+    async loadLowStockAlerts(tid: string, branchId: string) {
+      const result = await q.query<{
+        branch_id: string;
+        inventory_item_id: string;
+        name: unknown;
+        base_unit: string;
+        current_quantity: string;
+        low_stock_threshold: string;
+      }>(
+        `SELECT i.branch_id, i.id AS inventory_item_id, i.name, i.base_unit,
+                i.current_quantity::text AS current_quantity,
+                i.low_stock_threshold::text AS low_stock_threshold
+           FROM inventory_items i
+           LEFT JOIN low_stock_mutes m
+             ON m.tenant_id = i.tenant_id AND m.branch_id = i.branch_id
+          WHERE i.tenant_id = $1 AND i.branch_id = $2
+            AND i.low_stock_threshold IS NOT NULL
+            AND i.current_quantity < i.low_stock_threshold
+            AND m.branch_id IS NULL
+          ORDER BY i.name`,
+        [tid, branchId],
+      );
+      return result.rows.map((r) => ({
+        branchId: r.branch_id,
+        inventoryItemId: r.inventory_item_id,
+        name: localized(r.name),
+        baseUnit: r.base_unit,
+        currentQuantity: r.current_quantity,
+        lowStockThreshold: r.low_stock_threshold,
+      }));
+    },
+
+    async loadInventoryEvents(tid: string, branchId: string, afterSequenceId: number, limit: number) {
+      const result = await q.query<{
+        id: string;
+        tenant_id: string;
+        branch_id: string;
+        sequence_id: string;
+        event_type: string;
+        payload: Record<string, unknown>;
+        created_at: Date;
+      }>(
+        `SELECT id, tenant_id, branch_id, sequence_id::text AS sequence_id, event_type, payload, created_at
+           FROM inventory_events_outbox
+          WHERE tenant_id = $1 AND branch_id = $2 AND sequence_id > $3
+          ORDER BY sequence_id ASC
+          LIMIT $4`,
+        [tid, branchId, afterSequenceId, limit],
+      );
+      return result.rows.map((r) => ({
+        id: r.id,
+        tenantId: r.tenant_id,
+        branchId: r.branch_id,
+        sequenceId: Number(r.sequence_id),
+        eventType: r.event_type,
+        payload: r.payload,
+        createdAt: r.created_at,
+      }));
     },
   };
 }

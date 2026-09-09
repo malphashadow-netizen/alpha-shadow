@@ -122,6 +122,27 @@ export interface WasteRefundKey {
 
 // ── The inventory store port (one transaction per use case) ─────────────────
 
+/** I3: one actionable low-stock alert (live state, mute-aware). */
+export interface LowStockAlert {
+  readonly branchId: string;
+  readonly inventoryItemId: string;
+  readonly name: LocalizedText;
+  readonly baseUnit: string;
+  readonly currentQuantity: string;
+  readonly lowStockThreshold: string;
+}
+
+/** I3: one inventory outbox event (crossing history, never mute-filtered). */
+export interface InventoryOutboxEvent {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly branchId: string;
+  readonly sequenceId: number;
+  readonly eventType: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly createdAt: Date;
+}
+
 export interface InventoryTxScope {
   loadInventoryItem(tenantId: string, inventoryItemId: string): Promise<InventoryItemRecord | null>;
   /**
@@ -144,6 +165,26 @@ export interface InventoryTxScope {
     tenantId: string,
     adjustmentReasonId: string,
   ): Promise<{ id: string; isEnabled: boolean; kindCode: string; kindSettingEnabled: boolean } | null>;
+
+  /** I3: true when the branch belongs to the tenant (mute/unmute guard). */
+  branchBelongsToTenant(tenantId: string, branchId: string): Promise<boolean>;
+
+  /** I3: upsert the branch mute row (re-muting refreshes actor + time). */
+  muteLowStockAlerts(tenantId: string, branchId: string, actorUserId: string): Promise<void>;
+
+  /** I3: delete the branch mute row (no-op when already unmuted). */
+  unmuteLowStockAlerts(tenantId: string, branchId: string): Promise<void>;
+
+  /** I3: live actionable alerts — below-threshold items of UNMUTED branches only. */
+  loadLowStockAlerts(tenantId: string, branchId: string): Promise<readonly LowStockAlert[]>;
+
+  /** I3: crossing history — NEVER mute-filtered (the record stays complete). */
+  loadInventoryEvents(
+    tenantId: string,
+    branchId: string,
+    afterSequenceId: number,
+    limit: number,
+  ): Promise<readonly InventoryOutboxEvent[]>;
 }
 
 export interface InventoryStore {

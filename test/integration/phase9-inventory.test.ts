@@ -140,7 +140,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -329,6 +329,18 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       [id, tenant, opts.kindCode ?? 'damage', opts.label ?? `سبب ${id.slice(0, 8)}`, opts.isEnabled ?? true],
     ));
     return id;
+  }
+
+  /** I3: set a component's low-stock threshold (config write — the guard only blocks quantities). */
+  async function setThreshold(inventoryItemId: string, thresholdText: string): Promise<void> {
+    await withApp(T, (q) => q.query(
+      'UPDATE inventory_items SET low_stock_threshold = $1 WHERE tenant_id = $2 AND id = $3',
+      [thresholdText, T, inventoryItemId],
+    ));
+  }
+
+  async function removeMenuRecipe(menuItemId: string, inventoryItemId: string): Promise<void> {
+    await owner.query('DELETE FROM menu_item_recipes WHERE tenant_id = $1 AND menu_item_id = $2 AND inventory_item_id = $3', [T, menuItemId, inventoryItemId]);
   }
 
   async function addMenuRecipe(menuItemId: string, inventoryItemId: string, quantityText: string): Promise<void> {
@@ -1342,5 +1354,121 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(smuggled?.message ?? '').toMatch(/reason/);
 
     expect(await stockOf(flour)).toBe('10.0000');
+  });
+
+  // ── I3: low-stock crossings + branch mutes ───────────────────────────────
+
+  it('I3a/ draining across the threshold emits exactly one event; deeper drains stay silent until recovery re-arms', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    await setThreshold(flour, '5.0000');
+    await addMenuRecipe(itemMeal, flour, '1.0000');
+    try {
+      // 10 → 4: crossing. Exactly one event, payload pinned.
+      await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 6 }]);
+      expect(await stockOf(flour)).toBe('4.0000');
+      const first = await inventory.listInventoryEvents(T, till.branchId, 0, 10);
+      expect(first).toHaveLength(1);
+      expect(first[0]?.eventType).toBe('inventory.low_stock');
+      expect(first[0]?.sequenceId).toBe(1);
+      expect(first[0]?.payload).toEqual({
+        inventory_item_id: flour,
+        branch_id: till.branchId,
+        low_stock_threshold: '5.0000',
+        balance_before: '10.0000',
+        balance_after: '4.0000',
+      });
+      const alerts = await inventory.listLowStockAlerts(T, till.branchId);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toEqual({
+        branchId: till.branchId,
+        inventoryItemId: flour,
+        name: { ar: 'دقيق', en: 'Flour' },
+        baseUnit: 'kg',
+        currentQuantity: '4.0000',
+        lowStockThreshold: '5.0000',
+      });
+
+      // 4 → 3: already below. Edge, not level — still one event.
+      await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 1 }]);
+      expect(await inventory.listInventoryEvents(T, till.branchId, 0, 10)).toHaveLength(1);
+
+      // 3 → 13: recovery above the line re-arms, but emits nothing itself.
+      await inventory.receiveStock(T, { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV }, {
+        branchId: till.branchId, inventoryItemId: flour, purchaseUnit: 'kg', quantityText: '10.00000000',
+      });
+      expect(await stockOf(flour)).toBe('13.0000');
+      expect(await inventory.listLowStockAlerts(T, till.branchId)).toHaveLength(0);
+      expect(await inventory.listInventoryEvents(T, till.branchId, 0, 10)).toHaveLength(1);
+
+      // 13 → 4: second crossing, gapless second sequence — and the after-cursor pages honestly.
+      await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 9 }]);
+      const both = await inventory.listInventoryEvents(T, till.branchId, 0, 10);
+      expect(both).toHaveLength(2);
+      expect(both[1]?.sequenceId).toBe(2);
+      expect(both[1]?.payload).toMatchObject({ balance_before: '13.0000', balance_after: '4.0000' });
+      const page = await inventory.listInventoryEvents(T, till.branchId, 1, 10);
+      expect(page).toHaveLength(1);
+      expect(page[0]?.sequenceId).toBe(2);
+    } finally {
+      await removeMenuRecipe(itemMeal, flour);
+    }
+  });
+
+  it('I3b/ a component with no threshold never emits and never alerts', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    await addMenuRecipe(itemMeal, flour, '1.0000');
+    try {
+      await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 6 }]);
+      expect(await stockOf(flour)).toBe('4.0000');
+      expect(await inventory.listInventoryEvents(T, till.branchId, 0, 10)).toHaveLength(0);
+      expect(await inventory.listLowStockAlerts(T, till.branchId)).toHaveLength(0);
+    } finally {
+      await removeMenuRecipe(itemMeal, flour);
+    }
+  });
+
+  it('I3c/ muting hides a branch\u2019s alerts but never its history; muting is branch-scoped and adjust-gated', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const flourA = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const flourB = await createComponent(tillB.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    await setThreshold(flourA, '5.0000');
+    await setThreshold(flourB, '5.0000');
+    // One menu item = one recipe set (branch-scoped deduction still needs
+    // EVERY recipe component at the sale branch), so each branch sells a
+    // DIFFERENT item: itemMeal drains A, recipe-less itemDrink drains B.
+    await addMenuRecipe(itemMeal, flourA, '1.0000');
+    await addMenuRecipe(itemDrink, flourB, '1.0000');
+    try {
+      await placeOrder(tillA.cashier.userId, tillA, [{ menuItemId: itemMeal, quantity: 6 }]);
+      await placeOrder(tillB.cashier.userId, tillB, [{ menuItemId: itemDrink, quantity: 6 }]);
+      expect(await inventory.listLowStockAlerts(T, tillA.branchId)).toHaveLength(1);
+      expect(await inventory.listLowStockAlerts(T, tillB.branchId)).toHaveLength(1);
+
+      const adjustActor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+      await inventory.muteLowStockAlerts(T, adjustActor, tillA.branchId);
+
+      // Alerts: branch A silenced, branch B untouched (branch-scoped mute).
+      expect(await inventory.listLowStockAlerts(T, tillA.branchId)).toHaveLength(0);
+      expect(await inventory.listLowStockAlerts(T, tillB.branchId)).toHaveLength(1);
+      // History: intact — the mute filters NOTHING from the outbox.
+      expect(await inventory.listInventoryEvents(T, tillA.branchId, 0, 10)).toHaveLength(1);
+
+      await inventory.unmuteLowStockAlerts(T, adjustActor, tillA.branchId);
+      expect(await inventory.listLowStockAlerts(T, tillA.branchId)).toHaveLength(1);
+
+      // Gates: muting hides shrinkage signals → inventory:adjust, real branches only.
+      const keyless = await createPlainUser('1515');
+      await expect(inventory.muteLowStockAlerts(T, { userId: keyless.userId, tokenSecV: keyless.tokenSecV }, tillA.branchId))
+        .rejects.toBeInstanceOf(ForbiddenError);
+      await expect(inventory.muteLowStockAlerts(T, adjustActor, randomUUID())).rejects.toBeInstanceOf(NotFoundError);
+      await expect(inventory.unmuteLowStockAlerts(T, adjustActor, randomUUID())).rejects.toBeInstanceOf(NotFoundError);
+    } finally {
+      await removeMenuRecipe(itemMeal, flourA);
+      await removeMenuRecipe(itemDrink, flourB);
+      await inventory.unmuteLowStockAlerts(T, { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV }, tillA.branchId);
+    }
   });
 });
