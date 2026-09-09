@@ -27,6 +27,7 @@ import type {
   InventoryItemRecord,
   RecipeOwnerRef,
   RecipeRequirementLine,
+  RestorationKey,
   SaleDeductionAggregate,
   StockMovementRecord,
 } from './inventory.ts';
@@ -470,6 +471,12 @@ export interface OrdersTxScope {
   loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
   /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
   loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
+  /**
+   * (order item, component) pairs that already carry a void_restoration row
+   * — void-written or written by a prior partial refund. The void path
+   * skips these: the stock is already home.
+   */
+  loadVoidRestorationKeys(tenantId: string, orderItemIds: readonly string[]): Promise<readonly RestorationKey[]>;
 }
 
 export interface OrdersStore {

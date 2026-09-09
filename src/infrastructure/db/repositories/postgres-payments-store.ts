@@ -538,17 +538,39 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
     },
 
     async loadWasteRefundKeys(tid, orderId): Promise<readonly WasteRefundKey[]> {
+      // The refund dedup guard covers BOTH refund-written types: a
+      // void_restoration row on a still-live line can only come from a prior
+      // refund (the void path restores voided lines only), so it suppresses
+      // a second restoration exactly like a waste row suppresses waste.
       const result = await q.query<{ order_item_id: string; inventory_item_id: string }>(
         `SELECT order_item_id, inventory_item_id FROM stock_movements
-          WHERE tenant_id = $1 AND order_id = $2 AND movement_type = 'waste_refund'`,
+          WHERE tenant_id = $1 AND order_id = $2 AND movement_type IN ('waste_refund', 'void_restoration')`,
         [tid, orderId],
       );
       return result.rows.map((r) => ({ orderItemId: r.order_item_id, inventoryItemId: r.inventory_item_id }));
     },
 
+    async loadItemsWithKitchenTicketFired(tid: string, orderItemIds: readonly string[]): Promise<readonly string[]> {
+      if (orderItemIds.length === 0) return [];
+      // "Has this item EVER been in a ticket-firing state" — across the FULL
+      // immutable event history (initial event included), resolved through
+      // the tenant's workflow states to the platform kind flags.
+      const result = await q.query<{ order_item_id: string }>(
+        `SELECT DISTINCT e.order_item_id
+           FROM order_item_status_events e
+           JOIN tenant_order_workflow_states s ON s.id = e.to_status_kind_id AND s.tenant_id = e.tenant_id
+           JOIN order_status_kinds k ON k.code = s.kind_code
+          WHERE e.tenant_id = $1 AND e.order_item_id = ANY($2::uuid[])
+            AND (k.behavior_flags ->> 'fires_kitchen_ticket')::boolean IS TRUE`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => r.order_item_id);
+    },
+
     async insertStockMovement(tid, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
-      // Waste rows carry a ZERO delta and can never trip the sale-only
-      // shortage gate — plain insert, no error mapping.
+      // Refund rows are waste (ZERO delta) or restoration (POSITIVE delta):
+      // neither can trip the sale-only shortage gate — plain insert, no
+      // error mapping.
       return insertStockMovementRow(q, tid, movement);
     },
   };

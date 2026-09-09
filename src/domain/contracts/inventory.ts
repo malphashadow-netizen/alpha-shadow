@@ -120,6 +120,12 @@ export interface WasteRefundKey {
   readonly inventoryItemId: string;
 }
 
+/** (order item, component) pair already carrying a void_restoration row. */
+export interface RestorationKey {
+  readonly orderItemId: string;
+  readonly inventoryItemId: string;
+}
+
 // ── The inventory store port (one transaction per use case) ─────────────────
 
 /** I4: a registered universal unit (platform-wide — no tenant scoping). */

@@ -37,7 +37,7 @@ import type {
 import type { OrderPaymentStatus } from '../../../domain/contracts/orders.ts';
 import { STOCK_QUANTITY_SCALE } from '../../../domain/contracts/inventory.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
-import { minorToDecimalText, nonNegativeDecimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
+import { decimalTextToMinor, minorToDecimalText, nonNegativeDecimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
 import {
   CashierShiftRequiredError,
   ConflictError,
@@ -457,22 +457,28 @@ export class PaymentsEngine {
       const nextStatus = orderVoided ? 'voided' : nextOrderPaymentStatus(totals, snapshot);
       await scope.setOrderPaymentStatus(tenantId, existing.orderId, nextStatus);
       if (to === 'refunded') {
-        // Phase-9 stock: a refunded order is waste, never restocked — same
-        // transaction as the lifecycle change. (Payment VOIDs are cashier
-        // corrections on a standing order: no stock effect by design.)
-        await this.writeRefundWaste(scope, tenantId, pre.branchId, existing.orderId, actorUserId);
+        // Phase-9 stock: restoration-or-waste per live line (the void-path
+        // mirror), same transaction as the lifecycle change. (Payment VOIDs
+        // are cashier corrections on a standing order: no stock effect by
+        // design.)
+        await this.writeRefundStockMovements(scope, tenantId, pre.branchId, existing.orderId, actorUserId);
       }
       return updated;
     });
   }
 
   /**
-   * Phase-9 refund stock: one zero-delta waste_refund line per deducted
-   * component of every LIVE (non-voided) line — voided lines were already
-   * restored-or-wasted by the void path. NOT EXISTS-guarded, so refunding a
-   * second payment on the same order adds no duplicate waste lines.
+   * Phase-9 refund stock: the void-path mirror (writeVoidStockMovements)
+   * over the LIVE (non-voided) lines — voided lines were already
+   * restored-or-wasted by the void path. Per deducted component, restoration
+   * mirrors the RECORDED sale deduction exactly (never recomputed from live
+   * recipes) — but ONLY when the line never entered a fires_kitchen_ticket
+   * state; a prepared line is waste (zero delta, the consumed quantity stays
+   * consumed). NOT EXISTS-guarded over BOTH refund-written types, so
+   * refunding a second payment on the same order restores/wastes nothing
+   * twice.
    */
-  private async writeRefundWaste(
+  private async writeRefundStockMovements(
     scope: PaymentsTxScope,
     tenantId: string,
     branchId: string,
@@ -483,17 +489,21 @@ export class PaymentsEngine {
     if (itemIds.length === 0) return;
     const deductions = await scope.loadSaleDeductionsForOrderItems(tenantId, itemIds);
     if (deductions.length === 0) return;
+    const fired = new Set(await scope.loadItemsWithKitchenTicketFired(tenantId, itemIds));
     const recorded = new Set(
       (await scope.loadWasteRefundKeys(tenantId, orderId)).map((key) => `${key.orderItemId}:${key.inventoryItemId}`),
     );
     const occurredAt = new Date();
     for (const deduction of deductions) {
       if (recorded.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
+      const restores = !fired.has(deduction.orderItemId);
       await scope.insertStockMovement(tenantId, {
         branchId,
         inventoryItemId: deduction.inventoryItemId,
-        movementType: 'waste_refund',
-        quantityDelta: minorToDecimalText(0n, STOCK_QUANTITY_SCALE),
+        movementType: restores ? 'void_restoration' : 'waste_refund',
+        quantityDelta: restores
+          ? minorToDecimalText(-decimalTextToMinor(deduction.totalDeducted, STOCK_QUANTITY_SCALE, 'totalDeducted'), STOCK_QUANTITY_SCALE)
+          : minorToDecimalText(0n, STOCK_QUANTITY_SCALE),
         orderId,
         orderItemId: deduction.orderItemId,
         actorUserId,

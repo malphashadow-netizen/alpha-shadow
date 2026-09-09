@@ -316,10 +316,14 @@ export interface PaymentsTxScope {
   insertPaymentMethod(tenantId: string, input: NewPaymentMethodInput): Promise<PaymentMethodRecord>;
   updatePaymentMethod(tenantId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord>;
 
-  // Stock ledger (Phase 9: refund waste lines mirror recorded deductions).
+  // Stock ledger (Phase 9: the refund path mirrors the void path — a
+  // never-fired line restores, a fired line wastes; the refund-written keys
+  // of BOTH types dedup repeat refunds of one order).
   loadNonVoidedOrderItemIds(tenantId: string, orderId: string): Promise<readonly string[]>;
   loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
   loadWasteRefundKeys(tenantId: string, orderId: string): Promise<readonly WasteRefundKey[]>;
+  /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
+  loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
 }
 

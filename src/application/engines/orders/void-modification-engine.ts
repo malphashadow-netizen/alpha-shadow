@@ -267,6 +267,9 @@ export class VoidModificationEngine {
    * entered a fires_kitchen_ticket state; a prepared line is waste (zero
    * delta, the consumed quantity stays consumed). Lines with no recorded
    * deductions (pre-Phase-9 orders, recipe-less lines) yield no rows at all.
+   * Pairs already carrying a void_restoration row (a prior partial refund
+   * came home first) are skipped: stock is restored exactly once per
+   * (line, component), never twice.
    */
   private async writeVoidStockMovements(
     scope: OrdersTxScope,
@@ -279,8 +282,12 @@ export class VoidModificationEngine {
     const deductions = await scope.loadSaleDeductionsForOrderItems(tenantId, voidedItemIds);
     if (deductions.length === 0) return;
     const fired = new Set(await scope.loadItemsWithKitchenTicketFired(tenantId, voidedItemIds));
+    const restored = new Set(
+      (await scope.loadVoidRestorationKeys(tenantId, voidedItemIds)).map((key) => `${key.orderItemId}:${key.inventoryItemId}`),
+    );
     const occurredAt = new Date();
     for (const deduction of deductions) {
+      if (restored.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
       const restores = !fired.has(deduction.orderItemId);
       await scope.insertStockMovement(tenantId, {
         branchId: order.branchId,

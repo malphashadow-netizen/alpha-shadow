@@ -37,6 +37,7 @@ import type {
   RecipeOwnerRef,
   RecipeOwnerType,
   RecipeRequirementLine,
+  RestorationKey,
   SaleDeductionAggregate,
   StockMovementRecord,
 } from '../../../domain/contracts/inventory.ts';
@@ -816,6 +817,19 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         [tid, orderItemIds],
       );
       return result.rows.map((r) => r.order_item_id);
+    },
+
+    async loadVoidRestorationKeys(tid: string, orderItemIds: readonly string[]): Promise<readonly RestorationKey[]> {
+      if (orderItemIds.length === 0) return [];
+      // ANY restoration row for the pair — void-written or written by a
+      // prior partial refund: the stock is already home, so the void path
+      // must not restore it a second time.
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string }>(
+        `SELECT DISTINCT order_item_id, inventory_item_id FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'void_restoration'`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({ orderItemId: r.order_item_id, inventoryItemId: r.inventory_item_id }));
     },
   };
 }

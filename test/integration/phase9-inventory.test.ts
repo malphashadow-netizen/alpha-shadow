@@ -855,13 +855,15 @@ describe('Phase 9 inventory-backed selling (live)', () => {
 
   // ── Case 6: post-payment refunds ──────────────────────────────────────────
 
-  it('6a/ a post-payment refund writes zero-delta waste per deducted component and leaves the balance deducted', async () => {
+  it('6a/ a post-payment refund AFTER the ticket fired writes zero-delta waste per deducted component and leaves the balance deducted', async () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
     await addMenuRecipe(itemMeal, flour, '1.0000');
     const created = await placeOrder(till.cashier.userId, till, [
       { menuItemId: itemMeal, quantity: 2 },
     ]);
+    // Fire the ticket BEFORE payment: the prepared line is waste, never restocked.
+    await transitions.transitionItem(T, { orderItemId: row([...created.items]).item.id, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId });
     expect(await stockOf(flour)).toBe('3.0000');
     const totals = await payments.orderTotals(T, created.order.id);
     const payment = await payments.recordPayment(T, {
@@ -883,7 +885,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(paymentStatus).toBe('refunded');
   });
 
-  it('6b/ two refunded legs of one order write the waste row ONCE (dedup), and a corrected payment writes none', async () => {
+  it('6b/ two refunded legs of one order write the restoration row ONCE (dedup), and a corrected payment writes none', async () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
     await addMenuRecipe(itemMeal, flour, '1.0000');
@@ -898,12 +900,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     });
 
     await payments.refundPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, { paymentId: leg1.payment.id });
-    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'waste_refund')).toHaveLength(1);
+    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'void_restoration')).toHaveLength(1);
     await payments.refundPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, { paymentId: leg2.payment.id });
-    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'waste_refund')).toHaveLength(1);
-    expect(await stockOf(flour)).toBe('4.0000');
+    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'void_restoration')).toHaveLength(1);
+    expect(await stockOf(flour)).toBe('5.0000');
 
-    // A voided (corrected) payment is NOT a customer return: no waste movement.
+    // A voided (corrected) payment is NOT a customer return: no refund movement at all.
     const created2 = await placeOrder(till.cashier.userId, till, [
       { menuItemId: itemMeal, quantity: 1 },
     ]);
@@ -914,9 +916,10 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       paymentId: payment2.payment.id, reason: 'تصحيح قبل الإغلاق',
     });
     expect((await movementsFor(created2.order.id)).filter((m) => m.movement_type === 'waste_refund')).toHaveLength(0);
+    expect((await movementsFor(created2.order.id)).filter((m) => m.movement_type === 'void_restoration')).toHaveLength(0);
   });
 
-  it('6c/ a refund after a pre-ticket void wastes only the still-deducted line', async () => {
+  it('6c/ a refund after a pre-ticket void restores the still-live line (the voided line is never double-counted)', async () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
     await addMenuRecipe(itemMeal, flour, '1.0000');
@@ -941,9 +944,69 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       ['sale_deduction', '-1.0000'],
       ['sale_deduction', '-1.0000'],
       ['void_restoration', '1.0000'],
-      ['waste_refund', '0.0000'],
+      ['void_restoration', '1.0000'],
     ]);
-    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'waste_refund')).toHaveLength(1);
+    expect((await movementsFor(created.order.id)).filter((m) => m.movement_type === 'waste_refund')).toHaveLength(0);
+    expect(await stockOf(flour)).toBe('10.0000');
+  });
+
+  it('6d/ a pre-ticket refund RESTORES the recorded deduction exactly (balance rises)', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
+    await addMenuRecipe(itemMeal, flour, '1.0000');
+    const created = await placeOrder(till.cashier.userId, till, [
+      { menuItemId: itemMeal, quantity: 2 },
+    ]);
+    expect(await stockOf(flour)).toBe('3.0000');
+    const totals = await payments.orderTotals(T, created.order.id);
+    const payment = await payments.recordPayment(T, {
+      orderId: created.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId,
+      amountText: minorToText(totals.totalMinor),
+    });
+
+    // No ticket fired: the unprepared line restores, mirroring the void path (5a).
+    await payments.refundPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, {
+      paymentId: payment.payment.id,
+    });
+
+    expect(await stockOf(flour)).toBe('5.0000');
+    const movements = await movementsFor(created.order.id);
+    expect(movements.map((m) => [m.movement_type, m.quantity_delta])).toEqual([
+      ['sale_deduction', '-2.0000'],
+      ['void_restoration', '2.0000'],
+    ]);
+  });
+
+  it('6e/ a partial refund followed by a void does NOT double-restore (the void skips the refund-restored line)', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
+    await addMenuRecipe(itemMeal, flour, '1.0000');
+    const created = await placeOrder(till.cashier.userId, till, [
+      { menuItemId: itemMeal, quantity: 1 }, // 20.00 + 15% VAT = 23.00
+    ]);
+    const itemId = row([...created.items]).item.id;
+    const leg1 = await payments.recordPayment(T, {
+      orderId: created.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '10.00',
+    });
+    await payments.recordPayment(T, {
+      orderId: created.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '13.00',
+    });
+
+    // Partial refund on the UNFIRED line: stock comes home, status back to 'open'.
+    await payments.refundPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, { paymentId: leg1.payment.id });
+    expect(await stockOf(flour)).toBe('5.0000');
+
+    // The later void must NOT restore a second time (stock already home).
+    await voids.voidOrderItem(T, { userId: voidServerUser.userId, tokenSecV: voidServerUser.tokenSecV }, {
+      orderItemId: itemId, voidReasonId: reasonServer,
+    });
+
+    expect(await stockOf(flour)).toBe('5.0000');
+    const movements = await movementsFor(created.order.id);
+    expect(movements.map((m) => [m.movement_type, m.quantity_delta])).toEqual([
+      ['sale_deduction', '-1.0000'],
+      ['void_restoration', '1.0000'],
+    ]);
   });
 
   // ── Case 7: receiving conversions ─────────────────────────────────────────

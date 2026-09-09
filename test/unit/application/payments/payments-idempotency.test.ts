@@ -118,6 +118,7 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
     loadNonVoidedOrderItemIds: async () => unused('loadNonVoidedOrderItemIds'),
     loadSaleDeductionsForOrderItems: async () => unused('loadSaleDeductionsForOrderItems'),
     loadWasteRefundKeys: async () => unused('loadWasteRefundKeys'),
+    loadItemsWithKitchenTicketFired: async () => unused('loadItemsWithKitchenTicketFired'),
   };
 }
 
