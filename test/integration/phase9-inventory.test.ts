@@ -1552,4 +1552,45 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     )).then(() => null, (error: unknown) => error) as { code?: string } | null;
     expect(failure?.code).toBe('42501');
   });
+
+  it('I4d/ unit matching is case-insensitive (LOWER); outputs always use the canonical registry code', async () => {
+    const till = await setupTill();
+    const actor = { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV };
+    // Upper-base + lower-purchase: 'KG' base, 'kg' purchase → the same kg row, exact math.
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'KG', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, purchaseUnit: 'kg', quantityText: '2.50000000',
+    });
+    expect(await stockOf(flour)).toBe('2.5000');
+    // Reverse: 'ML' base, 'ml' purchase → the ml row (NOT the L row): a
+    // passthrough reads '1000.0000'; had it matched L (×1000) it would read a million.
+    const juice = await createComponent(till.branchId, 'عصير', 'Juice', 'ML', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: juice, purchaseUnit: 'ml', quantityText: '1000.00000000',
+    });
+    expect(await stockOf(juice)).toBe('1000.0000');
+    // Lowercase 'l' matches canonical 'L' (volume): 2 L → ml = '2000.0000'.
+    const milk = await createComponent(till.branchId, 'حليب', 'Milk', 'ml', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: milk, purchaseUnit: 'l', quantityText: '2.00000000',
+    });
+    expect(await stockOf(milk)).toBe('2000.0000');
+    // Canonical form in failure outputs: raw 'KG'/'ML' surface as 'kg'/'ml'.
+    const cross = await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: juice, purchaseUnit: 'KG', quantityText: '1.00000000',
+    }).then(() => null, (error: unknown) => error);
+    expect(cross).toBeInstanceOf(ValidationError);
+    expect((cross as ValidationError).message).toBe(`No conversion from 'kg' to base unit 'ml' for this component`);
+    // Unknown units keep their raw form (no registry row ⇒ nothing canonical to map to).
+    const unknown = await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: juice, purchaseUnit: 'SACHET', quantityText: '1.00000000',
+    }).then(() => null, (error: unknown) => error);
+    expect(unknown).toBeInstanceOf(ValidationError);
+    expect((unknown as ValidationError).message).toBe(`No conversion from 'SACHET' to base unit 'ml' for this component`);
+    // Structural invariant: LOWER(code) is collision-free across the registry.
+    const collision = await withApp(T, (q) => q.query<{ codes: number; lowers: number }>(
+      'SELECT count(*)::int AS codes, count(DISTINCT LOWER(code))::int AS lowers FROM unit_registry',
+    ));
+    expect(collision.rows[0]).toEqual({ codes: 8, lowers: 8 });
+  });
 });

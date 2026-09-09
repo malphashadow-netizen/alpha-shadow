@@ -88,18 +88,28 @@ export class InventoryEngine {
       if (item.branchId !== input.branchId) {
         throw new ValidationError('Inventory item does not belong to the receiving branch', 'branchId');
       }
-      // I4: two-tier conversion. Tier 2 (explicit per-item row) wins on
-      // conflict; tier 1 derives same-kind universal pairs through the
-      // registry's base factors (banker division to scale 8 — the working
-      // factor then follows the existing exact path below).
+      // I4: two-tier conversion. Tier 2 (explicit per-item row) is matched
+      // BYTE-EXACT and wins on conflict — untouched by unit normalization.
       let factorText: string | null =
         input.purchaseUnit === item.baseUnit
           ? UNITY_FACTOR_TEXT
           : await scope.loadConversionFactor(tenantId, item.id, input.purchaseUnit, item.baseUnit);
+      // Tier-1 canonical codes, resolved below (raw input when unregistered).
+      let fromCode = input.purchaseUnit;
+      let toCode = item.baseUnit;
       if (factorText === null && input.purchaseUnit !== item.baseUnit) {
-        const units = await scope.loadUnitDefinitions([input.purchaseUnit, item.baseUnit]);
-        const from = units.find((u) => u.code === input.purchaseUnit) ?? null;
-        const to = units.find((u) => u.code === item.baseUnit) ?? null;
+        // Tier 1 derives same-kind universal pairs through the registry's
+        // base factors (banker division to scale 8 — the working factor
+        // then follows the existing exact path below). Matching is
+        // case-insensitive AT THE SQL PREDICATE (the single normalization
+        // point — see loadUnitDefinition); the seeds' canonical spelling is
+        // never rewritten, and every output below uses it. NOTE: this
+        // supersedes 0051's header comment ("no case folding"), which stands
+        // as-pushed as the historical record.
+        const from = await scope.loadUnitDefinition(input.purchaseUnit);
+        const to = await scope.loadUnitDefinition(item.baseUnit);
+        if (from !== null) fromCode = from.code;
+        if (to !== null) toCode = to.code;
         if (from !== null && to !== null && from.kind === to.kind) {
           const fromMinor = nonNegativeDecimalTextToMinor(from.toBaseFactor, CONVERSION_FACTOR_SCALE, 'conversionFactor');
           const toMinor = nonNegativeDecimalTextToMinor(to.toBaseFactor, CONVERSION_FACTOR_SCALE, 'conversionFactor');
@@ -111,7 +121,7 @@ export class InventoryEngine {
       }
       if (factorText === null) {
         throw new ValidationError(
-          `No conversion from '${input.purchaseUnit}' to base unit '${item.baseUnit}' for this component`,
+          `No conversion from '${fromCode}' to base unit '${toCode}' for this component`,
           'purchaseUnit',
         );
       }

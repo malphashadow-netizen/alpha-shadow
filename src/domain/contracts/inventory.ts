@@ -170,11 +170,13 @@ export interface InventoryTxScope {
   ): Promise<string | null>;
 
   /**
-   * I4: load registered unit definitions for the given codes (platform
-   * table — intentionally NO tenant parameter; unknown codes are simply
-   * absent from the result, never an error).
+   * I4: load the registered unit definition for one code (platform table —
+   * intentionally NO tenant parameter; unknown codes return null, never an
+   * error). Matching is case-insensitive (LOWER) at the SQL predicate — the
+   * SINGLE normalization point — but the returned `code` is always the
+   * canonical registry spelling.
    */
-  loadUnitDefinitions(codes: readonly string[]): Promise<readonly UnitDefinition[]>;
+  loadUnitDefinition(code: string): Promise<UnitDefinition | null>;
 
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
   /**
