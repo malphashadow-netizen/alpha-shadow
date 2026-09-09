@@ -107,6 +107,7 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
     setOrderPaymentStatus: async () => {
       options.calls.statusSet = true;
     },
+    hasActiveOrderItems: async () => unused('hasActiveOrderItems'),
     appendAuditEvidence: async () => unused('appendAuditEvidence'),
     insertOrderDiscount: async () => unused('insertOrderDiscount'),
     incrementCouponUses: async () => unused('incrementCouponUses'),

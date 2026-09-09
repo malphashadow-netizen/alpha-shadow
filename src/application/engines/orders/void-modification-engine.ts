@@ -231,6 +231,12 @@ export class VoidModificationEngine {
         for (const item of await scope.loadActiveOrderItems(tenantId, order.id)) voidedItemIds.push(item.id);
       }
       await scope.markOrderItemsVoided(tenantId, voidedItemIds);
+      // B11: no active lines left (a full order void, or the last line
+      // falling to an item void) ⇒ the order is terminally 'voided' — never
+      // 'open' ("re-collection required" would be a lie on a dead order).
+      if ((await scope.loadActiveOrderItems(tenantId, order.id)).length === 0) {
+        await scope.setOrderPaymentStatus(tenantId, order.id, 'voided');
+      }
       // Phase-9 stock: restoration-or-waste per voided line, same transaction.
       await this.writeVoidStockMovements(scope, tenantId, order, voidedItemIds, actor.userId);
       for (const itemId of voidedItemIds) {

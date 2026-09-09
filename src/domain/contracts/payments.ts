@@ -28,6 +28,7 @@
  * Conversion to/from BigInt minor units happens once, inside the application
  * engines, with the currency scale stated explicitly at each call site.
  */
+import type { OrderPaymentStatus } from './orders.ts';
 
 import type { ManagerOverrideContextType } from './orders.ts';
 import type {
@@ -291,7 +292,9 @@ export interface PaymentsTxScope {
   insertPayment(tenantId: string, payment: InsertPaymentInput): Promise<PaymentRecord>;
   voidPayment(tenantId: string, paymentId: string, evidence: { voidedById: string; voidedAt: Date; voidReason: string }): Promise<PaymentRecord>;
   refundPayment(tenantId: string, paymentId: string): Promise<PaymentRecord>;
-  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: 'open' | 'paid' | 'refund_pending' | 'refunded'): Promise<void>;
+  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;
+  /** B11: the preserve-voided probe — true when the order still has non-voided lines. */
+  hasActiveOrderItems(tenantId: string, orderId: string): Promise<boolean>;
   appendAuditEvidence(tenantId: string, evidence: AuditEvidenceInput): Promise<void>;
 
   // Discount writes.

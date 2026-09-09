@@ -1040,4 +1040,22 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       '0.0050', '0.0100', '0.0200', '0.0500', '0.1000', '0.2500', '0.5000', '1.0000', '5.0000', '10.0000', '20.0000',
     ]);
   });
+
+  // ── B11: terminal 'voided' payment status ────────────────────────────────
+
+  it('B11b/ voiding a payment on a voided order keeps voided (residual lifecycle changes never reopen)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    // Partial payment: the order stays 'open' ⇒ order-level void is allowed.
+    await payments.recordPayment(T, { orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '10.00' });
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer });
+    const statusOf = async (): Promise<string> => row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status;
+    expect(await statusOf()).toBe('voided');
+    // Voiding the residual partial payment must NOT flip the order back to 'open'.
+    const payment = await owner.query<{ id: string }>('SELECT id FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id]);
+    await payments.voidPayment(T, actor(till.cashier), { paymentId: row(payment.rows).id, reason: 'إلغاء الطلب' });
+    expect(await statusOf()).toBe('voided');
+  });
 });

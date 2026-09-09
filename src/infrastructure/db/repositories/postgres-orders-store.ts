@@ -650,6 +650,10 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       );
     },
 
+    async setOrderPaymentStatus(tid: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void> {
+      await q.query('UPDATE orders SET payment_status = $3 WHERE tenant_id = $1 AND id = $2', [tid, orderId, paymentStatus]);
+    },
+
     async recomputeOrderStatus(tid: string, orderId: string): Promise<string | null> {
       const result = await q.query<{ recompute_order_status: string | null }>(
         'SELECT recompute_order_status($1, $2) AS recompute_order_status',

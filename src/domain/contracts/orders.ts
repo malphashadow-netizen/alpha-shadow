@@ -33,7 +33,7 @@ import type {
 import type { TaxResolution } from './tax.ts';
 
 export type OrderType = 'dine_in' | 'takeaway' | 'delivery';
-export type OrderPaymentStatus = 'open' | 'paid' | 'refund_pending' | 'refunded';
+export type OrderPaymentStatus = 'open' | 'paid' | 'refund_pending' | 'refunded' | 'voided';
 export type VoidPermissionTier = 'server' | 'shift_supervisor' | 'manager';
 
 /** The graded void permission ladder (atomic keys in permissions_registry). */
@@ -449,6 +449,8 @@ export interface OrdersTxScope {
   userIsActiveMember(tenantId: string, userId: string): Promise<boolean>;
   appendEvent(tenantId: string, branchId: string, eventType: OrderEventType, payload: Readonly<Record<string, unknown>>): Promise<number>;
   markOrderItemsVoided(tenantId: string, orderItemIds: readonly string[]): Promise<void>;
+  /** B11: direct payment-status write (order void → 'voided'); the lifecycle recompute owns all other transitions. */
+  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;
   recomputeOrderStatus(tenantId: string, orderId: string): Promise<string | null>;
   insertOrderVoid(tenantId: string, record: { id: string; orderId: string; orderItemId: string | null; actorUserId: string; actorPermissionTier: VoidPermissionTier; voidReasonId: string; requiredManagerOverride: boolean; managerUserId: string | null; overrideAuthenticatedAt: Date | null; orderPaymentStatusAtVoidTime: OrderPaymentStatus; notes: string | null }): Promise<OrderVoidAuditRecord>;
 

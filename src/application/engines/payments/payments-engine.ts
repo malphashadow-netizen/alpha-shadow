@@ -449,7 +449,11 @@ export class PaymentsEngine {
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, existing.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${existing.orderId} not found`);
       const totals = computeOrderTotals(snapshot);
-      await scope.setOrderPaymentStatus(tenantId, existing.orderId, nextOrderPaymentStatus(totals, snapshot));
+      // B11: a fully-voided order keeps 'voided' across payment lifecycle
+      // changes — voiding/refunding a residual payment must not reopen it.
+      const orderVoided = !(await scope.hasActiveOrderItems(tenantId, existing.orderId));
+      const nextStatus = orderVoided ? 'voided' : nextOrderPaymentStatus(totals, snapshot);
+      await scope.setOrderPaymentStatus(tenantId, existing.orderId, nextStatus);
       if (to === 'refunded') {
         // Phase-9 stock: a refunded order is waste, never restocked — same
         // transaction as the lifecycle change. (Payment VOIDs are cashier
@@ -504,6 +508,8 @@ export class PaymentsEngine {
  *   refunded — EVERY payment of the order is refunded (full return of funds);
  *   open    — anything else (re-collection required).
  * ('refund_pending' stays reserved for the future partial-refund flow.)
+ * B11: 'voided' is preserved by the CALLER when no active lines remain —
+ * this pure function never returns it.
  */
 export function nextOrderPaymentStatus(
   totals: ReturnType<typeof computeOrderTotals>,

@@ -1038,4 +1038,34 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     );
     expect(Number(row(voidedEvents.rows).count)).toBe(1);
   });
+
+  // ── B11: terminal 'voided' payment status ────────────────────────────────
+
+  async function paymentStatusOf(orderId: string): Promise<string> {
+    const result = await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2',
+      [orderId, A],
+    );
+    return row(result.rows).payment_status;
+  }
+
+  it('B11a/ a full order void flips payment_status to voided; a partial item void leaves it open', async () => {
+    // Full order void ⇒ 'voided'.
+    const full = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    await voids.voidOrder(A, actor(serverUser), { orderId: full.order.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(full.order.id)).toBe('voided');
+
+    // Partial item void ⇒ still 'open' (the order lives on).
+    const partial = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }, { menuItemId: fixture.itemSalad }]);
+    const itemA = partial.items[0];
+    if (itemA === undefined) throw new Error('Expected first order item');
+    await voids.voidOrderItem(A, actor(serverUser), { orderItemId: itemA.item.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(partial.order.id)).toBe('open');
+
+    // Voiding the LAST line via the item path ⇒ 'voided' too (uniform rule).
+    const itemB = partial.items[1];
+    if (itemB === undefined) throw new Error('Expected second order item');
+    await voids.voidOrderItem(A, actor(serverUser), { orderItemId: itemB.item.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(partial.order.id)).toBe('voided');
+  });
 });

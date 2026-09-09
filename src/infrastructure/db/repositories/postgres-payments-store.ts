@@ -401,6 +401,14 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       await q.query('UPDATE orders SET payment_status = $3 WHERE tenant_id = $1 AND id = $2', [tid, orderId, paymentStatus]);
     },
 
+    async hasActiveOrderItems(tid: string, orderId: string): Promise<boolean> {
+      const result = await q.query<{ exists: boolean }>(
+        'SELECT EXISTS(SELECT 1 FROM order_items WHERE tenant_id = $1 AND order_id = $2 AND NOT is_voided) AS exists',
+        [tid, orderId],
+      );
+      return result.rows[0]?.exists ?? false;
+    },
+
     async appendAuditEvidence(tid, evidence: AuditEvidenceInput) {
       await q.query(
         `INSERT INTO audit_log (tenant_id, user_id, action, resource, before, after)
