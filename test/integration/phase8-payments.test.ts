@@ -28,6 +28,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
 import { VoidModificationEngine } from '../../src/application/engines/orders/void-modification-engine.ts';
 import { WorkflowAdminEngine } from '../../src/application/engines/orders/workflow-admin-engine.ts';
+import { WorkflowTransitionEngine } from '../../src/application/engines/orders/workflow-transition-engine.ts';
 import { DiscountEngine } from '../../src/application/engines/payments/discount-engine.ts';
 import { PaymentMethodsEngine } from '../../src/application/engines/payments/payment-methods-engine.ts';
 import { PaymentsEngine } from '../../src/application/engines/payments/payments-engine.ts';
@@ -94,6 +95,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   let ordersStore: PostgresOrdersStore;
   let creation: OrderCreationEngine;
   let workflowAdmin: WorkflowAdminEngine;
+  let transitions: WorkflowTransitionEngine;
   let shifts: ShiftEngine;
   let payments: PaymentsEngine;
   let discounts: DiscountEngine;
@@ -144,6 +146,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
+    transitions = new WorkflowTransitionEngine({ store: ordersStore });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
@@ -1079,5 +1082,47 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id],
     );
     expect(Number(row(paymentsCount.rows).count)).toBe(0);
+  });
+
+  // ── B9-c: terminal workflow states never block money ─────────────────────
+  // (Permissive BY APPROVED SPEC: pay-after-service and complaint-voids are
+  // legitimate on terminal states. These tests PIN that semantic — no prod
+  // change. Deliberately NOT pinned: collecting on a 'cancelled'-state order
+  // (T's workflow has no such state; needs its own strict-vs-permissive call).)
+
+  async function deliverAll(itemIds: readonly string[]): Promise<void> {
+    const delivered = (await workflowAdmin.listStates(T, true)).find((s) => s.kindCode === 'delivered');
+    if (delivered === undefined) throw new Error('Expected delivered state');
+    for (const orderItemId of itemIds) {
+      const moved = await transitions.transitionItem(T, { orderItemId, toWorkflowStateId: delivered.id });
+      expect(moved.toWorkflowStateId).toBe(delivered.id);
+    }
+  }
+
+  it('B9c/ collecting on a terminal (delivered) order succeeds — pay-after-service is never blocked', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    await deliverAll(order.items.map((i) => i.item.id));
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    expect(recorded.payment.status).toBe('completed');
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('paid');
+  });
+
+  it('B9c/ refunding a terminal (delivered) order succeeds — money-back is never blocked', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    await deliverAll(order.items.map((i) => i.item.id));
+    const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id });
+    expect(refunded.status).toBe('refunded');
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('refunded');
   });
 });

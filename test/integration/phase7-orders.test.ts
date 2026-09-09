@@ -1068,4 +1068,19 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     await voids.voidOrderItem(A, actor(serverUser), { orderItemId: itemB.item.id, voidReasonId: reasonServer });
     expect(await paymentStatusOf(partial.order.id)).toBe('voided');
   });
+
+  // ── B9-c: terminal workflow states never block money ─────────────────────
+  // (Permissive BY APPROVED SPEC — pins the semantic; no prod change.)
+
+  it('B9c/ voiding a terminal (delivered) line succeeds — complaint-voids are never blocked', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const delivered = state(A, 'delivered');
+    const moved = await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: delivered.id });
+    expect(moved.toWorkflowStateId).toBe(delivered.id);
+    const record = await voids.voidOrderItem(A, actor(serverUser), { orderItemId: item.item.id, voidReasonId: reasonServer });
+    expect(record.orderItemId).toBe(item.item.id);
+    expect(await paymentStatusOf(created.order.id)).toBe('voided');
+  });
 });
