@@ -494,6 +494,35 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(await stockOf(flour)).toBe('1.0000');
   });
 
+  it('B2/ an override cannot sell a component missing AT THIS BRANCH (409, not a trigger 500)', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    // Saffron is stocked ONLY at branch B; the recipe names it tenant-wide.
+    const saffron = await createComponent(tillB.branchId, 'زعفران', 'Saffron', 'g', '100.0000');
+    // itemDrink is recipe-less at this point (cases 5d/12b depend on that),
+    // so the requirement set is exactly { saffron } — then restore it.
+    await addMenuRecipe(itemDrink, saffron, '1.0000');
+    try {
+      const ordersBefore = await countWhere('orders', 'tenant_id = $1', [T]);
+      const movementsBefore = await countWhere('stock_movements', 'tenant_id = $1', [T]);
+
+      // Branch-A sale with a LIVE manager override: the component has NO
+      // row at A — the override covers the shortage, never the non-existence.
+      const failure = await placeOrder(tillA.cashier.userId, tillA, [
+        { menuItemId: itemDrink, quantity: 1 },
+      ], { managerOverride: { managerUserId: stockManager.userId, managerOverridePin: stockManager.pin } }).then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(InsufficientStockError);
+
+      // The write transaction rolled back whole (no order, no claim, no
+      // movement) and branch B's stock is untouched.
+      expect(await countWhere('orders', 'tenant_id = $1', [T])).toBe(ordersBefore);
+      expect(await countWhere('stock_movements', 'tenant_id = $1', [T])).toBe(movementsBefore);
+      expect(await stockOf(saffron)).toBe('100.0000');
+    } finally {
+      await owner.query('DELETE FROM menu_item_recipes WHERE tenant_id = $1 AND menu_item_id = $2 AND inventory_item_id = $3', [T, itemDrink, saffron]);
+    }
+  });
+
   // ── Case 3: trigger-level backstop ───────────────────────────────────────
 
   it('3/ the trigger rejects a forged sale_deduction: uncovered shortage, fabricated override, and every sign/link/scope CHECK', async () => {

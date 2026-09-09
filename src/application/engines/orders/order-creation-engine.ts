@@ -309,6 +309,18 @@ export class OrderCreationEngine {
           // cashier retries with the same challenge, which then verifies).
           throw new InsufficientStockError(nowShort.displayName, nowShort.inventoryItemId, input.branchId);
         }
+        // B2: an override covers SHORTAGE, never non-existence — every
+        // required component must have an inventory row AT THIS BRANCH (the
+        // load above is branch-scoped). Without this, the movement insert
+        // dies in the trigger with a raw 23514 (missing item or branch
+        // mismatch) → HTTP 500 instead of a cashier-facing 409.
+        if (overrideAttemptId !== null) {
+          for (const inventoryItemId of requiredByComponent.keys()) {
+            if (!quantities.has(inventoryItemId)) {
+              throw new InsufficientStockError(inventoryItemId, inventoryItemId, input.branchId);
+            }
+          }
+        }
         const grouped = groupRequirements(lines);
         if (overrideAttemptId !== null) {
           await scope.insertStockOverrideClaim(tenantId, { managerOverrideId: overrideAttemptId, orderId });
