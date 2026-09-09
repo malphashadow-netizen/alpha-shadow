@@ -51,11 +51,13 @@ import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import {
   CashierShiftRequiredError,
+  CouponAvailabilityRaceError,
   DiscountOverrideRequiredError,
   LoyaltyPointsDeferredError,
   PaymentExceedsBalanceError,
   PaymentReversalRequiredError,
   ValidationError,
+  toErrorResponse,
 } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -1124,5 +1126,37 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(row((await owner.query<{ payment_status: string }>(
       'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
     )).rows).payment_status).toBe('refunded');
+  });
+
+  it('P2/ a coupon expiring between check and write surfaces the 409 race error with the full code (not raw 23514)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // subtotal 40.00
+    // Deterministic race simulation: the coupon is created LIVE (this IS the
+    // passed engine check), then time-travelled to expired (the boundary
+    // crossing mid-transaction: JS Date.now() at check vs DB now() at
+    // insert, no coupon lock), then written at store level (the write).
+    // Through the engine the window is microseconds — inherently
+    // un-hittable on demand — so the test drives the write directly.
+    const coupon = await createCoupon({ code: 'P2-RACE-01', kind: 'percentage', value: '10.0000', expiresAt: new Date(Date.now() + 60_000) });
+    await withApp(T, (q) => q.query('UPDATE coupons SET expires_at = now() - interval \'1 second\' WHERE tenant_id = $1 AND id = $2', [T, coupon.id]));
+
+    const store = new PostgresPaymentsStore({ withTenantContext: withApp });
+    const failure = await store.run(T, (scope) => scope.insertOrderDiscount(T, {
+      id: randomUUID(),
+      orderId: order.order.id,
+      mechanism: 'coupon',
+      couponId: coupon.id,
+      couponCode: coupon.code,
+      discountKind: 'percentage',
+      discountValue: '10.0000',
+      discountAmountApplied: '4.0000',
+      requiredManagerOverride: false,
+      managerOverrideAttemptId: null,
+      appliedBy: discountUser.userId,
+    })).then(() => null, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(CouponAvailabilityRaceError);
+    expect((failure as CouponAvailabilityRaceError).message).toContain('P2-RACE-01');
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'conflict' });
   });
 });

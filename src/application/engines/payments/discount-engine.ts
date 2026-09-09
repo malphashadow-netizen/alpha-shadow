@@ -204,6 +204,11 @@ export class DiscountEngine {
         orderId: input.orderId,
         mechanism: input.mechanism,
         couponId,
+        // P2: canonical row code for the store's race-error message (in-hand
+        // context — the mapping never parses pg text). Spread ONLY when set:
+        // exactOptionalPropertyTypes forbids an explicit undefined, and a
+        // manual-mechanism row has no coupon at all.
+        ...(couponId === null ? {} : { couponCode: mustCouponCode(input) }),
         discountKind: input.discountKind,
         discountValue: canonicalValueText(input.discountKind, input.discountValueText),
         discountAmountApplied: minorToDecimalText(stage.appliedMinor, pre.baseDigits),

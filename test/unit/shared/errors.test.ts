@@ -4,6 +4,7 @@ import {
   AuthorizationError,
   ConfigurationError,
   ConflictError,
+  CouponAvailabilityRaceError,
   DomainError,
   ForbiddenError,
   ManagerOverrideRateLimitedError,
@@ -139,6 +140,16 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     });
     expect(toErrorResponse(new RateLimitError('rl'), noop).status).toBe(429);
     expect(toErrorResponse(new ConfigurationError('cfg'), noop).status).toBe(500);
+  });
+
+  it('CouponAvailabilityRaceError rides the EXISTING conflict case (409, full code echoed, never sinked) — no new switch case (P2 coupon race)', () => {
+    const failure = new CouponAvailabilityRaceError('P2-RACE-01');
+    expect(failure.code).toBe('conflict');
+    expect(failure.message).toContain('P2-RACE-01');
+    const response = toErrorResponse(failure, () => {
+      throw new Error('a 409 race outcome must never hit the alarm sink');
+    });
+    expect(response).toEqual({ status: 409, code: 'conflict', message: failure.message });
   });
 
   it('ManagerOverrideRateLimitedError: 429 + ONE fixed generic message for BOTH lock shapes (anti-oracle)', () => {

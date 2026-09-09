@@ -242,6 +242,13 @@ export interface InsertOrderDiscountInput {
   readonly orderId: string;
   readonly mechanism: DiscountMechanism;
   readonly couponId: string | null;
+  /**
+   * P2: the coupon CODE in-hand (canonical row spelling, passed by the
+   * engine) — context for the race-error message only, never written. D9
+   * mirror (inventoryItemDisplayName): the store mapping must never parse
+   * pg text to name the entity. Optional so existing callers keep working.
+   */
+  readonly couponCode?: string;
   readonly discountKind: DiscountKind;
   readonly discountValue: string;
   readonly discountAmountApplied: string;

@@ -334,6 +334,23 @@ export class CouponUnavailableError extends ValidationError {
   }
 }
 
+/**
+ * The coupon was VALID at check time but the write re-validation failed: a
+ * genuine concurrency race (e.g. the expiry boundary crossed between the
+ * engine's JS-clock check and the trigger's DB-clock insert — the coupon row
+ * carries no lock). Semantic split from CouponUnavailableError (400 = "the
+ * input was never valid": unknown code, originally inactive, below minimum):
+ * a check-then-changed conflict is a 409 (ShiftNotOpenError /
+ * WorkflowStateInUseError discipline), safe to retry once the state is
+ * re-read. Raised ONLY from the store's trigger mapping, with the coupon
+ * code in-hand (never parsed from pg text).
+ */
+export class CouponAvailabilityRaceError extends ConflictError {
+  constructor(readonly couponCode: string) {
+    super(`Coupon ${couponCode} cannot be applied: expired between check and write (concurrency race)`);
+  }
+}
+
 /** The payment method is unknown, inactive, or not available at the order's branch. */
 export class PaymentMethodUnavailableError extends ValidationError {
   constructor(readonly paymentMethodId: string, readonly reason: string) {

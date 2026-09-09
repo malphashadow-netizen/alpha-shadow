@@ -41,6 +41,7 @@ import type {
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { insertStockMovementRow } from './stock-ledger-rows.ts';
 import { decimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
+import { CouponAvailabilityRaceError } from '../../../shared/errors.ts';
 import { currencyCode } from '../../../shared/money.ts';
 
 interface PaymentMethodRow {
@@ -165,6 +166,27 @@ function mapShift(r: ShiftRow): ShiftRecord {
     recordedCashSales: r.recorded_cash_sales, variance: r.variance, varianceType: r.variance_type,
     notes: r.notes, createdAt: r.created_at,
   };
+}
+
+/**
+ * Stable text of the 0034/0036 coupon-expiry rejection ('coupon is expired',
+ * no interpolation). Pinned here AND in the unit test — the migrations stand
+ * as-pushed, so any reword there must update this predicate in the same
+ * change (D9 discipline).
+ */
+export const COUPON_EXPIRED_MESSAGE_PREFIX = 'coupon is expired';
+
+/**
+ * True only for the trigger's expiry rejection: code 23514 AND the stable
+ * text. Sibling rejections (inactive coupon, max uses, below minimum) and
+ * every other database error propagate untouched — fail-closed, and each
+ * sibling keeps alarming as 500 (a check-then-changed race on THOSE paths
+ * has no honest-API shape: only the time boundary can cross mid-tx).
+ */
+export function isCouponExpiredTriggerError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if (!('code' in error) || !('message' in error)) return false;
+  return error.code === '23514' && typeof error.message === 'string' && error.message.startsWith(COUPON_EXPIRED_MESSAGE_PREFIX);
 }
 
 export interface PostgresPaymentsStoreDependencies {
@@ -418,21 +440,34 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
     },
 
     async insertOrderDiscount(tid, discount: InsertOrderDiscountInput) {
-      const result = await q.query<OrderDiscountRow>(
-        `INSERT INTO order_discounts
-           (id, tenant_id, order_id, mechanism, coupon_id, discount_kind, discount_value,
-            discount_amount_applied, required_manager_override, manager_override_attempt_id, applied_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING *`,
-        [
-          discount.id, tid, discount.orderId, discount.mechanism, discount.couponId, discount.discountKind,
-          discount.discountValue, discount.discountAmountApplied, discount.requiredManagerOverride,
-          discount.managerOverrideAttemptId, discount.appliedBy,
-        ],
-      );
-      const r = result.rows[0];
-      if (r === undefined) throw new Error(`Order discount ${discount.id} could not be inserted`);
-      return mapDiscount(r);
+      // P2: the expiry gate lives in the trigger (the backstop for the
+      // midnight race — the engine's JS-clock check cannot see the boundary
+      // crossing before the DB-clock insert). Map it to the cashier-facing
+      // 409 race error with the coupon code in-hand (D9 discipline: code +
+      // stable text, never parsed pg); every other error propagates
+      // untouched (siblings keep alarming as 500 — see the predicate doc).
+      try {
+        const result = await q.query<OrderDiscountRow>(
+          `INSERT INTO order_discounts
+             (id, tenant_id, order_id, mechanism, coupon_id, discount_kind, discount_value,
+              discount_amount_applied, required_manager_override, manager_override_attempt_id, applied_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING *`,
+          [
+            discount.id, tid, discount.orderId, discount.mechanism, discount.couponId, discount.discountKind,
+            discount.discountValue, discount.discountAmountApplied, discount.requiredManagerOverride,
+            discount.managerOverrideAttemptId, discount.appliedBy,
+          ],
+        );
+        const r = result.rows[0];
+        if (r === undefined) throw new Error(`Order discount ${discount.id} could not be inserted`);
+        return mapDiscount(r);
+      } catch (error: unknown) {
+        if (isCouponExpiredTriggerError(error)) {
+          throw new CouponAvailabilityRaceError(discount.couponCode ?? discount.couponId ?? 'unknown coupon');
+        }
+        throw error;
+      }
     },
 
     async incrementCouponUses(tid, couponId) {
