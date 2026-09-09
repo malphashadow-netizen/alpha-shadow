@@ -1009,4 +1009,33 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     if (line === undefined) throw new Error('Expected one order item');
     expect(line.item.unitPriceMinor).toBe(5000n);
   });
+
+  // ── B9-a: order-level double void ────────────────────────────────────────
+
+  it('B9a/ voiding an already fully-voided order is rejected (no second void record, no duplicate order.voided event)', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const first = await voids.voidOrder(A, actor(serverUser), { orderId: created.order.id, voidReasonId: reasonServer });
+    expect(first.orderId).toBe(created.order.id);
+    expect(first.orderItemId).toBeNull();
+
+    const second = await voids.voidOrder(A, actor(serverUser), { orderId: created.order.id, voidReasonId: reasonServer }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(second).toBeInstanceOf(ValidationError);
+    expect((second as ValidationError).message).toMatch(/already fully voided/);
+
+    // Exactly one order_voids row and exactly one order.voided outbox event.
+    const voidRows = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_voids WHERE tenant_id = $1 AND order_id = $2 AND order_item_id IS NULL',
+      [A, created.order.id],
+    );
+    expect(Number(row(voidRows.rows).count)).toBe(1);
+    const voidedEvents = await owner.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM order_events_outbox
+        WHERE tenant_id = $1 AND event_type = 'order.voided' AND payload ->> 'order_id' = $2`,
+      [A, created.order.id],
+    );
+    expect(Number(row(voidedEvents.rows).count)).toBe(1);
+  });
 });

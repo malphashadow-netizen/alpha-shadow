@@ -88,6 +88,12 @@ export class VoidModificationEngine {
       resolveTarget: async (scope): Promise<VoidTarget> => {
         const order = await scope.loadOrder(tenantId, input.orderId);
         if (order === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+        // B9-a: an order-level void with no ACTIVE lines left is a repeat —
+        // reject it (item-void parity: already-voided → ValidationError)
+        // instead of writing an empty void record + a duplicate event.
+        if ((await scope.loadActiveOrderItems(tenantId, order.id)).length === 0) {
+          throw new ValidationError(`Order ${input.orderId} is already fully voided`);
+        }
         return { order, orderItemId: null, itemCreatedAt: null };
       },
       voidReasonId: input.voidReasonId,
