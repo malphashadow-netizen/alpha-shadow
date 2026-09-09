@@ -21,7 +21,8 @@
  *   7. Receiving converts purchase → base units (rounding, same-unit,
  *      missing conversion, strict scales); the sale path NEVER converts.
  *   8. `stock_override_claims` single-use (reuse rejected; concurrent double
- *      claim → exactly one wins; foreign-context attempts never authorize).
+ *      claim → exactly one wins; foreign-context attempts never authorize;
+ *      stale attempts never authorize even WITH a claim row).
  *   9. No stock oracle: a shiftless / non-member / wrong-branch cashier gets
  *      the gateway error with zero stock information in the message.
  *  10. `recipe_ingredients` tenant isolation (cross-tenant invisibility).
@@ -1104,6 +1105,55 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
     expect(failure?.code).toBe('23514');
     expect(failure?.message ?? '').toMatch(/sale_deduction override requires a successful stock_override attempt/);
+  });
+
+  it('8d/ a STALE override attempt NEVER authorizes a sale_deduction even WITH a claim row (freshness at the trigger)', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    await addMenuRecipe(itemMeal, flour, '0.1000');
+    const created = await placeOrder(till.cashier.userId, till, [
+      { menuItemId: itemMeal, quantity: 1 },
+    ]);
+    const itemId = row([...created.items]).item.id;
+
+    // A succeeded stock_override attempt that went STALE (16 minutes old).
+    // Attempts are UPDATE-immutable (0028), so the aged row is forged
+    // directly — the only way a stale attempt can exist at the trigger.
+    // The deduction below is IN-STOCK on purpose: the shortage gate (block g)
+    // stays silent, so the ONLY possible rejection is block (f) staleness.
+    const staleAttemptId = randomUUID();
+    await owner.query(
+      `INSERT INTO manager_override_attempts (id, tenant_id, target_manager_user_id, initiating_actor_user_id, outcome, context_type, created_at)
+       VALUES ($1, $2, $3, $4, 'succeeded', 'stock_override', now() - make_interval(mins => 16))`,
+      [staleAttemptId, T, stockManager.userId, till.cashier.userId],
+    );
+    // Even WITH a claim row binding the old authorization to this order, the
+    // movement trigger checks freshness: it cannot fund a new sale.
+    await withApp(T, (q) => q.query(
+      'INSERT INTO stock_override_claims (tenant_id, manager_override_id, order_id) VALUES ($1, $2, $3)',
+      [T, staleAttemptId, created.order.id],
+    ));
+    const failure = await withApp(T, (q) => q.query(
+      `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, actor_user_id, occurred_at)
+       VALUES ($1, $2, $3, 'sale_deduction', '-0.1000', $4, $5, $6, $7, now())`,
+      [T, till.branchId, flour, created.order.id, itemId, staleAttemptId, till.cashier.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(failure?.code).toBe('23514');
+    expect(failure?.message ?? '').toMatch(/sale_deduction override attempt is stale \(older than 15 minutes\)/);
+
+    // Sensitivity control: the IDENTICAL forgery with a FRESH attempt
+    // succeeds — staleness is the only rejected property.
+    const fresh = await authenticator.verifyLiveChallengeWithId(T, stockManager.userId, stockManager.pin, till.cashier.userId, 'stock_override');
+    await withApp(T, (q) => q.query(
+      'INSERT INTO stock_override_claims (tenant_id, manager_override_id, order_id) VALUES ($1, $2, $3)',
+      [T, fresh.attemptId, created.order.id],
+    ));
+    await withApp(T, (q) => q.query(
+      `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, actor_user_id, occurred_at)
+       VALUES ($1, $2, $3, 'sale_deduction', '-0.1000', $4, $5, $6, $7, now())`,
+      [T, till.branchId, flour, created.order.id, itemId, fresh.attemptId, till.cashier.userId],
+    ));
+    expect(await countWhere('stock_movements', 'tenant_id = $1 AND order_id = $2 AND manager_override_id = $3', [T, created.order.id, fresh.attemptId])).toBe(1);
   });
 
   // ── Case 9: no stock oracle ──────────────────────────────────────────────
