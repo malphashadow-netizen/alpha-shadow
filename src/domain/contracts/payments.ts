@@ -191,7 +191,7 @@ export interface OrderFinancialSnapshot {
   readonly orderId: string;
   readonly branchId: string;
   readonly baseCurrencyCode: string;
-  readonly paymentStatus: 'open' | 'paid' | 'refund_pending' | 'refunded';
+  readonly paymentStatus: OrderPaymentStatus;
   readonly roundingStrategy: OrderRoundingStrategy | null;
   readonly lines: readonly OrderLineForTotals[];
   readonly discounts: readonly OrderDiscountRecord[];

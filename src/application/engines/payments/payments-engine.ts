@@ -166,7 +166,9 @@ export class PaymentsEngine {
       await scope.bumpOrderRevision(tenantId, input.orderId);
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
-      if (snapshot.paymentStatus === 'refunded' || snapshot.paymentStatus === 'refund_pending') {
+      // B9-b: a fully-voided order is terminal — collecting on it is refused
+      // (without the B11 'voided' status this guard had nothing to grip).
+      if (snapshot.paymentStatus === 'refunded' || snapshot.paymentStatus === 'refund_pending' || snapshot.paymentStatus === 'voided') {
         throw new ValidationError(`A ${snapshot.paymentStatus} order cannot take a new payment`, 'orderId');
       }
 

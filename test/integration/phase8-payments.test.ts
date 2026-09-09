@@ -54,6 +54,7 @@ import {
   LoyaltyPointsDeferredError,
   PaymentExceedsBalanceError,
   PaymentReversalRequiredError,
+  ValidationError,
 } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -1057,5 +1058,26 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const payment = await owner.query<{ id: string }>('SELECT id FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id]);
     await payments.voidPayment(T, actor(till.cashier), { paymentId: row(payment.rows).id, reason: 'إلغاء الطلب' });
     expect(await statusOf()).toBe('voided');
+  });
+
+  // ── B9-b: no collection on a voided order ────────────────────────────────
+
+  it('B9b/ recording a payment on a fully-voided order is rejected and writes no payment', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer });
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('voided');
+
+    const failure = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '10.00',
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ValidationError);
+    expect((failure as ValidationError).message).toMatch(/voided order cannot take a new payment/);
+    const paymentsCount = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id],
+    );
+    expect(Number(row(paymentsCount.rows).count)).toBe(0);
   });
 });
