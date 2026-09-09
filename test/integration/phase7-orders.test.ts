@@ -42,6 +42,7 @@ import { KdsRealtimeClient, type KdsClientEvent } from '../../src/presentation/k
 import { KdsRealtimeServer } from '../../src/presentation/kds/kds-realtime-server.ts';
 import { hashPin } from '../../src/shared/auth/pin.ts';
 import {
+  ForbiddenError,
   ManagerOverrideAuthenticationError,
   ManagerOverrideRequiredError,
   NoMatchingRoutingRuleError,
@@ -165,8 +166,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     routing = new StationRoutingEngine({ store });
-    transitions = new WorkflowTransitionEngine({ store });
-    workflowAdmin = new WorkflowAdminEngine({ store });
+    transitions = new WorkflowTransitionEngine({ store, authorization });
+    workflowAdmin = new WorkflowAdminEngine({ store, authorization });
     voids = new VoidModificationEngine({
       store,
       authorization,
@@ -174,6 +175,9 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     });
     kdsEvents = new KdsEventService({ store });
     kdsDevices = new KdsDeviceEngine({ store: new PostgresKdsDeviceTokenStore({ withTenantContext: withApp }), authorization });
+    // Audit F-D: created early — the workflow-setup addState below is gated
+    // and needs a granted admin actor before any other fixture exists.
+    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
     await platform.configureJurisdiction(PLATFORM_ACTOR, 'SA', 'per_line', true);
@@ -194,7 +198,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       { kindCode: 'delivered', position: 50, label: { ar: 'تم التسليم' } },
       { kindCode: 'cancelled', position: 60, label: { ar: 'ملغي' } },
     ]);
-    await workflowAdmin.addState(A, { kindCode: 'preparing', parentKindCode: 'preparing', position: 35, label: { ar: 'قيد التحضير - في انتظار مكوّن' } });
+    const setupAdminA = await adminUser(A);
+    await workflowAdmin.addState(A, setupAdminA.userId, setupAdminA.tokenSecV, { kindCode: 'preparing', parentKindCode: 'preparing', position: 35, label: { ar: 'قيد التحضير - في انتظار مكوّن' } });
     for (const tenant of [B, C, D]) {
       await workflowAdmin.ensureWorkflow(tenant, [
         { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
@@ -203,7 +208,6 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
         { kindCode: 'cancelled', position: 40, label: { ar: 'ملغي' } },
       ]);
     }
-    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
     for (const tenant of [A, B, C, D]) {
       workflowStatesByTenant.set(tenant, await workflowAdmin.listStates(tenant, false));
       // B7: one catalog admin per tenant (the authz check is tenant-scoped,
@@ -291,6 +295,51 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     });
     const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
     return { userId, tokenSecV, pin };
+  }
+
+  /**
+   * Audit F-D: a minimal actor carrying exactly ONE key (no void keys — the
+   * transition/admin gates must not depend on unrelated grants). The secV is
+   * derived AFTER the grant, so it is fresh by construction.
+   */
+  async function createKeyUser(tenantId: string, key: string): Promise<TieredUser> {
+    const userId = randomUUID();
+    const pin = String(1000 + Math.trunc(Math.random() * 9000));
+    await withApp(tenantId, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [userId, tenantId, `${userId}@example.test`, hashPin(PIN_PEPPER, tenantId, userId, pin)],
+    ));
+    await grantKeys(permWrite, tenantId, userId, [key]);
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
+    return { userId, tokenSecV, pin };
+  }
+
+  /** Audit F-D: one transition-authorized actor per tenant, cached across tests. */
+  const transitionUserByTenant = new Map<string, TieredUser>();
+  async function transitionUser(tenantId: string): Promise<TieredUser> {
+    let user = transitionUserByTenant.get(tenantId);
+    if (user === undefined) {
+      user = await createKeyUser(tenantId, 'order:item:transition');
+      transitionUserByTenant.set(tenantId, user);
+    }
+    return user;
+  }
+
+  /** Audit F-D: one workflow-admin actor per tenant, cached across tests. */
+  const adminUserByTenant = new Map<string, TieredUser>();
+  async function adminUser(tenantId: string): Promise<TieredUser> {
+    let user = adminUserByTenant.get(tenantId);
+    if (user === undefined) {
+      user = await createKeyUser(tenantId, 'order:workflow:admin');
+      adminUserByTenant.set(tenantId, user);
+    }
+    return user;
+  }
+
+  /** Audit F-D: authorized transition — every legacy bare call routes through here. */
+  async function moveItem(tenantId: string, orderItemId: string, toWorkflowStateId: string) {
+    const user = await transitionUser(tenantId);
+    return transitions.transitionItem(tenantId, { orderItemId, toWorkflowStateId, actorUserId: user.userId, tokenSecV: user.tokenSecV });
   }
 
   /**
@@ -404,28 +453,29 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     // (a) A state of ANOTHER tenant's workflow is invisible (RLS) → rejected.
     const foreignPreparing = state(B, 'preparing');
-    await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: foreignPreparing.id }))
+    await expect(moveItem(A, item.item.id, foreignPreparing.id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
 
     // (b) A DISABLED state of the tenant's own workflow is not part of the
     //     effective sequence → rejected (engine + DB trigger).
     const confirmed = state(A, 'confirmed');
-    await workflowAdmin.disableState(A, confirmed.id);
+    const adminA = await adminUser(A);
+    await workflowAdmin.disableState(A, adminA.userId, adminA.tokenSecV, confirmed.id);
     try {
-      await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: confirmed.id }))
+      await expect(moveItem(A, item.item.id, confirmed.id))
         .rejects.toBeInstanceOf(WorkflowTransitionError);
       await expect(withApp(A, (q) => q.query(
         'INSERT INTO order_item_status_events (tenant_id, order_item_id, order_id, to_status_kind_id) VALUES ($1, $2, $3, $4)',
         [A, item.item.id, created.order.id, confirmed.id],
       ))).rejects.toMatchObject({ code: '23514' });
     } finally {
-      await workflowAdmin.enableState(A, confirmed.id);
+      await workflowAdmin.enableState(A, adminA.userId, adminA.tokenSecV, confirmed.id);
     }
 
     // (c) A BACKWARD move inside the tenant's sequence is rejected too.
     const preparing = state(A, 'preparing');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: preparing.id });
-    await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'received').id }))
+    await moveItem(A, item.item.id, preparing.id);
+    await expect(moveItem(A, item.item.id, state(A, 'received').id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
   });
 
@@ -440,19 +490,19 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     expect(created.order.currentStatusKindId).toBe(received.id);
 
-    await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: preparing.id });
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: waiting.id });
+    await moveItem(A, first.item.id, preparing.id);
+    await moveItem(A, second.item.id, waiting.id);
     // One item preparing + one in the "waiting for ingredient" sub-state → the
     // parent order is STILL "preparing".
     expect((await store.run(A, (s) => s.loadOrder(A, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
 
-    await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: ready.id });
+    await moveItem(A, first.item.id, ready.id);
     // One item ready + one still waiting → the order stays "preparing".
     expect((await store.run(A, (s) => s.loadOrder(A, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
 
     // Ingredient arrived: sub-state → plain preparing → then ready.
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: preparing.id });
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: ready.id });
+    await moveItem(A, second.item.id, preparing.id);
+    await moveItem(A, second.item.id, ready.id);
     const finalOrder = await store.run(A, (s) => s.loadOrder(A, created.order.id));
     expect(finalOrder?.currentStatusKindId).toBe(ready.id);
     expect(finalOrder?.closedAt).toBeNull();
@@ -511,10 +561,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       // Simulate the network drop; the client auto-reconnects after backoff.
       client.forceDrop();
       // While disconnected, four transitions + two parent-order changes land.
-      await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: preparing.id });          // seq 3 + order→preparing seq 4
-      await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: preparing.id });         // seq 5
-      await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: ready.id });              // seq 6 (order still preparing)
-      await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: ready.id });             // seq 7 + order→ready seq 8
+      await moveItem(A, first.item.id, preparing.id);          // seq 3 + order→preparing seq 4
+      await moveItem(A, second.item.id, preparing.id);         // seq 5
+      await moveItem(A, first.item.id, ready.id);              // seq 6 (order still preparing)
+      await moveItem(A, second.item.id, ready.id);             // seq 7 + order→ready seq 8
 
       await waitFor(() => received.length >= 8);
       expect(received.map((e) => e.sequenceId)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -700,8 +750,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
     const before = Date.now();
+    const mover = await transitionUser(A);
     await transitions.transitionItem(A, {
       orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id, occurredAt: new Date('2020-05-05T05:05:05.000Z'),
+      actorUserId: mover.userId, tokenSecV: mover.tokenSecV,
     });
     const after = Date.now();
     const latest = await owner.query<{ occurred_at: Date }>(
@@ -790,7 +842,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, item.item.id, state(A, 'preparing').id);
     const record = await voids.voidOrderItem(A, actor(serverUser), { orderItemId: item.item.id, voidReasonId: reasonServer });
     const eventId = row((await owner.query<{ id: string }>('SELECT id FROM order_item_status_events WHERE order_item_id = $1 LIMIT 1', [item.item.id])).rows).id;
 
@@ -1007,7 +1059,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, item.item.id, state(A, 'preparing').id);
     // Event seq 1: item → received (notifies_customer). Event seq 2: item →
     // preparing (fires_kitchen_ticket). Seq 3 is the order event (no flags).
 
@@ -1060,10 +1112,11 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     if (item === undefined) throw new Error('Expected one order item');
     const preparing = state(D, 'preparing');
     const ready = state(D, 'ready');
-    await transitions.transitionItem(D, { orderItemId: item.item.id, toWorkflowStateId: preparing.id });
+    await moveItem(D, item.item.id, preparing.id);
+    const adminD = await adminUser(D);
 
     // HARD DELETE: rejected by the application pre-check…
-    await expect(workflowAdmin.deleteState(D, preparing.id)).rejects.toBeInstanceOf(WorkflowStateInUseError);
+    await expect(workflowAdmin.deleteState(D, adminD.userId, adminD.tokenSecV, preparing.id)).rejects.toBeInstanceOf(WorkflowStateInUseError);
     // …and structurally by the FK RESTRICT chain (even for the DB owner;
     // ON DELETE RESTRICT raises SQLSTATE 23001 restrict_violation).
     await expect(owner.query('DELETE FROM tenant_order_workflow_states WHERE id = $1', [preparing.id]))
@@ -1071,14 +1124,14 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     // SOFT DISABLE: always allowed — historical rows keep pointing at the
     // state, but no NEW transition may enter or leave it.
-    await workflowAdmin.disableState(D, preparing.id);
+    await workflowAdmin.disableState(D, adminD.userId, adminD.tokenSecV, preparing.id);
     expect((await store.run(D, (s) => s.loadOrder(D, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
-    await expect(transitions.transitionItem(D, { orderItemId: item.item.id, toWorkflowStateId: ready.id }))
+    await expect(moveItem(D, item.item.id, ready.id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
 
     // REORDER: always allowed — orders reference the state id, never the
     // position, so historical evidence is immune.
-    await workflowAdmin.reorderState(D, ready.id, 15);
+    await workflowAdmin.reorderState(D, adminD.userId, adminD.tokenSecV, ready.id, 15);
     expect((await store.run(D, (s) => s.loadOrder(D, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
     const reordered = await workflowAdmin.listStates(D, false);
     expect(reordered.find((s) => s.id === ready.id)?.position).toBe(15);
@@ -1089,10 +1142,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const first = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }, { menuItemId: fixture.itemSalad }]);
     const firstItem = must(first.items[0], 'first order item');
     const secondItem = must(first.items[1], 'second order item');
-    await transitions.transitionItem(A, { orderItemId: firstItem.item.id, toWorkflowStateId: state(A, 'preparing').id });
-    await transitions.transitionItem(A, { orderItemId: secondItem.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, firstItem.item.id, state(A, 'preparing').id);
+    await moveItem(A, secondItem.item.id, state(A, 'preparing').id);
     const second = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
-    await transitions.transitionItem(A, { orderItemId: must(second.items[0], 'order item').item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, must(second.items[0], 'order item').item.id, state(A, 'preparing').id);
 
     const branchSequences = await owner.query<{ sequence_id: string }>(
       'SELECT sequence_id FROM order_events_outbox WHERE branch_id = $1 ORDER BY sequence_id',
@@ -1193,7 +1246,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       expect(received.map((e) => e.sequenceId)).toEqual([1]);
 
       // New events still arrive through the polling fallback.
-      await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+      await moveItem(A, item.item.id, state(A, 'preparing').id);
       await waitFor(() => received.length >= 3);
       expect(received.map((e) => e.sequenceId)).toEqual([1, 2, 3]);
       expect(client.lastReceivedSequenceId).toBe(3);
@@ -1393,10 +1446,90 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
     const delivered = state(A, 'delivered');
-    const moved = await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: delivered.id });
+    const moved = await moveItem(A, item.item.id, delivered.id);
     expect(moved.toWorkflowStateId).toBe(delivered.id);
     const record = await voids.voidOrderItem(A, actor(serverUser), { orderItemId: item.item.id, voidReasonId: reasonServer });
     expect(record.orderItemId).toBe(item.item.id);
     expect(await paymentStatusOf(created.order.id)).toBe('voided');
+  });
+
+  // ── Audit F-D: the workflow gates ──────────────────────────────────────────
+
+  it('F-D/transition keyless actor is rejected and writes no status event', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    // serverUser holds order:void with a FRESH secV — authenticated, but the
+    // transition key is missing → stage-2 denial, before any store call.
+    // (Creation itself writes one event row; the rejected move must add none.)
+    const countEvents = () => owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_item_status_events WHERE tenant_id = $1 AND order_item_id = $2', [A, item.item.id]);
+    const before = Number(row((await countEvents()).rows).count);
+    const failure = await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id,
+      actorUserId: serverUser.userId, tokenSecV: serverUser.tokenSecV,
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ForbiddenError);
+    expect((failure as ForbiddenError).message).toBe('missing permission order:item:transition');
+    expect(Number(row((await countEvents()).rows).count)).toBe(before);
+  });
+
+  it('F-D/transition granted actor moves the item and the event carries the authorized actor', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const mover = await transitionUser(A);
+    const moved = await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id,
+      actorUserId: mover.userId, tokenSecV: mover.tokenSecV,
+    });
+    expect(moved.toWorkflowStateId).toBe(state(A, 'preparing').id);
+    const events = await owner.query<{ actor_user_id: string | null }>(
+      'SELECT actor_user_id FROM order_item_status_events WHERE tenant_id = $1 AND order_item_id = $2 ORDER BY occurred_at DESC LIMIT 1', [A, item.item.id]);
+    expect(row(events.rows).actor_user_id).toBe(mover.userId);
+  });
+
+  it('F-D/workflow-admin keyless actor is rejected on all five mutations — bogus inputs prove the check runs first', async () => {
+    // Every input below is deliberately INVALID (unknown kind / unknown state
+    // id): a ForbiddenError — not ValidationError/NotFoundError — proves the
+    // gate runs before any validation or store read.
+    const bogusStateId = randomUUID();
+    const keyless = { userId: serverUser.userId, tokenSecV: serverUser.tokenSecV };
+    await expect(workflowAdmin.addState(A, keyless.userId, keyless.tokenSecV,
+      { kindCode: 'bogus-kind', parentKindCode: null, position: 1, label: { ar: 'x' } }))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.disableState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.enableState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.reorderState(A, keyless.userId, keyless.tokenSecV, bogusStateId, 99))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.deleteState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+  });
+
+  it('F-D/workflow-admin granted actor runs the full state lifecycle with zero residue', async () => {
+    // Tenant C: nothing else asserts on its workflow, and the lifecycle ends
+    // with a delete — net mutation zero.
+    const admin = await adminUser(C);
+    const states = () => workflowAdmin.listStates(C, false);
+    const before = await states();
+
+    const addedId = await workflowAdmin.addState(C, admin.userId, admin.tokenSecV,
+      { kindCode: 'preparing', parentKindCode: 'preparing', position: 99, label: { ar: 'حالة ف-D' } });
+    expect((await states()).some((s) => s.id === addedId)).toBe(true);
+
+    await workflowAdmin.reorderState(C, admin.userId, admin.tokenSecV, addedId, 100);
+    expect((await states()).find((s) => s.id === addedId)?.position).toBe(100);
+
+    await workflowAdmin.disableState(C, admin.userId, admin.tokenSecV, addedId);
+    expect((await states()).find((s) => s.id === addedId)?.isEnabled).toBe(false);
+
+    await workflowAdmin.enableState(C, admin.userId, admin.tokenSecV, addedId);
+    expect((await states()).find((s) => s.id === addedId)?.isEnabled).toBe(true);
+
+    await workflowAdmin.deleteState(C, admin.userId, admin.tokenSecV, addedId);
+    const after = await states();
+    expect(after.map((s) => s.id).sort()).toEqual(before.map((s) => s.id).sort());
   });
 });

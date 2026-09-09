@@ -123,7 +123,7 @@ describe('B3 concurrency recovery (live)', () => {
     await owner.query("UPDATE tenants SET vat_registration_status = 'registered', vat_registration_number = 'b3-vat' WHERE id = $1", [T]);
 
     // Order creation requires an enabled workflow with an initial state.
-    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
+    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     await workflowAdmin.ensureWorkflow(T, [
       { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
       { kindCode: 'preparing', position: 20, label: { ar: 'قيد التحضير' } },

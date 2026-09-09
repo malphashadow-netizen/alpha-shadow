@@ -113,7 +113,7 @@ describe('B4 invoice_total creation (live)', () => {
     await platform.createTaxRate(PLATFORM_ACTOR, { taxCategoryId: saCategory.id, rateBps: 500, isPriceInclusiveDefault: false, effectiveFrom: '2020-01-01', effectiveTo: null });
     await owner.query("UPDATE tenants SET vat_registration_status = 'registered', vat_registration_number = 'b4-vat' WHERE id = $1", [T]);
 
-    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
+    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     await workflowAdmin.ensureWorkflow(T, [
       { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
       { kindCode: 'preparing', position: 20, label: { ar: 'قيد التحضير' } },

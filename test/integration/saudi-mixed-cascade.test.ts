@@ -130,7 +130,7 @@ describe('B6 Saudi mixed-direction cascade (live)', () => {
     await makeRate(vatIncl.id, 1500, true);
     await owner.query("UPDATE tenants SET vat_registration_status = 'registered', vat_registration_number = 'b6-vat' WHERE id = $1", [T]);
 
-    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
+    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     await workflowAdmin.ensureWorkflow(T, [
       { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
       { kindCode: 'preparing', position: 20, label: { ar: 'قيد التحضير' } },

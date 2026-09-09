@@ -260,7 +260,18 @@ export interface CreatedOrder {
 export interface ItemStatusTransitionInput {
   readonly orderItemId: string;
   readonly toWorkflowStateId: string;
-  readonly actorUserId?: string;
+  /**
+   * Audit F-D: REQUIRED. The human actor is the authorization subject of
+   * every transition — `order:item:transition` is checked FIRST, before any
+   * store call. Optional-before was the hole (audit-only, never gated).
+   */
+  readonly actorUserId: string;
+  /**
+   * Audit F-D: REQUIRED. Freshness proof for the actor's role assignment
+   * (stage 1 of the check). A stale token fails closed — the transition is
+   * rejected even when the actor holds the key.
+   */
+  readonly tokenSecV: string;
   /**
    * @deprecated Audit F-B: IGNORED. The server clock stamps every status
    * transition — any caller-supplied value, past or future, has no effect.

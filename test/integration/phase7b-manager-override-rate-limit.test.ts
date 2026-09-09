@@ -179,7 +179,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     // T minimal workflow is all order creation needs (initial state). The
     // integration project shares one database between files, so tenant T may
     // already have its workflow from phase7-orders.test.ts — reuse it.
-    const workflowAdmin = new WorkflowAdminEngine({ store });
+    const workflowAdmin = new WorkflowAdminEngine({ store, authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     if ((await workflowAdmin.listStates(T, false)).length === 0) {
       await workflowAdmin.ensureWorkflow(T, [
         { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },

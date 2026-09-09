@@ -168,8 +168,8 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
-    transitions = new WorkflowTransitionEngine({ store: ordersStore });
+    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
+    transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
@@ -281,7 +281,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   async function setupTill(): Promise<Till> {
     const branchId = randomUUID();
     const stationId = randomUUID();
-    const cashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect'], '3333');
+    const cashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect', 'order:item:transition'], '3333');
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع فحص ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -799,7 +799,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       { menuItemId: itemMeal, quantity: 2 },
     ]);
     const itemId = row([...created.items]).item.id;
-    await transitions.transitionItem(T, { orderItemId: itemId, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId });
+    await transitions.transitionItem(T, { orderItemId: itemId, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV });
 
     await voids.voidOrderItem(T, { userId: voidServerUser.userId, tokenSecV: voidServerUser.tokenSecV }, {
       orderItemId: itemId, voidReasonId: reasonServer,
@@ -823,7 +823,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ]);
     expect(await stockOf(flour)).toBe('5.0000');
     // Fire the ticket on the FIRST line only.
-    await transitions.transitionItem(T, { orderItemId: row([...created.items]).item.id, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId });
+    await transitions.transitionItem(T, { orderItemId: row([...created.items]).item.id, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV });
 
     await voids.voidOrder(T, { userId: voidServerUser.userId, tokenSecV: voidServerUser.tokenSecV }, {
       orderId: created.order.id, voidReasonId: reasonServer,
@@ -863,7 +863,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       { menuItemId: itemMeal, quantity: 2 },
     ]);
     // Fire the ticket BEFORE payment: the prepared line is waste, never restocked.
-    await transitions.transitionItem(T, { orderItemId: row([...created.items]).item.id, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId });
+    await transitions.transitionItem(T, { orderItemId: row([...created.items]).item.id, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV });
     expect(await stockOf(flour)).toBe('3.0000');
     const totals = await payments.orderTotals(T, created.order.id);
     const payment = await payments.recordPayment(T, {

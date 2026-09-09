@@ -33,10 +33,16 @@ import type {
   OrderBehaviorFlags,
   TenantWorkflowState,
 } from '../../../domain/contracts/orders.ts';
+import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { NotFoundError, WorkflowTransitionError } from '../../../shared/errors.ts';
+
+/** Audit F-D: the human-actor key for item transitions (migration 0055). Non-sensitive → L1-cached. */
+const ITEM_TRANSITION_PERMISSION_KEY = 'order:item:transition';
 
 export interface WorkflowTransitionEngineDependencies {
   readonly store: OrdersStore;
+  /** Audit F-D: the authorization gate. `check` runs FIRST — before any store call. */
+  readonly authorization: Pick<AuthorizationEngine, 'check'>;
 }
 
 function isFamilyMove(from: TenantWorkflowState, to: TenantWorkflowState): boolean {
@@ -86,6 +92,18 @@ export async function appendItemStatusEvent(
   return evidence.sequenceId;
 }
 
+/**
+ * Audit F-D — DEVICE-PATH DEFERRAL CONTRACT (not implemented):
+ * this engine gates HUMAN actors only, via `order:item:transition`. The KDS
+ * device intent path (a screen bumping its own ticket) is a DIFFERENT
+ * credential type and is deliberately NOT a registry key: RBAC grants are
+ * user-anchored (`user_roles`) and cannot express device grants. When the
+ * device path is built, the device NEVER merges with the human key —
+ * verification happens INSIDE this engine through an injected
+ * `KdsDeviceEngine.verifyDeviceToken` port, and the branch-equality rule
+ * (`order.branchId == token.branchId`) is enforced at the exact place where
+ * this engine learns the order's branch (right after `lockOrder` below).
+ */
 export class WorkflowTransitionEngine {
   private readonly dependencies: WorkflowTransitionEngineDependencies;
 
@@ -94,6 +112,14 @@ export class WorkflowTransitionEngine {
   }
 
   async transitionItem(tenantId: string, input: ItemStatusTransitionInput): Promise<ItemStatusTransitionResult> {
+    // Audit F-D: FIRST executable line — no store call happens before the gate.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.actorUserId,
+      permissionKey: ITEM_TRANSITION_PERMISSION_KEY,
+      tokenSecV: input.tokenSecV,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+    });
     return this.dependencies.store.run(tenantId, async (scope) => {
       // B2: resolve the order id, then lock FIRST and re-read under the lock.
       // The order lock + revision bump serialize every concurrent mutation of
@@ -141,7 +167,7 @@ export class WorkflowTransitionEngine {
         branchId: order.branchId,
         fromWorkflowStateId: fromState.id,
         toWorkflowStateId: toState.id,
-        actorUserId: input.actorUserId ?? null,
+        actorUserId: input.actorUserId,
         // Audit F-B: input.occurredAt is ignored — the server clock stamps every transition.
         occurredAt: new Date(),
       });

@@ -147,8 +147,8 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
-    transitions = new WorkflowTransitionEngine({ store: ordersStore });
+    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
+    transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
@@ -257,7 +257,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // Fresh cashier per till (one open shift per cashier, ever), holding the
     // reversal permissions: refunds/voids are performed by the till's own
     // senior cashier, standing in their open shift at the order's branch.
-    const tillCashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect'], '3333', null);
+    const tillCashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect', 'order:item:transition'], '3333', null);
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -1122,11 +1122,11 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   // change. Deliberately NOT pinned: collecting on a 'cancelled'-state order
   // (T's workflow has no such state; needs its own strict-vs-permissive call).)
 
-  async function deliverAll(itemIds: readonly string[]): Promise<void> {
+  async function deliverAll(itemIds: readonly string[], user: TieredUser): Promise<void> {
     const delivered = (await workflowAdmin.listStates(T, true)).find((s) => s.kindCode === 'delivered');
     if (delivered === undefined) throw new Error('Expected delivered state');
     for (const orderItemId of itemIds) {
-      const moved = await transitions.transitionItem(T, { orderItemId, toWorkflowStateId: delivered.id });
+      const moved = await transitions.transitionItem(T, { orderItemId, toWorkflowStateId: delivered.id, actorUserId: user.userId, tokenSecV: user.tokenSecV });
       expect(moved.toWorkflowStateId).toBe(delivered.id);
     }
   }
@@ -1134,7 +1134,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   it('B9c/ collecting on a terminal (delivered) order succeeds — pay-after-service is never blocked', async () => {
     const till = await setupTill();
     const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
-    await deliverAll(order.items.map((i) => i.item.id));
+    await deliverAll(order.items.map((i) => i.item.id), till.cashier);
     const recorded = await payments.recordPayment(T, {
       orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
     });
@@ -1150,7 +1150,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const recorded = await payments.recordPayment(T, {
       orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
     });
-    await deliverAll(order.items.map((i) => i.item.id));
+    await deliverAll(order.items.map((i) => i.item.id), till.cashier);
     const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id });
     expect(refunded.status).toBe('refunded');
     expect(row((await owner.query<{ payment_status: string }>(

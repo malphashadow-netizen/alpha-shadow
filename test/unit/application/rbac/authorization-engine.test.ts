@@ -231,6 +231,34 @@ describe('AuthorizationEngine — L1 cache and the sensitive bypass', () => {
     await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
     await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
   });
+
+  it('F-D: order:workflow:admin is never served from the L1 cache — grant AND denial stay live', async () => {
+    const scenario = makeScenario();
+    await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');
+    seedActiveBranchUser(scenario);
+    await scenario.write.createPermission(TENANT, 'order:workflow:admin', 'orders', true);
+    const roleId = await scenario.write.createRole(TENANT, 'workflow-admin');
+    await scenario.write.assignRolePermission(TENANT, roleId, 'order:workflow:admin', null);
+
+    const engine = makeEngine(scenario, new L1PermissionCache());
+    const input = {
+      tenantId: TENANT,
+      userId: USER,
+      permissionKey: 'order:workflow:admin',
+      context: { hasResource: false, actorBranchId: BRANCH_A, isSensitivePermission: true },
+    } as const;
+
+    // 1. No assignment yet → denied (must not be cached).
+    await expect(engine.check(input)).rejects.toThrow(ForbiddenError);
+
+    // 2. Grant it → the FRESH read must see the grant (a cached denial would still deny).
+    const userRoleId = await scenario.write.assignUserRole(TENANT, USER, roleId, 'tenant', null);
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
+
+    // 3. Revoke it → the FRESH read must see the revocation (a cached grant would still allow).
+    await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
+    await expect(engine.check(input)).rejects.toThrow(ForbiddenError);
+  });
 });
 
 describe('AuthorizationEngine — tenant guard and sec_v token verification', () => {

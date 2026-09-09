@@ -53,6 +53,7 @@ import { PaymentsEngine } from '../../src/application/engines/payments/payments-
 import { AuthorizationEngine } from '../../src/application/engines/rbac/authorization-engine.ts';
 import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
 import { PlatformTaxAdminEngine } from '../../src/application/engines/tax/platform-tax-admin-engine.ts';
+import { deriveSecV } from '../../src/domain/contracts/sec-v.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platform-tax-context.ts';
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
@@ -81,6 +82,8 @@ function row<R>(rows: readonly R[]): R {
 
 interface TillUser {
   readonly userId: string;
+  /** Audit F-D: fresh secV (derived AFTER grants) for the gated transition calls. */
+  readonly tokenSecV: string;
 }
 
 describe('B2 live acceptance (order/shift mutation serialization)', () => {
@@ -97,8 +100,9 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
   let itemId: string; // 40.00 SAR; 15% VAT ⇒ total 46.00
   let methodCashId: string;
   let permWrite: PostgresPermissionWriteRepository;
-  let opener: TillUser;
-  let verifier: TillUser;
+  let permissionRead: PostgresPermissionReadRepository;
+  let opener: { userId: string };
+  let verifier: { userId: string };
   let preparingId: string;
   let readyId: string;
 
@@ -127,15 +131,16 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
 
-    const authorization = new AuthorizationEngine({ read: new PostgresPermissionReadRepository({ withTenantContext: withApp }), hash: sha256Hex });
+    permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
+    const authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
+    const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    transitions = new WorkflowTransitionEngine({ store: ordersStore });
+    transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -180,7 +185,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     await owner?.end();
   });
 
-  async function createUser(): Promise<TillUser> {
+  async function createUser(): Promise<{ userId: string }> {
     const userId = randomUUID();
     await withApp(T, (q) => q.query(
       'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
@@ -193,8 +198,13 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
   async function setupTill() {
     const branchId = randomUUID();
     const stationId = randomUUID();
-    const cashier = await createUser();
-    await grantKeys(permWrite, T, cashier.userId, ['payments:collect']);
+    const cashierBase = await createUser();
+    await grantKeys(permWrite, T, cashierBase.userId, ['payments:collect', 'order:item:transition']);
+    // Audit F-D: secV derived AFTER the grants — fresh by construction.
+    const cashier: TillUser = {
+      userId: cashierBase.userId,
+      tokenSecV: deriveSecV(await permissionRead.listActiveUserRoles(T, cashierBase.userId), await permissionRead.getSecurityVersion(T, cashierBase.userId), sha256Hex),
+    };
     await withApp(T, async (q) => {
       await q.query('INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)', [branchId, T, `B2 ${randomUUID()}`, 'SAR', 'Asia/Riyadh', 'SA']);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -280,8 +290,8 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     // lock now guarantees this BY DESIGN at the engine level instead of as a
     // trigger side-effect; this test pins exactly-one-winner + retry
     // convergence for the uniform-lock audit.
-    const moveOne = () => transitions.transitionItem(T, { orderItemId: itemOne, toWorkflowStateId: preparingId, actorUserId: till.cashier.userId });
-    const moveTwo = () => transitions.transitionItem(T, { orderItemId: itemTwo, toWorkflowStateId: readyId, actorUserId: till.cashier.userId });
+    const moveOne = () => transitions.transitionItem(T, { orderItemId: itemOne, toWorkflowStateId: preparingId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV });
+    const moveTwo = () => transitions.transitionItem(T, { orderItemId: itemTwo, toWorkflowStateId: readyId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV });
     const [rOne, rTwo] = await Promise.allSettled([moveOne(), moveTwo()]);
     const fulfilled = [rOne, rTwo].filter((r) => r.status === 'fulfilled');
     const rejected = [rOne, rTwo].filter((r) => r.status === 'rejected');
@@ -316,8 +326,8 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     // transitions commit — the B2 locks serialize per order, never globally
     // (a LOCK TABLE-style "fix" would fail here).
     const [rA, rB] = await Promise.allSettled([
-      transitions.transitionItem(T, { orderItemId: itemA, toWorkflowStateId: preparingId, actorUserId: tillA.cashier.userId }),
-      transitions.transitionItem(T, { orderItemId: itemB, toWorkflowStateId: readyId, actorUserId: tillB.cashier.userId }),
+      transitions.transitionItem(T, { orderItemId: itemA, toWorkflowStateId: preparingId, actorUserId: tillA.cashier.userId, tokenSecV: tillA.cashier.tokenSecV }),
+      transitions.transitionItem(T, { orderItemId: itemB, toWorkflowStateId: readyId, actorUserId: tillB.cashier.userId, tokenSecV: tillB.cashier.tokenSecV }),
     ]);
     expect(rA.status).toBe('fulfilled');
     expect(rB.status).toBe('fulfilled');
