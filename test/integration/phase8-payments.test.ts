@@ -1128,6 +1128,62 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     )).rows).payment_status).toBe('refunded');
   });
 
+  // ── Void-after-refund: a fully-refunded order can never be voided ─────────
+  // (The paid-status sibling is pinned by the 'Phase-7 void flow' test above;
+  // voidOrder AND voidOrderItem share the voidWithinTenant payment gate, so
+  // one order-level assertion locks the gate for both paths.)
+
+  it('Void-after-refund/ voiding a fully-refunded order is rejected at engine AND trigger level (nothing written)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id });
+    expect(refunded.status).toBe('refunded');
+    const statusOf = async (orderId: string): Promise<string> => row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [orderId, T],
+    )).rows).payment_status;
+    expect(await statusOf(order.order.id)).toBe('refunded');
+
+    // Engine level: the void engine refuses BEFORE writing any audit row.
+    const failure = await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer })
+      .then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(PaymentReversalRequiredError);
+    expect((failure as PaymentReversalRequiredError).paymentStatus).toBe('refunded');
+
+    // Nothing written: no audit row, no voided event, status unchanged.
+    const auditRows = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_voids WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id],
+    );
+    expect(Number(row(auditRows.rows).count)).toBe(0);
+    const voidedEvents = await owner.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM order_events_outbox
+        WHERE tenant_id = $1 AND event_type = 'order.voided' AND payload ->> 'order_id' = $2`,
+      [T, order.order.id],
+    );
+    expect(Number(row(voidedEvents.rows).count)).toBe(0);
+    expect(await statusOf(order.order.id)).toBe('refunded');
+
+    // Trigger level: a forged audit row with a TRUTHFUL 'refunded' snapshot
+    // (so the snapshot-integrity check passes and the policy block is what
+    // fires) is refused structurally.
+    const forged = await withApp(T, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+        required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, false, NULL, NULL, 'refunded')`,
+      [T, order.order.id, voidServerUser.userId, reasonServer],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forged?.code).toBe('23514');
+    expect(forged?.message ?? '').toMatch(/PaymentReversalRequiredError: void on a refunded order/);
+
+    // Control: the SAME void on an OPEN order succeeds — the rejection is
+    // payment-state, not fixture.
+    const openOrder = await newOrder(till);
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: openOrder.order.id, voidReasonId: reasonServer });
+    expect(await statusOf(openOrder.order.id)).toBe('voided');
+  });
+
   it('P2/ a coupon expiring between check and write surfaces the 409 race error with the full code (not raw 23514)', async () => {
     const till = await setupTill();
     const order = await newOrder(till); // subtotal 40.00
