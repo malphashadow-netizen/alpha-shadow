@@ -21,7 +21,7 @@ import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/
 import { PostgresTaxSnapshotReader } from '../../src/infrastructure/db/repositories/postgres-tax-snapshot-reader.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
-import { ExciseConfirmationRequiredError, ForbiddenError, InvoiceTaxBatchRequiredError, NoApplicableTaxLiabilityRuleError, NoApplicableTaxRateError } from '../../src/shared/errors.ts';
+import { ExciseConfirmationRequiredError, ForbiddenError, InvoiceTaxBatchRequiredError, NoApplicableTaxLiabilityRuleError, NoApplicableTaxRateError, toErrorResponse } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
 
@@ -204,6 +204,24 @@ describe('Phase 6 live acceptance', () => {
     await expect(orders.createLine(A, input(product))).rejects.toBeInstanceOf(NoApplicableTaxRateError);
     expect((await owner.query('SELECT 1 FROM phase6_test_order_lines WHERE id = $1', [lastWrittenId])).rowCount).toBe(0);
     expect(await reader.readContext(A, lastWrittenId)).toBeNull();
+  });
+
+  // ── R2: missing tax configuration → 409 with a dedicated tax.* code ─────
+
+  it('R2/ a live missing-rate rejection maps to 409 tax.no_applicable_rate (needs admin, not retry-now)', async () => {
+    const product = await item((await category()).id);
+    const failure = await orders.createLine(A, input(product)).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(NoApplicableTaxRateError);
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'tax.no_applicable_rate' });
+  });
+
+  it('R2/ a live missing-liability-rule rejection maps to 409 tax.no_applicable_liability_rule', async () => {
+    const failure = await orders.createLine(A, input(await item(await seedCategory()), { salesChannel: 'delivery_app', deliveryPlatformId: await marketplace() })).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(NoApplicableTaxLiabilityRuleError);
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'tax.no_applicable_liability_rule' });
   });
 
   it('#7 RLS isolates overrides, additional assignments, confirmations, contexts and snapshots', async () => {

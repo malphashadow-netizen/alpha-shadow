@@ -7,6 +7,8 @@ import {
   DomainError,
   ForbiddenError,
   ManagerOverrideRateLimitedError,
+  NoApplicableTaxLiabilityRuleError,
+  NoApplicableTaxRateError,
   NotFoundError,
   RateLimitError,
   TenantIsolationViolationError,
@@ -128,6 +130,13 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(toErrorResponse(new TenantSuspendedError('suspended'), noop)).toMatchObject({ status: 403, code: 'tenant.suspended' });
     expect(toErrorResponse(new NotFoundError('nf'), noop).status).toBe(404);
     expect(toErrorResponse(new ConflictError('c'), noop).status).toBe(409);
+    // R2: missing tax configuration is 409 with a dedicated tax.* code —
+    // mechanically distinct from both 404 and retry-now conflicts.
+    expect(toErrorResponse(new NoApplicableTaxRateError('cat', '2026-01-01'), noop)).toMatchObject({ status: 409, code: 'tax.no_applicable_rate' });
+    expect(toErrorResponse(new NoApplicableTaxLiabilityRuleError('SA', 'delivery_app', '2026-01-01'), noop)).toMatchObject({
+      status: 409,
+      code: 'tax.no_applicable_liability_rule',
+    });
     expect(toErrorResponse(new RateLimitError('rl'), noop).status).toBe(429);
     expect(toErrorResponse(new ConfigurationError('cfg'), noop).status).toBe(500);
   });

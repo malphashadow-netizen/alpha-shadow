@@ -56,14 +56,29 @@ export class MissingExchangeRateError extends NotFoundError {
   }
 }
 
-/** Fail closed: missing tax configuration is NEVER an implicit zero rate. */
-export class NoApplicableTaxRateError extends NotFoundError {
-  constructor(readonly taxCategoryId: string, readonly on: string) {
+/**
+ * Fail closed: missing tax configuration is NEVER an implicit zero rate.
+ * R2: a dedicated tax.* code + 409 (NOT 404 — this is no missing resource,
+ * and NOT a retry-now conflict — the tenant's tax setup needs an
+ * admin/accountant in the admin panel). Clients distinguish "needs admin"
+ * from "retry now" mechanically by the code.
+ */
+export class NoApplicableTaxRateError extends DomainError {
+  readonly code = 'tax.no_applicable_rate' as const;
+  constructor(
+    readonly taxCategoryId: string,
+    readonly on: string,
+  ) {
     super(`No applicable tax rate for category ${taxCategoryId} on ${on}`);
   }
 }
-export class NoApplicableTaxLiabilityRuleError extends NotFoundError {
-  constructor(readonly countryCode: string, readonly salesChannel: string, readonly on: string) {
+export class NoApplicableTaxLiabilityRuleError extends DomainError {
+  readonly code = 'tax.no_applicable_liability_rule' as const;
+  constructor(
+    readonly countryCode: string,
+    readonly salesChannel: string,
+    readonly on: string,
+  ) {
     super(`No applicable tax liability rule for ${countryCode}/${salesChannel} on ${on}`);
   }
 }
@@ -507,6 +522,12 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // override (retryable with one); the client-safe message names the
     // component and branch.
     case 'inventory.insufficient_stock':
+      return { status: 409, code: error.code, message: error.message };
+    // R2: missing tax configuration — the tenant's setup is incomplete and
+    // needs an admin/accountant (never an implicit zero rate, never a
+    // silent retry-now). Distinct from every other 409 by code.
+    case 'tax.no_applicable_rate':
+    case 'tax.no_applicable_liability_rule':
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
