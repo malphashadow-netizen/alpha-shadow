@@ -60,6 +60,7 @@ export interface MovementRow {
   readonly order_item_id: string | null;
   readonly actor_user_id: string;
   readonly manager_override_id: string | null;
+  readonly adjustment_reason_id: string | null;
   readonly occurred_at: Date;
 }
 
@@ -75,6 +76,7 @@ export function mapStockMovement(r: MovementRow): StockMovementRecord {
     orderItemId: r.order_item_id,
     actorUserId: r.actor_user_id,
     managerOverrideId: r.manager_override_id,
+    adjustmentReasonId: r.adjustment_reason_id,
     occurredAt: r.occurred_at,
   };
 }
@@ -87,10 +89,10 @@ export async function insertStockMovementRow(
 ): Promise<StockMovementRecord> {
   const result = await q.query<MovementRow>(
     `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta,
-                                  order_id, order_item_id, actor_user_id, manager_override_id, occurred_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                  order_id, order_item_id, actor_user_id, manager_override_id, adjustment_reason_id, occurred_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id, tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta,
-               order_id, order_item_id, actor_user_id, manager_override_id, occurred_at`,
+               order_id, order_item_id, actor_user_id, manager_override_id, adjustment_reason_id, occurred_at`,
     [
       tenantId,
       movement.branchId,
@@ -101,6 +103,7 @@ export async function insertStockMovementRow(
       movement.orderItemId,
       movement.actorUserId,
       movement.managerOverrideId,
+      movement.adjustmentReasonId,
       movement.occurredAt ?? new Date(),
     ],
   );

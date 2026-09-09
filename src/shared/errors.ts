@@ -192,6 +192,12 @@ export class VoidReasonUnavailableError extends ValidationError {
     super(`Void reason ${voidReasonId} is not enabled for this tenant`);
   }
 }
+/** I1: the tenant_void_reasons mirror — unknown, disabled, or kind-disabled. */
+export class AdjustmentReasonUnavailableError extends ValidationError {
+  constructor(readonly adjustmentReasonId: string) {
+    super(`Adjustment reason ${adjustmentReasonId} is not enabled for this tenant`);
+  }
+}
 
 /** The optional tenant void time limit (from order_items.created_at) passed. */
 export class VoidTimeLimitExceededError extends ForbiddenError {

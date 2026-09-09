@@ -69,5 +69,27 @@ function buildScope(q: TenantQuery): InventoryTxScope {
     async insertStockMovement(tid: string, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
       return insertStockMovementRow(q, tid, movement);
     },
+
+    async loadAdjustmentReason(tid: string, adjustmentReasonId: string) {
+      const result = await q.query<{
+        id: string;
+        is_enabled: boolean;
+        kind_code: string;
+        kind_setting_enabled: boolean;
+      }>(
+        `SELECT r.id, r.is_enabled,
+                r.adjustment_reason_kind_code AS kind_code,
+                COALESCE(s.is_enabled, true) AS kind_setting_enabled
+           FROM tenant_adjustment_reasons r
+           LEFT JOIN tenant_adjustment_reason_kind_settings s
+             ON s.tenant_id = r.tenant_id AND s.adjustment_reason_kind_code = r.adjustment_reason_kind_code
+          WHERE r.tenant_id = $1 AND r.id = $2`,
+        [tid, adjustmentReasonId],
+      );
+      const r = result.rows[0];
+      return r === undefined
+        ? null
+        : { id: r.id, isEnabled: r.is_enabled, kindCode: r.kind_code, kindSettingEnabled: r.kind_setting_enabled };
+    },
   };
 }

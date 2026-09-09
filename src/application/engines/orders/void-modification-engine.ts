@@ -293,6 +293,7 @@ export class VoidModificationEngine {
         orderItemId: deduction.orderItemId,
         actorUserId,
         managerOverrideId: null,
+        adjustmentReasonId: null,
         occurredAt,
       });
     }

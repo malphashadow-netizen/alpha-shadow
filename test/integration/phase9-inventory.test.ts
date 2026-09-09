@@ -67,6 +67,7 @@ import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/re
 import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import {
+  AdjustmentReasonUnavailableError,
   CashierShiftRequiredError,
   ForbiddenError,
   InsufficientStockError,
@@ -139,7 +140,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -315,6 +316,17 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     await withApp(T, (q) => q.query(
       'INSERT INTO inventory_items (id, tenant_id, branch_id, name, base_unit, current_quantity, is_active) VALUES ($1, $2, $3, $4::jsonb, $5, $6, true)',
       [id, T, branchId, JSON.stringify({ ar: nameAr, en: nameEn }), baseUnit, quantityText],
+    ));
+    return id;
+  }
+
+  /** I1: a tenant coded adjustment reason (void-reason mirror fixture). */
+  async function createAdjustmentReason(opts: { kindCode?: string; label?: string; isEnabled?: boolean; tenantId?: string } = {}): Promise<string> {
+    const id = randomUUID();
+    const tenant = opts.tenantId ?? T;
+    await withApp(tenant, (q) => q.query(
+      'INSERT INTO tenant_adjustment_reasons (id, tenant_id, adjustment_reason_kind_code, label, is_enabled) VALUES ($1, $2, $3, $4, $5)',
+      [id, tenant, opts.kindCode ?? 'damage', opts.label ?? `سبب ${id.slice(0, 8)}`, opts.isEnabled ?? true],
     ));
     return id;
   }
@@ -534,6 +546,9 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ]);
     const orderId = created.order.id;
     const itemId = row([...created.items]).item.id;
+    // I1: the sign-CHECK probe below targets a manual_adjustment row, which
+    // structurally demands a reason — carry a valid one to reach the CHECK.
+    const reason = await createAdjustmentReason();
 
     async function expectTriggerReject(statement: string, params: readonly unknown[], expected: RegExp): Promise<void> {
       const failure = await withApp(T, (q) => q.query(statement, [...params])).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
@@ -542,13 +557,14 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       expect(failure?.message ?? '').toMatch(expected);
     }
 
-    const baseInsert = (overrides: { type?: string; delta?: string; order?: string | null; item?: string | null; override?: string | null; actor?: string }) =>
+    const baseInsert = (overrides: { type?: string; delta?: string; order?: string | null; item?: string | null; override?: string | null; reason?: string | null; actor?: string }) =>
       ({
-        text: `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, actor_user_id, occurred_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
+        text: `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, adjustment_reason_id, actor_user_id, occurred_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())`,
         params: [T, till.branchId, flour, overrides.type ?? 'sale_deduction', overrides.delta ?? '-1.0000',
           overrides.order === undefined ? orderId : overrides.order, overrides.item === undefined ? itemId : overrides.item,
-          overrides.override === undefined ? null : overrides.override, overrides.actor ?? till.cashier.userId],
+          overrides.override === undefined ? null : overrides.override, overrides.reason === undefined ? null : overrides.reason,
+          overrides.actor ?? till.cashier.userId],
       });
 
     // (a) uncovered shortage: would drive 0.4000 below zero with no override.
@@ -586,7 +602,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       await expectTriggerReject(text, params, /stock_movements_sign/);
     }
     {
-      const { text, params } = baseInsert({ type: 'manual_adjustment', delta: '0.0000', order: null, item: null, actor: adjustUser.userId });
+      const { text, params } = baseInsert({ type: 'manual_adjustment', delta: '0.0000', order: null, item: null, reason, actor: adjustUser.userId });
       await expectTriggerReject(text, params, /stock_movements_sign/);
     }
     // (d) link CHECKs: sale/waste/restoration REQUIRE an order+item; manual types FORBID them.
@@ -1121,10 +1137,11 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   it('11b/ adjusting demands inventory:adjust at the engine AND at the trigger, with strict signed deltas', async () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const reason = await createAdjustmentReason();
     const keyless = await createPlainUser('1414');
 
     await expect(inventory.adjustStock(T, { userId: keyless.userId, tokenSecV: keyless.tokenSecV }, {
-      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-1.0000',
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
     })).rejects.toBeInstanceOf(ForbiddenError);
 
     const failure = await withApp(T, (q) => q.query(
@@ -1138,23 +1155,23 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     // The keyed path works in both directions and records the actor.
     const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
     const down = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-2.5000', occurredAt: new Date(),
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-2.5000', occurredAt: new Date(),
     });
     expect(down.movementType).toBe('manual_adjustment');
     expect(down.quantityDelta).toBe('-2.5000');
     expect(down.actorUserId).toBe(adjustUser.userId);
     expect(down.orderId).toBeNull();
     const up = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '0.2500', occurredAt: new Date(),
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '0.2500', occurredAt: new Date(),
     });
     expect(up.quantityDelta).toBe('0.2500');
     expect(await stockOf(flour)).toBe('7.7500');
 
     // Strict validation: zero, 5-decimal, branch mismatch, unknown item.
-    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '0.0000' })).rejects.toBeInstanceOf(ValidationError);
-    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '1.00000' })).rejects.toBeInstanceOf(ValidationError);
-    await expect(inventory.adjustStock(T, actor, { branchId: randomUUID(), inventoryItemId: flour, quantityDeltaText: '1.0000' })).rejects.toBeInstanceOf(ValidationError);
-    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: randomUUID(), quantityDeltaText: '1.0000' })).rejects.toBeInstanceOf(NotFoundError);
+    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '0.0000' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '1.00000' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(inventory.adjustStock(T, actor, { branchId: randomUUID(), inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '1.0000' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(inventory.adjustStock(T, actor, { branchId: till.branchId, inventoryItemId: randomUUID(), adjustmentReasonId: reason, quantityDeltaText: '1.0000' })).rejects.toBeInstanceOf(NotFoundError);
     expect(await stockOf(flour)).toBe('7.7500');
   });
 
@@ -1229,5 +1246,101 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       { branch_id: tillA.branchId, on_hand: '5.0000' },
       { branch_id: tillB.branchId, on_hand: '7.0000' },
     ]);
+  });
+
+  // ── I1: mandatory coded adjustment reasons ───────────────────────────────
+
+  it('I1a/ adjusting with an unknown reason is rejected and writes nothing', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+    const movementsBefore = await countWhere('stock_movements', 'tenant_id = $1', [T]);
+
+    const failure = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-1.0000', adjustmentReasonId: randomUUID(),
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(AdjustmentReasonUnavailableError);
+
+    expect(await countWhere('stock_movements', 'tenant_id = $1', [T])).toBe(movementsBefore);
+    expect(await stockOf(flour)).toBe('10.0000');
+  });
+
+  it('I1b/ a disabled reason — or a disabled platform kind — cannot authorize an adjustment', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+    const disabled = await createAdjustmentReason({ isEnabled: false });
+    const failure = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-1.0000', adjustmentReasonId: disabled,
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(AdjustmentReasonUnavailableError);
+
+    // Disable the whole KIND for the tenant: a still-enabled reason of that
+    // kind stops working too (disable-instead-of-delete, void mirror).
+    const kinded = await createAdjustmentReason({ kindCode: 'shrinkage' });
+    await withApp(T, (q) => q.query(
+      `INSERT INTO tenant_adjustment_reason_kind_settings (tenant_id, adjustment_reason_kind_code, is_enabled)
+       VALUES ($1, 'shrinkage', false) ON CONFLICT (tenant_id, adjustment_reason_kind_code)
+       DO UPDATE SET is_enabled = false`,
+      [T],
+    ));
+    try {
+      const kindFailure = await inventory.adjustStock(T, actor, {
+        branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-1.0000', adjustmentReasonId: kinded,
+      }).then(() => null, (error: unknown) => error);
+      expect(kindFailure).toBeInstanceOf(AdjustmentReasonUnavailableError);
+    } finally {
+      await withApp(T, (q) => q.query(
+        'UPDATE tenant_adjustment_reason_kind_settings SET is_enabled = true WHERE tenant_id = $1 AND adjustment_reason_kind_code = $2',
+        [T, 'shrinkage'],
+      ));
+    }
+    expect(await stockOf(flour)).toBe('10.0000');
+  });
+
+  it('I1c/ the happy path stamps the movement with the reason; a foreign-tenant reason is rejected', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+    const reason = await createAdjustmentReason({ kindCode: 'expiry' });
+
+    const movement = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-2.0000', adjustmentReasonId: reason,
+    });
+    expect(movement.movementType).toBe('manual_adjustment');
+    expect(movement.adjustmentReasonId).toBe(reason);
+    expect(await stockOf(flour)).toBe('8.0000');
+
+    // A reason of ANOTHER tenant is invisible (RLS) ⇒ unavailable.
+    const foreign = await createAdjustmentReason({ tenantId: T2 });
+    const failure = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-1.0000', adjustmentReasonId: foreign,
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(AdjustmentReasonUnavailableError);
+    expect(await stockOf(flour)).toBe('8.0000');
+  });
+
+  it('I1d/ the structure backstops the engine: manual rows demand a reason, all other rows forbid one', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const reason = await createAdjustmentReason();
+
+    const missing = await withApp(T, (q) => q.query(
+      `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, adjustment_reason_id, actor_user_id, occurred_at)
+       VALUES ($1, $2, $3, 'manual_adjustment', '-1.0000', NULL, NULL, NULL, NULL, $4, now())`,
+      [T, till.branchId, flour, adjustUser.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(missing?.code).toBe('23514');
+    expect(missing?.message ?? '').toMatch(/reason/);
+
+    const smuggled = await withApp(T, (q) => q.query(
+      `INSERT INTO stock_movements (tenant_id, branch_id, inventory_item_id, movement_type, quantity_delta, order_id, order_item_id, manager_override_id, adjustment_reason_id, actor_user_id, occurred_at)
+       VALUES ($1, $2, $3, 'manual_receiving', '1.0000', NULL, NULL, NULL, $4, $5, now())`,
+      [T, till.branchId, flour, reason, receiverUser.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(smuggled?.code).toBe('23514');
+    expect(smuggled?.message ?? '').toMatch(/reason/);
+
+    expect(await stockOf(flour)).toBe('10.0000');
   });
 });

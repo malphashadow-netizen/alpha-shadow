@@ -26,7 +26,7 @@ import {
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { minorToDecimalText, nonNegativeDecimalTextToMinor } from '../../../shared/decimal-text.ts';
 import { divideRoundHalfToEven } from '../../../shared/money.ts';
-import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
+import { AdjustmentReasonUnavailableError, NotFoundError, ValidationError } from '../../../shared/errors.ts';
 
 export interface InventoryEngineDependencies {
   readonly store: InventoryStore;
@@ -48,6 +48,8 @@ export interface AdjustStockInput {
   readonly inventoryItemId: string;
   /** Signed delta in BASE units (strict canonical decimal, fraction ≤ 4, non-zero). */
   readonly quantityDeltaText: string;
+  /** I1: MANDATORY coded reason (tenant_adjustment_reasons id, must be enabled). */
+  readonly adjustmentReasonId: string;
   readonly occurredAt?: Date;
 }
 
@@ -109,6 +111,7 @@ export class InventoryEngine {
         orderItemId: null,
         actorUserId: actor.userId,
         managerOverrideId: null,
+        adjustmentReasonId: null,
         occurredAt: input.occurredAt ?? new Date(),
       };
       return scope.insertStockMovement(tenantId, movement);
@@ -131,6 +134,13 @@ export class InventoryEngine {
       if (item.branchId !== input.branchId) {
         throw new ValidationError('Inventory item does not belong to the adjustment branch', 'branchId');
       }
+      // I1: the coded reason must exist and be enabled (reason + platform
+      // kind) — the tenant_void_reasons mirror, minus tiers (no inventory
+      // tier ladder exists; the flat sensitive inventory:adjust key gates).
+      const reason = await scope.loadAdjustmentReason(tenantId, input.adjustmentReasonId);
+      if (reason === null || !reason.isEnabled || !reason.kindSettingEnabled) {
+        throw new AdjustmentReasonUnavailableError(input.adjustmentReasonId);
+      }
       const movement: InsertStockMovementInput = {
         branchId: input.branchId,
         inventoryItemId: item.id,
@@ -140,6 +150,7 @@ export class InventoryEngine {
         orderItemId: null,
         actorUserId: actor.userId,
         managerOverrideId: null,
+        adjustmentReasonId: reason.id,
         occurredAt: input.occurredAt ?? new Date(),
       };
       return scope.insertStockMovement(tenantId, movement);

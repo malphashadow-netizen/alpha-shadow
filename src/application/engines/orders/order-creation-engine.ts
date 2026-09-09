@@ -341,6 +341,7 @@ export class OrderCreationEngine {
               orderItemId: created.item.id,
               actorUserId: input.cashierUserId,
               managerOverrideId: overrideAttemptId,
+              adjustmentReasonId: null,
               occurredAt,
             });
           }

@@ -80,6 +80,8 @@ export interface InsertStockMovementInput {
   readonly actorUserId: string;
   /** Override evidence — only meaningful on sale_deduction (CHECKed). */
   readonly managerOverrideId: string | null;
+  /** I1: mandatory coded reason — manual_adjustment ONLY (CHECKed both directions). */
+  readonly adjustmentReasonId: string | null;
   readonly occurredAt?: Date;
 }
 
@@ -99,6 +101,8 @@ export interface StockMovementRecord {
   readonly orderItemId: string | null;
   readonly actorUserId: string;
   readonly managerOverrideId: string | null;
+  /** I1: the coded reason (manual_adjustment only; NULL on every other kind). */
+  readonly adjustmentReasonId: string | null;
   readonly occurredAt: Date;
 }
 
@@ -132,6 +136,14 @@ export interface InventoryTxScope {
     toUnit: string,
   ): Promise<string | null>;
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  /**
+   * I1: the coded adjustment reason (tenant_void_reasons mirror — reason
+   * enabled + platform-kind enabled, defaulting to true when unset).
+   */
+  loadAdjustmentReason(
+    tenantId: string,
+    adjustmentReasonId: string,
+  ): Promise<{ id: string; isEnabled: boolean; kindCode: string; kindSettingEnabled: boolean } | null>;
 }
 
 export interface InventoryStore {
