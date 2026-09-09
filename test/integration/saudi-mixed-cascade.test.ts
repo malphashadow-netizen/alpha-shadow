@@ -36,7 +36,7 @@ import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platfo
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -44,6 +44,7 @@ import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 let T: string; // dedicated B6 tenant (fresh per run)
@@ -100,10 +101,10 @@ describe('B6 Saudi mixed-direction cascade (live)', () => {
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
 
     const tenantRepo = new PostgresTenantTaxAdminRepository(withApp);
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: tenantRepo });
     const authorization = new AuthorizationEngine({ read: new PostgresPermissionReadRepository({ withTenantContext: withApp }), hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: tenantRepo, authorization });
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
     const permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
@@ -143,7 +144,7 @@ describe('B6 Saudi mixed-direction cascade (live)', () => {
     await withApp(T, async (q) => {
       await q.query('INSERT INTO users (id, tenant_id, email, password_hash) VALUES ($1, $2, $3, $4)', [adminUserId, T, `${adminUserId}@example.test`, 'test-only-hash']);
       await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [adminRoleId, T, 'b6-tax-admin']);
-      for (const key of TAX_PERMISSION_KEYS) {
+      for (const key of [...TAX_PERMISSION_KEYS, 'catalog:write']) {
         await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [T, adminRoleId, key]);
       }
       await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'tenant', NULL)", [T, adminUserId, adminRoleId]);
@@ -154,11 +155,11 @@ describe('B6 Saudi mixed-direction cascade (live)', () => {
       tokenSecV: deriveSecV(await permissionRead.listActiveUserRoles(T, adminUserId), await permissionRead.getSecurityVersion(T, adminUserId), sha256Hex),
     };
 
-    menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة B6' } })).id;
+    menuCategoryId = (await catalog.createCategory(T, adminUserId, { name: { ar: 'قائمة B6' } })).id;
     // For excise the confirmation IS the primary assignment (explicit consent);
     // the VAT side joins as the additional category afterwards.
     const makeItem = async (exciseId: string, vatId: string, name: string) => {
-      const id = (await catalog.createItem(T, {
+      const id = (await catalog.createItem(T, adminUserId, {
         categoryId: menuCategoryId, name: { ar: name }, basePrice: money(1000n, currencyCode('SAR')), taxRuleId: vatId,
       })).id;
       await admin.confirmExciseAssignment(actor, { menuItemId: id, taxCategoryId: exciseId, slot: 'primary', confirmation: EXCISE_CONFIRMATION_TEXT });
@@ -170,6 +171,8 @@ describe('B6 Saudi mixed-direction cascade (live)', () => {
 
     opener = await createUser();
     verifier = await createUser();
+    const permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
+    await grantKeys(permWrite, T, opener.userId, ['shift:open']);
   });
 
   afterAll(async () => {

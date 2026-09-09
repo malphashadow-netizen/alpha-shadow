@@ -5,15 +5,20 @@
  * withTenantContext(). Owner connections are only for grants, TRUNCATE, and
  * proving ON DELETE RESTRICT.
  */
+import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { CatalogEngine } from '../../src/application/engines/catalog/catalog-engine.ts';
+import { AuthorizationEngine } from '../../src/application/engines/rbac/authorization-engine.ts';
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
+import { sha256Hex } from '../../src/shared/crypto.ts';
 import { ValidationError } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
 const TENANT_B = '22222222-2222-4222-8222-222222222222';
@@ -42,6 +47,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
   let appPool: pg.Pool;
   let withAppContext: WithTenantContext;
   let engine: CatalogEngine;
+  let actorA: string;
 
   beforeAll(async () => {
     ownerPool = new pg.Pool({ connectionString: testDatabaseUrl(), max: 4 });
@@ -66,6 +72,9 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       );
       await owner.query('GRANT USAGE ON SCHEMA public TO app_login');
       await owner.query('GRANT SELECT ON tenants, currencies, permissions_registry TO app_login');
+      // B7: the catalog actor + its role/grant/assignment rows (check reads,
+      // grantKeys writes; no UPDATE/DELETE needed).
+      await owner.query('GRANT SELECT, INSERT ON users, roles, role_permissions, user_roles TO app_login');
       await owner.query('GRANT SELECT, INSERT, UPDATE, DELETE ON branches TO app_login');
       await owner.query(
         `GRANT SELECT, INSERT, UPDATE, DELETE ON
@@ -85,7 +94,19 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       { connect: async () => appPool.connect() },
       { verifyTenantExists: true },
     );
-    engine = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withAppContext }) });
+    // B7: every catalog mutation names its actor. One tenant-A user carries
+    // write+archive (all phase-5 mutations run as TENANT_A; the tenant-B
+    // assertions are reads or direct SQL, unaffected by the gate).
+    const permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withAppContext });
+    const authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    engine = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withAppContext }), authorization });
+    actorA = randomUUID();
+    await withAppContext(TENANT_A, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, password_hash) VALUES ($1, $2, $3, $4)',
+      [actorA, TENANT_A, `${actorA}@example.test`, 'test-only-hash'],
+    ));
+    const permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withAppContext });
+    await grantKeys(permWrite, TENANT_A, actorA, ['catalog:write', 'catalog:archive']);
   });
 
   beforeEach(async () => {
@@ -128,8 +149,8 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
   });
 
   it('tenant A cannot read or modify tenant B catalog rows through withTenantContext', async () => {
-    const categoryA = await engine.createCategory(TENANT_A, { name: { ar: 'مشروبات أ' } });
-    await engine.createItem(TENANT_A, {
+    const categoryA = await engine.createCategory(TENANT_A, actorA, { name: { ar: 'مشروبات أ' } });
+    await engine.createItem(TENANT_A, actorA, {
       categoryId: categoryA.id,
       name: { ar: 'لاتيه' },
       basePrice: money(1800n, SAR),
@@ -174,7 +195,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
 
   it('rejects min_selections > max_selections in the engine and at the CHECK constraint', async () => {
     await expect(
-      engine.createModifierGroup(TENANT_A, {
+      engine.createModifierGroup(TENANT_A, actorA, {
         name: { ar: 'إضافات' },
         selectionType: 'multiple',
         minSelections: 4,
@@ -194,19 +215,19 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
   });
 
   it('refuses physical DELETE of a referenced category/group and proves soft-delete', async () => {
-    const category = await engine.createCategory(TENANT_A, { name: { ar: 'قسم' } });
-    const item = await engine.createItem(TENANT_A, {
+    const category = await engine.createCategory(TENANT_A, actorA, { name: { ar: 'قسم' } });
+    const item = await engine.createItem(TENANT_A, actorA, {
       categoryId: category.id,
       name: { ar: 'صنف' },
       basePrice: money(1000n, SAR),
     });
-    const group = await engine.createModifierGroup(TENANT_A, {
+    const group = await engine.createModifierGroup(TENANT_A, actorA, {
       name: { ar: 'مجموعة' },
       selectionType: 'single',
       minSelections: 0,
       maxSelections: 1,
     });
-    await engine.createModifier(TENANT_A, {
+    await engine.createModifier(TENANT_A, actorA, {
       modifierGroupId: group.id,
       name: { ar: 'إضافة' },
       priceDeltaAmountMinor: 100n,
@@ -224,8 +245,8 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       }),
     ).rejects.toThrow(/restrict|foreign key/i);
 
-    const archivedCategory = await engine.archiveCategory(TENANT_A, category.id);
-    const archivedGroup = await engine.archiveModifierGroup(TENANT_A, group.id);
+    const archivedCategory = await engine.archiveCategory(TENANT_A, actorA, category.id);
+    const archivedGroup = await engine.archiveModifierGroup(TENANT_A, actorA, group.id);
     expect(archivedCategory.isActive).toBe(false);
     expect(archivedGroup.isActive).toBe(false);
 
@@ -247,7 +268,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
 
   it('accepts arbitrary language keys on name JSONB with no allow-list', async () => {
     const name = { 'xx-UNREAL': 'Xylophone', 'zh-Hans': '分类', 'fr-CA': 'Catégorie', 'x-emoji': '☕' };
-    const category = await engine.createCategory(TENANT_A, { name });
+    const category = await engine.createCategory(TENANT_A, actorA, { name });
     expect(category.name).toEqual(name);
 
     const stored = await withAppContext(TENANT_A, async (q) => {
@@ -261,7 +282,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
 
   it('rejects selection_type single with max_selections other than 1 or null in the engine and at CHECK', async () => {
     await expect(
-      engine.createModifierGroup(TENANT_A, {
+      engine.createModifierGroup(TENANT_A, actorA, {
         name: { ar: 'اختيار واحد' },
         selectionType: 'single',
         minSelections: 0,
@@ -279,7 +300,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       }),
     ).rejects.toThrow(/modifier_groups_single_max|check constraint/i);
 
-    const allowed = await engine.createModifierGroup(TENANT_A, {
+    const allowed = await engine.createModifierGroup(TENANT_A, actorA, {
       name: { ar: 'واحد' },
       selectionType: 'single',
       minSelections: 0,
@@ -289,8 +310,8 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
   });
 
   it('setBranchOverride is a partial merge: omitted schedule is kept, explicit null clears it', async () => {
-    const category = await engine.createCategory(TENANT_A, { name: { ar: 'قهوة' } });
-    const item = await engine.createItem(TENANT_A, {
+    const category = await engine.createCategory(TENANT_A, actorA, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT_A, actorA, {
       categoryId: category.id,
       name: { ar: 'لاتيه' },
       basePrice: money(1800n, SAR),
@@ -300,13 +321,13 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       windows: [{ daysOfWeek: [3], start: '15:00', end: '16:00' }],
     };
 
-    await engine.setBranchOverride(TENANT_A, {
+    await engine.setBranchOverride(TENANT_A, actorA, {
       branchId: BRANCH_A1,
       menuItemId: item.id,
       isAvailable: true,
       availabilitySchedule: lunch,
     });
-    await engine.setBranchOverride(TENANT_A, {
+    await engine.setBranchOverride(TENANT_A, actorA, {
       branchId: BRANCH_A1,
       menuItemId: item.id,
       priceOverride: money(2500n, SAR),
@@ -337,7 +358,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
     expect(menuLunch.categories[0]?.items[0]?.isAvailable).toBe(true);
     expect(menuLunch.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2500n);
 
-    await engine.setBranchOverride(TENANT_A, {
+    await engine.setBranchOverride(TENANT_A, actorA, {
       branchId: BRANCH_A1,
       menuItemId: item.id,
       availabilitySchedule: null,
@@ -359,15 +380,15 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
   });
 
   it('a branch override does not affect another branch or menu_items.base_price', async () => {
-    const category = await engine.createCategory(TENANT_A, { name: { ar: 'قهوة' } });
-    const item = await engine.createItem(TENANT_A, {
+    const category = await engine.createCategory(TENANT_A, actorA, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT_A, actorA, {
       categoryId: category.id,
       name: { ar: 'لاتيه', en: 'Latte' },
       basePrice: money(1800n, SAR),
       sku: 'LATTE-1',
     });
 
-    await engine.setBranchOverride(TENANT_A, {
+    await engine.setBranchOverride(TENANT_A, actorA, {
       branchId: BRANCH_A1,
       menuItemId: item.id,
       priceOverride: money(2500n, SAR),

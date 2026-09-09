@@ -138,17 +138,17 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     app = new pg.Pool({ connectionString: appUrl.toString(), max: 5 });
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
+    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -167,21 +167,24 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       { kindCode: 'ready', position: 30, label: { ar: 'جاهز' } },
       { kindCode: 'delivered', position: 40, label: { ar: 'تم التسليم' } },
     ]);
-    menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة الفحص' } })).id;
-    itemA = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'طبق رئيسي' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-    itemB = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-
-    // People: plain shift identities + tiered permission holders.
-    opener = await createPlainUser('1111');
+    // People: plain shift identities + tiered permission holders. (B7: the
+    // opener carries the shift/catalog/methods keys; every collecting cashier
+    // — the till cashier, cashierUser, noShiftCashier — carries
+    // payments:collect so the gateway assertions below stay meaningful.)
+    opener = await createTieredUser(['shift:open', 'shift:close', 'catalog:write', 'payments:methods_admin'], '1111', null);
     verifier = await createPlainUser('2222');
-    cashierUser = await createPlainUser('3333');
+    cashierUser = await createTieredUser(['payments:collect'], '3333', null);
     discountUser = await createTieredUser(['order:discount:apply'], '4444', { pct: '15.00', fixed: '20.00' });
     overrideManager = await createTieredUser(['order:discount:apply'], '5555', null);
     voidServerUser = await createTieredUser(['order:void'], '9999', null);
+
+    menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة الفحص' } })).id;
+    itemA = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'طبق رئيسي' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
+    itemB = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
     reasonServer = randomUUID();
     await withApp(T, (q) => q.query(
       'INSERT INTO tenant_void_reasons (id, tenant_id, void_reason_kind_code, label, required_permission_tier) VALUES ($1, $2, $3, $4, $5)',
@@ -189,9 +192,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     ));
 
     // Payment methods: domestic cash, card, and USD cash at a fixed 3.75.
-    methodCashId = (await methods.create(T, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodCardId = (await methods.create(T, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodUsdId = (await methods.create(T, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -248,7 +251,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // Fresh cashier per till (one open shift per cashier, ever), holding the
     // reversal permissions: refunds/voids are performed by the till's own
     // senior cashier, standing in their open shift at the order's branch.
-    const tillCashier = await createTieredUser(['payments:refund', 'payments:void'], '3333', null);
+    const tillCashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect'], '3333', null);
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -296,13 +299,13 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
   it('payment methods: foreign currency is cash-only and fully configured (engine + DB CHECKs)', async () => {
     // The engine validates the fx shape up front (fail-closed, no write)…
-    await expect(methods.create(T, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
     // …and the database re-verifies the same shape structurally (fx_shape CHECK),
     // whatever the code path.
@@ -322,10 +325,10 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const before = await owner.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM exchange_rates WHERE tenant_id = $1 AND from_currency = 'EUR'", [T],
     );
-    const method = await methods.create(T, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
-    await methods.update(T, method.id, { fixedExchangeRate: '4.15000000' });
-    await methods.update(T, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
-    await methods.update(T, method.id, { fixedExchangeRate: '4.20000000' });
+    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' });
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.20000000' });
     const after = await owner.query<{ rate: string; to_currency: string }>(
       "SELECT e.rate::text AS rate, e.to_currency AS to_currency FROM exchange_rates e WHERE e.tenant_id = $1 AND e.from_currency = 'EUR' ORDER BY e.effective_at, e.rate",
       [T],
@@ -478,7 +481,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
       await q.query('INSERT INTO station_routing_rules (id, tenant_id, branch_id, station_id, menu_item_id) VALUES ($1, $2, $3, $4, $5)', [randomUUID(), T, branchId, stationId, itemA]);
     });
-    const noShiftCashier = await createPlainUser('8888');
+    const noShiftCashier = await createTieredUser(['payments:collect'], '8888', null);
 
     // No open shift at all ⇒ no new order (fail-closed).
     await expect(creation.create(T, {
@@ -574,7 +577,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // #6: the snapshot is frozen forever — even a later rate change on the
     // method never re-values the recorded payment, and any UPDATE of the
     // snapshot (or the amounts) is rejected.
-    await methods.update(T, methodUsdId, { fixedExchangeRate: '3.80000000' });
+    await methods.update(T, opener.userId, methodUsdId, { fixedExchangeRate: '3.80000000' });
     const stored = await owner.query<{ exchange_rate_snapshot: string }>('SELECT exchange_rate_snapshot::text FROM payments WHERE id = $1 AND tenant_id = $2', [recorded.payment.id, T]);
     expect(row(stored.rows).exchange_rate_snapshot).toBe('3.75000000');
 

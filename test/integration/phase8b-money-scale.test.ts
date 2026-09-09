@@ -37,7 +37,7 @@ import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositor
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresPaymentsStore } from '../../src/infrastructure/db/repositories/postgres-payments-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -45,6 +45,7 @@ import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 let T: string; // dedicated B1 tenant (fresh per run)
@@ -77,6 +78,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
   let kwdItem: string; // 1.005 KWD (1005 fils)
   let jpyItem: string; // ¥100
   let methodCashId: string;
+  let permWrite: PostgresPermissionWriteRepository;
   let opener: TillUser;
   let verifier: TillUser;
   let discountUser: TillUser;
@@ -113,17 +115,17 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
 
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     const workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
+    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
     const platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
@@ -141,19 +143,22 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
       { kindCode: 'ready', position: 30, label: { ar: 'جاهز' } },
       { kindCode: 'delivered', position: 40, label: { ar: 'تم التسليم' } },
     ]);
-    const menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة B1' } })).id;
-    kwdItem = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'طبق كويتي' }, basePrice: money(1005n, currencyCode('KWD')), taxRuleId: saCategory.id,
-    })).id;
-    jpyItem = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'طبق ياباني' }, basePrice: money(100n, currencyCode('JPY')), taxRuleId: saCategory.id,
-    })).id;
-
     opener = await createUser(null);
     verifier = await createUser(null);
     // One caps row serves both branches: 15% and 20 branch-currency units.
     discountUser = await createUser({ pct: '15.00', fixed: '20.00' });
-    methodCashId = (await methods.create(T, { name: 'نقدي B1', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
+    await grantKeys(permWrite, T, opener.userId, ['shift:open', 'shift:close', 'catalog:write', 'payments:methods_admin']);
+
+    const menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة B1' } })).id;
+    kwdItem = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'طبق كويتي' }, basePrice: money(1005n, currencyCode('KWD')), taxRuleId: saCategory.id,
+    })).id;
+    jpyItem = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'طبق ياباني' }, basePrice: money(100n, currencyCode('JPY')), taxRuleId: saCategory.id,
+    })).id;
+
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B1', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -190,6 +195,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     const branchId = randomUUID();
     const stationId = randomUUID();
     const cashier = await createUser(null);
+    await grantKeys(permWrite, T, cashier.userId, ['payments:collect']);
     await withApp(T, async (q) => {
       await q.query('INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)', [branchId, T, `B1 ${baseCurrency} ${randomUUID()}`, baseCurrency, 'Asia/Riyadh', 'SA']);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -233,7 +239,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     expect(totals.totalMinor).toBe(1041n);
 
     // Partial payment in USD cash @ 0.30770000 USD→KWD: 1.00 USD ⇒ 307.7 fils ⇒ 308.
-    const usdMethod = await methods.create(T, {
+    const usdMethod = await methods.create(T, opener.userId, {
       name: 'دولار B1', type: 'foreign_currency_cash', branchId: till.branchId,
       currencyCode: 'USD', fixedExchangeRate: '0.30770000', isActive: true,
     });
@@ -345,6 +351,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
   it('JPY branch refuses sub-unit cash denominations explicitly (no silent rounding of stored-verbatim counts)', async () => {
     const branchId = randomUUID();
     const cashier = await createUser(null);
+    await grantKeys(permWrite, T, cashier.userId, ['payments:collect']);
     await withApp(T, (q) => q.query(
       'INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)',
       [branchId, T, `B1 JPY reject ${randomUUID()}`, 'JPY', 'Asia/Riyadh', 'SA'],

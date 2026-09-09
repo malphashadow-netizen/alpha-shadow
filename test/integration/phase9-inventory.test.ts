@@ -157,18 +157,18 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     await owner.query('INSERT INTO tenants (id, name) VALUES ($1, $2), ($3, $4)', [T, 'phase9-inventory', T2, 'phase9-isolation-probe']);
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
     platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
     transitions = new WorkflowTransitionEngine({ store: ordersStore });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
-    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
+    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     inventory = new InventoryEngine({ store: new PostgresInventoryStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -194,35 +194,37 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     const kinds = row((await owner.query<{ fires: boolean }>("SELECT (behavior_flags->>'fires_kitchen_ticket')::boolean AS fires FROM order_status_kinds WHERE code = 'preparing'")).rows);
     expect(kinds.fires).toBe(true);
 
-    menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة المخزون' } })).id;
-    itemMeal = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'وجبة' }, basePrice: money(2000n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-    itemDrink = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1000n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-    const extrasGroupId = (await catalog.createModifierGroup(T, {
-      name: { ar: 'إضافات' }, selectionType: 'multiple', minSelections: 0, maxSelections: null, isRequired: false,
-    })).id;
-    modifierCheese = (await catalog.createModifier(T, {
-      modifierGroupId: extrasGroupId, name: { ar: 'جبن' }, priceDeltaAmountMinor: 200n,
-    })).id;
-    await catalog.attachModifierGroupToItem(T, itemMeal, extrasGroupId, 0);
-
-    // People: plain shift identities + tiered permission holders.
-    opener = await createPlainUser('1111');
+    // People: plain shift identities + tiered permission holders. (B7: the
+    // opener carries the shift/catalog/methods keys; the till cashier carries
+    // payments:collect.)
+    opener = await createTieredUser(['shift:open', 'catalog:write', 'payments:methods_admin'], '1111');
     verifier = await createPlainUser('2222');
     stockManager = await createTieredUser(['inventory:adjust'], '5555');
     receiverUser = await createTieredUser(['inventory:receive'], '6666');
     adjustUser = await createTieredUser(['inventory:adjust'], '7777');
     voidServerUser = await createTieredUser(['order:void'], '9999');
+
+    menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة المخزون' } })).id;
+    itemMeal = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'وجبة' }, basePrice: money(2000n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
+    itemDrink = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1000n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
+    const extrasGroupId = (await catalog.createModifierGroup(T, opener.userId, {
+      name: { ar: 'إضافات' }, selectionType: 'multiple', minSelections: 0, maxSelections: null, isRequired: false,
+    })).id;
+    modifierCheese = (await catalog.createModifier(T, opener.userId, {
+      modifierGroupId: extrasGroupId, name: { ar: 'جبن' }, priceDeltaAmountMinor: 200n,
+    })).id;
+    await catalog.attachModifierGroupToItem(T, opener.userId, itemMeal, extrasGroupId, 0);
     reasonServer = randomUUID();
     await withApp(T, (q) => q.query(
       'INSERT INTO tenant_void_reasons (id, tenant_id, void_reason_kind_code, label, required_permission_tier) VALUES ($1, $2, $3, $4, $5)',
       [reasonServer, T, 'customer_request', `سبب فحص ${reasonServer}`, 'server'],
     ));
 
-    methodCashId = (await methods.create(T, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -274,7 +276,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   async function setupTill(): Promise<Till> {
     const branchId = randomUUID();
     const stationId = randomUUID();
-    const cashier = await createTieredUser(['payments:refund', 'payments:void'], '3333');
+    const cashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect'], '3333');
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع فحص ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);

@@ -38,7 +38,7 @@ import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositor
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresPaymentsStore } from '../../src/infrastructure/db/repositories/postgres-payments-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -47,6 +47,7 @@ import { sha256Hex } from '../../src/shared/crypto.ts';
 import { isConcurrencyRetryableError } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 let T: string; // dedicated B3 tenant (fresh per run)
@@ -73,6 +74,7 @@ describe('B3 concurrency recovery (live)', () => {
   let authorization: AuthorizationEngine;
   let itemId: string; // 40.00 SAR; 15% VAT ⇒ total 46.00
   let methodCashId: string;
+  let permWrite: PostgresPermissionWriteRepository;
   let opener: TillUser;
   let verifier: TillUser;
 
@@ -101,14 +103,14 @@ describe('B3 concurrency recovery (live)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
 
-    const catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     authorization = new AuthorizationEngine({ read: new PostgresPermissionReadRepository({ withTenantContext: withApp }), hash: sha256Hex });
+    const catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
-    const methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
+    const methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
     const platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
@@ -129,14 +131,17 @@ describe('B3 concurrency recovery (live)', () => {
       { kindCode: 'delivered', position: 40, label: { ar: 'تم التسليم' } },
     ]);
 
-    const menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة B3' } })).id;
-    itemId = (await catalog.createItem(T, {
+    opener = await createUser();
+    verifier = await createUser();
+    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
+    await grantKeys(permWrite, T, opener.userId, ['shift:open', 'catalog:write', 'payments:methods_admin']);
+
+    const menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة B3' } })).id;
+    itemId = (await catalog.createItem(T, opener.userId, {
       categoryId: menuCategoryId, name: { ar: 'طبق B3' }, basePrice: money(4000n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
 
-    opener = await createUser();
-    verifier = await createUser();
-    methodCashId = (await methods.create(T, { name: 'نقدي B3', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B3', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -159,6 +164,7 @@ describe('B3 concurrency recovery (live)', () => {
     const branchId = randomUUID();
     const stationId = randomUUID();
     const cashier = await createUser();
+    await grantKeys(permWrite, T, cashier.userId, ['payments:collect']);
     await withApp(T, async (q) => {
       await q.query('INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)', [branchId, T, `B3 ${randomUUID()}`, 'SAR', 'Asia/Riyadh', 'SA']);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);

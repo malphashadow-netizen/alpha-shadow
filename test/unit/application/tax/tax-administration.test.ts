@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CatalogEngine } from '../../../../src/application/engines/catalog/catalog-engine.ts';
+import type { AuthorizationEngine } from '../../../../src/application/engines/rbac/authorization-engine.ts';
 import { PlatformTaxAdminEngine } from '../../../../src/application/engines/tax/platform-tax-admin-engine.ts';
 import { TenantTaxAdminEngine } from '../../../../src/application/engines/tax/tenant-tax-admin-engine.ts';
 import { EXCISE_CONFIRMATION_TEXT, type TenantTaxActor, type TenantTaxAdminRepository } from '../../../../src/domain/contracts/tenant-tax-admin.ts';
@@ -69,24 +70,30 @@ describe('separate tenant tax administration and explicit excise interface', () 
   });
 });
 
+// B7: catalog mutations name their actor; the allow-all stub keeps this suite
+// focused on the tax hook (key wiring is pinned in catalog-engine.test.ts).
+const allowAll: Pick<AuthorizationEngine, 'check'> = {
+  check: async () => ({ allowed: true, effectiveMaxAmountMinorUnits: null }),
+};
+
 describe('catalog tax hook is no longer an unvalidated UUID or excise bypass', () => {
   it('fails closed without a policy, rejects excise via engine and direct repository, and permits unchanged excise on name-only edits', async () => {
     const store = new InMemoryCatalogStore(); store.taxCategories.set(VAT_CATEGORY.id, VAT_CATEGORY); store.taxCategories.set(EXCISE_CATEGORY.id, EXCISE_CATEGORY);
     const repo = new InMemoryCatalogRepository(store);
-    const plain = new CatalogEngine({ catalog: repo });
-    const category = await plain.createCategory(TAX_TENANT, { name: { en: 'Drinks' } });
+    const plain = new CatalogEngine({ catalog: repo, authorization: allowAll });
+    const category = await plain.createCategory(TAX_TENANT, TAX_ACTOR, { name: { en: 'Drinks' } });
     const input = { categoryId: category.id, name: { en: 'Energy drink' }, basePrice: money(1000n, currencyCode('SAR')) };
-    await expect(plain.createItem(TAX_TENANT, { ...input, taxRuleId: VAT_CATEGORY.id })).rejects.toThrow(/policy/);
+    await expect(plain.createItem(TAX_TENANT, TAX_ACTOR, { ...input, taxRuleId: VAT_CATEGORY.id })).rejects.toThrow(/policy/);
     const policy = { assertOrdinaryAssignment: vi.fn(async (_tid: string, id: string) => { assertOrdinaryTaxCategory(id === EXCISE_CATEGORY.id ? EXCISE_CATEGORY : VAT_CATEGORY); }) };
-    const engine = new CatalogEngine({ catalog: repo, taxAssignments: policy });
-    await expect(engine.createItem(TAX_TENANT, { ...input, taxRuleId: EXCISE_CATEGORY.id })).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
-    const item = await engine.createItem(TAX_TENANT, { ...input, taxRuleId: VAT_CATEGORY.id });
+    const engine = new CatalogEngine({ catalog: repo, taxAssignments: policy, authorization: allowAll });
+    await expect(engine.createItem(TAX_TENANT, TAX_ACTOR, { ...input, taxRuleId: EXCISE_CATEGORY.id })).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
+    const item = await engine.createItem(TAX_TENANT, TAX_ACTOR, { ...input, taxRuleId: VAT_CATEGORY.id });
     await expect(repo.updateItem(TAX_TENANT, { ...item, taxRuleId: EXCISE_CATEGORY.id })).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
     // Model a previously confirmed primary assignment (real confirmation is
     // exercised through the protected function in the integration tests).
     store.items.set(item.id, { ...item, taxRuleId: EXCISE_CATEGORY.id });
     policy.assertOrdinaryAssignment.mockClear();
-    expect((await engine.updateItem(TAX_TENANT, item.id, { name: { en: 'Renamed' } })).taxRuleId).toBe(EXCISE_CATEGORY.id);
+    expect((await engine.updateItem(TAX_TENANT, TAX_ACTOR, item.id, { name: { en: 'Renamed' } })).taxRuleId).toBe(EXCISE_CATEGORY.id);
     expect(policy.assertOrdinaryAssignment).not.toHaveBeenCalled();
   });
 });

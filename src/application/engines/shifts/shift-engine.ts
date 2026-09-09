@@ -31,6 +31,7 @@ import type {
   ShiftsStore,
   VarianceType,
 } from '../../../domain/contracts/payments.ts';
+import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { nonNegativeDecimalTextToMinor, decimalTextToMinor, minorToDecimalText, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
 import { ConflictError, NotFoundError, ShiftNotOpenError, ValidationError } from '../../../shared/errors.ts';
 import { currencyCode } from '../../../shared/money.ts';
@@ -81,14 +82,25 @@ function validateCounts(lines: readonly CashCountLineInput[], digits: number): b
   return totalMinor;
 }
 
-export class ShiftEngine {
-  private readonly dependencies: { readonly store: ShiftsStore };
+const SHIFT_OPEN_PERMISSION_KEY = 'shift:open';
+const SHIFT_CLOSE_PERMISSION_KEY = 'shift:close';
 
-  constructor(dependencies: { readonly store: ShiftsStore }) {
+export class ShiftEngine {
+  private readonly dependencies: { readonly store: ShiftsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> };
+
+  constructor(dependencies: { readonly store: ShiftsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> }) {
     this.dependencies = dependencies;
   }
 
   async openShift(tenantId: string, input: OpenShiftInput): Promise<ShiftRecord> {
+    // B7: the opener must hold shift:open (sensitive — financial control
+    // point). Checked first: an unauthorized caller never reaches the store.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.openedByUserId,
+      permissionKey: SHIFT_OPEN_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     if (input.openedByUserId === input.openVerifiedByUserId) {
       throw new ValidationError('The shift opener and the open verifier must be two DIFFERENT people (dual verification)');
     }
@@ -126,6 +138,14 @@ export class ShiftEngine {
 
   /** The Z Report — the ONLY official close. */
   async closeShift(tenantId: string, input: CloseShiftInput): Promise<ShiftRecord> {
+    // B7: the closer must hold shift:close (sensitive — the Z Report is the
+    // official till close). Checked first, before the shift lock is taken.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.closedByUserId,
+      permissionKey: SHIFT_CLOSE_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     if (input.closedByUserId === input.closeVerifiedByUserId) {
       throw new ValidationError('The shift closer and the close verifier must be two DIFFERENT people (dual verification)');
     }

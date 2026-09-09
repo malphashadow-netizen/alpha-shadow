@@ -49,6 +49,7 @@ import {
 import { convertMoneyAtRate, currencyCode, money } from '../../../shared/money.ts';
 import { computeOrderTotals } from './order-totals.ts';
 
+const PAYMENTS_COLLECT_PERMISSION_KEY = 'payments:collect';
 const PAYMENTS_VOID_PERMISSION_KEY = 'payments:void';
 const PAYMENTS_REFUND_PERMISSION_KEY = 'payments:refund';
 
@@ -98,6 +99,15 @@ export class PaymentsEngine {
   }
 
   async recordPayment(tenantId: string, input: RecordPaymentInput): Promise<RecordedPayment> {
+    // B7: the collecting cashier must hold payments:collect (sensitive —
+    // money-affecting). Checked before any store work: an unauthorized caller
+    // never takes the order lock.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.cashierUserId,
+      permissionKey: PAYMENTS_COLLECT_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     return this.dependencies.store.run(tenantId, async (scope) => {
       // B2: lock FIRST, then decide. The order lock + revision bump serialize
       // every concurrent mutation of this order (exactly one wins; the loser

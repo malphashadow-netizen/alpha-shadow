@@ -33,7 +33,7 @@ import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositor
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { KdsRealtimeClient, type KdsClientEvent } from '../../src/presentation/kds/kds-realtime-client.ts';
@@ -52,6 +52,7 @@ import {
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const A = '11111111-1111-4111-8111-111111111111'; // main flow tenant
 const B = '22222222-2222-4222-8222-222222222222'; // cross-tenant boundary
@@ -104,6 +105,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let catalog: CatalogEngine;
   let permissionRead: PostgresPermissionReadRepository;
   let authorization: AuthorizationEngine;
+  let permWrite: PostgresPermissionWriteRepository;
   let store: PostgresOrdersStore;
   let creation: OrderCreationEngine;
   let shifts: ShiftEngine;
@@ -114,6 +116,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let kdsEvents: KdsEventService;
   let saCategory: TaxCategory;
   const menuCategoryByTenant = new Map<string, string>();
+  const catalogAdminByTenant = new Map<string, string>();
   // Phase 8 shift-gateway fixtures: one lazily-created cashier (with a
   // standing OPEN shift, zero float) per branch, opened by two DISTINCT
   // people (dual verification is a database CHECK).
@@ -146,16 +149,16 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
     platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
     creation = new OrderCreationEngine({
       store,
       authorization,
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     routing = new StationRoutingEngine({ store });
     transitions = new WorkflowTransitionEngine({ store });
     workflowAdmin = new WorkflowAdminEngine({ store });
@@ -194,9 +197,19 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
         { kindCode: 'cancelled', position: 40, label: { ar: 'ملغي' } },
       ]);
     }
+    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
     for (const tenant of [A, B, C, D]) {
       workflowStatesByTenant.set(tenant, await workflowAdmin.listStates(tenant, false));
-      const category = await catalog.createCategory(tenant, { name: { ar: `قائمة ${tenant}` } });
+      // B7: one catalog admin per tenant (the authz check is tenant-scoped,
+      // so a single cross-tenant actor cannot serve all four tenants).
+      const adminId = randomUUID();
+      await withApp(tenant, (q) => q.query(
+        'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+        [adminId, tenant, `${adminId}@example.test`, hashPin(PIN_PEPPER, tenant, adminId, '0000')],
+      ));
+      await grantKeys(permWrite, tenant, adminId, ['catalog:write']);
+      catalogAdminByTenant.set(tenant, adminId);
+      const category = await catalog.createCategory(tenant, adminId, { name: { ar: `قائمة ${tenant}` } });
       menuCategoryByTenant.set(tenant, category.id);
     }
   });
@@ -223,13 +236,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const stationSalads = randomUUID();
     const menuCategoryId = menuCategoryByTenant.get(tenantId);
     if (menuCategoryId === undefined) throw new Error(`Missing menu category for tenant ${tenantId}`);
-    const itemGrill = (await catalog.createItem(tenantId, {
+    const adminId = catalogAdminByTenant.get(tenantId);
+    if (adminId === undefined) throw new Error(`Missing catalog admin for tenant ${tenantId}`);
+    const itemGrill = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'شيش طاووق' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    const itemSalad = (await catalog.createItem(tenantId, {
+    const itemSalad = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'سلطة' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    const itemNoRule = (await catalog.createItem(tenantId, {
+    const itemNoRule = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'عنصر بلا قاعدة' }, basePrice: money(900n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
     await withApp(tenantId, async (q) => {
@@ -295,6 +310,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       ));
       verifiers = { openerId, verifierId };
       shiftVerifiersByTenant.set(tenantId, verifiers);
+      // B7: the lazy opener needs shift:open (granted once, at creation).
+      await grantKeys(permWrite, tenantId, openerId, ['shift:open']);
     }
     const cashierId = randomUUID();
     await withApp(tenantId, (q) => q.query(
@@ -895,7 +912,9 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const stationDom = randomUUID();
     const menuCategoryId = menuCategoryByTenant.get(A);
     if (menuCategoryId === undefined) throw new Error('Missing menu category');
-    const itemTie = (await catalog.createItem(A, {
+    const adminA = catalogAdminByTenant.get(A);
+    if (adminA === undefined) throw new Error('Missing catalog admin');
+    const itemTie = (await catalog.createItem(A, adminA, {
       categoryId: menuCategoryId, name: { ar: 'عنصر التعادل' }, basePrice: money(1200n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
 

@@ -36,7 +36,7 @@ import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platfo
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
@@ -45,6 +45,7 @@ import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 let T: string; // dedicated B4 tenant (fresh per run)
@@ -95,10 +96,10 @@ describe('B4 invoice_total creation (live)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
 
-    const catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     const authorization = new AuthorizationEngine({ read: new PostgresPermissionReadRepository({ withTenantContext: withApp }), hash: sha256Hex });
+    const catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
 
@@ -120,13 +121,15 @@ describe('B4 invoice_total creation (live)', () => {
       { kindCode: 'delivered', position: 40, label: { ar: 'تم التسليم' } },
     ]);
 
-    const menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة B4' } })).id;
-    itemId = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'طبق B4' }, basePrice: money(10n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-
     opener = await createUser();
     verifier = await createUser();
+    const permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
+    await grantKeys(permWrite, T, opener.userId, ['shift:open', 'catalog:write']);
+
+    const menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة B4' } })).id;
+    itemId = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'طبق B4' }, basePrice: money(10n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
   });
 
   afterAll(async () => {

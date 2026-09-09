@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CatalogEngine } from '../../../../src/application/engines/catalog/catalog-engine.ts';
+import type { AuthorizationEngine } from '../../../../src/application/engines/rbac/authorization-engine.ts';
 import {
   assertMinMaxSelections,
   assertSelectionTypeConsistency,
@@ -19,7 +20,7 @@ import {
   parseLocalizedText,
 } from '../../../../src/domain/contracts/catalog-rules.ts';
 import { InMemoryCatalogRepository } from '../../../../src/infrastructure/db/repositories/in-memory-catalog-repository.ts';
-import { NotFoundError, ValidationError } from '../../../../src/shared/errors.ts';
+import { ForbiddenError, NotFoundError, ValidationError } from '../../../../src/shared/errors.ts';
 import { currencyCode, CurrencyMismatchError, money } from '../../../../src/shared/money.ts';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
@@ -27,9 +28,17 @@ const OTHER = '22222222-2222-4222-8222-222222222222';
 const BRANCH_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';
 const BRANCH_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
 const SAR = currencyCode('SAR');
+const ACTOR = 'unit-test-actor';
+
+// B7: mutations name their actor; the allow-all stub keeps the pre-existing
+// behavioral tests focused on engine invariants (key wiring is pinned by the
+// recording-stub suite at the bottom of this file).
+const allowAll: Pick<AuthorizationEngine, 'check'> = {
+  check: async () => ({ allowed: true, effectiveMaxAmountMinorUnits: null }),
+};
 
 function makeEngine(): CatalogEngine {
-  return new CatalogEngine({ catalog: new InMemoryCatalogRepository() });
+  return new CatalogEngine({ catalog: new InMemoryCatalogRepository(), authorization: allowAll });
 }
 
 describe('parseLocalizedText — free language keys', () => {
@@ -118,7 +127,7 @@ describe('parentChainContains — unbounded depth', () => {
 describe('CatalogEngine', () => {
   it('stores a name whose keys are not in any language list', async () => {
     const engine = makeEngine();
-    const category = await engine.createCategory(TENANT, {
+    const category = await engine.createCategory(TENANT, ACTOR, {
       name: { 'xx-UNREAL': 'Mystery', ja: '分類', 'pt-BR': 'Categoria' },
     });
     expect(category.name).toEqual({ 'xx-UNREAL': 'Mystery', ja: '分類', 'pt-BR': 'Categoria' });
@@ -127,7 +136,7 @@ describe('CatalogEngine', () => {
   it('rejects min_selections > max_selections before persistence', async () => {
     const engine = makeEngine();
     await expect(
-      engine.createModifierGroup(TENANT, {
+      engine.createModifierGroup(TENANT, ACTOR, {
         name: { ar: 'إضافات' },
         selectionType: 'multiple',
         minSelections: 5,
@@ -138,17 +147,17 @@ describe('CatalogEngine', () => {
 
   it('rejects a parent assignment that would cycle, including deep chains', async () => {
     const engine = makeEngine();
-    const a = await engine.createCategory(TENANT, { name: { ar: 'A' } });
-    const b = await engine.createCategory(TENANT, { name: { ar: 'B' }, parentCategoryId: a.id });
-    const c = await engine.createCategory(TENANT, { name: { ar: 'C' }, parentCategoryId: b.id });
-    await expect(engine.updateCategory(TENANT, a.id, { parentCategoryId: c.id })).rejects.toBeInstanceOf(ValidationError);
-    await expect(engine.updateCategory(TENANT, a.id, { parentCategoryId: a.id })).rejects.toBeInstanceOf(ValidationError);
+    const a = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'A' } });
+    const b = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'B' }, parentCategoryId: a.id });
+    const c = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'C' }, parentCategoryId: b.id });
+    await expect(engine.updateCategory(TENANT, ACTOR, a.id, { parentCategoryId: c.id })).rejects.toBeInstanceOf(ValidationError);
+    await expect(engine.updateCategory(TENANT, ACTOR, a.id, { parentCategoryId: a.id })).rejects.toBeInstanceOf(ValidationError);
   });
 
   it('does not expose physical delete methods — archive sets is_active = false', async () => {
     const engine = makeEngine();
-    const category = await engine.createCategory(TENANT, { name: { ar: 'مشروبات' } });
-    const archived = await engine.archiveCategory(TENANT, category.id);
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'مشروبات' } });
+    const archived = await engine.archiveCategory(TENANT, ACTOR, category.id);
     expect(archived.isActive).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(engine, 'deleteCategory')).toBe(false);
     expect('deleteCategory' in engine).toBe(false);
@@ -158,15 +167,15 @@ describe('CatalogEngine', () => {
 
   it('a branch price override does not affect another branch or the item base price', async () => {
     const engine = makeEngine();
-    const category = await engine.createCategory(TENANT, { name: { ar: 'قهوة' } });
-    const item = await engine.createItem(TENANT, {
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
       categoryId: category.id,
       name: { ar: 'لاتيه', en: 'Latte' },
       basePrice: money(1800n, SAR),
     });
     expect(item.basePrice.amountMinor).toBe(1800n);
 
-    await engine.setBranchOverride(TENANT, {
+    await engine.setBranchOverride(TENANT, ACTOR, {
       branchId: BRANCH_1,
       menuItemId: item.id,
       priceOverride: money(2200n, SAR),
@@ -189,14 +198,14 @@ describe('CatalogEngine', () => {
 
   it('rejects a price override in a different currency than the item', async () => {
     const engine = makeEngine();
-    const category = await engine.createCategory(TENANT, { name: { ar: 'قهوة' } });
-    const item = await engine.createItem(TENANT, {
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
       categoryId: category.id,
       name: { ar: 'لاتيه' },
       basePrice: money(1800n, SAR),
     });
     await expect(
-      engine.setBranchOverride(TENANT, {
+      engine.setBranchOverride(TENANT, ACTOR, {
         branchId: BRANCH_1,
         menuItemId: item.id,
         priceOverride: money(500n, currencyCode('USD')),
@@ -207,32 +216,32 @@ describe('CatalogEngine', () => {
 
   it('does not leak another tenant’s categories through the in-memory tenant filter', async () => {
     const repo = new InMemoryCatalogRepository();
-    const engine = new CatalogEngine({ catalog: repo });
-    await engine.createCategory(TENANT, { name: { ar: 'خاص' } });
+    const engine = new CatalogEngine({ catalog: repo, authorization: allowAll });
+    await engine.createCategory(TENANT, ACTOR, { name: { ar: 'خاص' } });
     expect(await engine.listCategories(OTHER)).toEqual([]);
     await expect(engine.getItem(OTHER, 'nope')).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it('composes modifier deltas as Money in the item currency (positive, negative, zero)', async () => {
     const engine = makeEngine();
-    const category = await engine.createCategory(TENANT, { name: { ar: 'سندويتش' } });
-    const item = await engine.createItem(TENANT, {
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'سندويتش' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
       categoryId: category.id,
       name: { ar: 'برجر' },
       basePrice: money(2500n, SAR),
     });
-    const group = await engine.createModifierGroup(TENANT, {
+    const group = await engine.createModifierGroup(TENANT, ACTOR, {
       name: { ar: 'إضافات' },
       selectionType: 'multiple',
       minSelections: 0,
       maxSelections: null,
     });
-    const extra = await engine.createModifier(TENANT, {
+    const extra = await engine.createModifier(TENANT, ACTOR, {
       modifierGroupId: group.id,
       name: { ar: 'جبن' },
       priceDeltaAmountMinor: 300n,
     });
-    const noOnion = await engine.createModifier(TENANT, {
+    const noOnion = await engine.createModifier(TENANT, ACTOR, {
       modifierGroupId: group.id,
       name: { ar: 'بدون بصل' },
       priceDeltaAmountMinor: -100n,
@@ -245,7 +254,7 @@ describe('CatalogEngine', () => {
   it('rejects selection_type single when max_selections is not 1 or null', async () => {
     const engine = makeEngine();
     await expect(
-      engine.createModifierGroup(TENANT, {
+      engine.createModifierGroup(TENANT, ACTOR, {
         name: { ar: 'اختيار واحد' },
         selectionType: 'single',
         minSelections: 0,
@@ -253,7 +262,7 @@ describe('CatalogEngine', () => {
       }),
     ).rejects.toBeInstanceOf(ValidationError);
 
-    const singleOne = await engine.createModifierGroup(TENANT, {
+    const singleOne = await engine.createModifierGroup(TENANT, ACTOR, {
       name: { ar: 'واحد' },
       selectionType: 'single',
       minSelections: 0,
@@ -261,7 +270,7 @@ describe('CatalogEngine', () => {
     });
     expect(singleOne.maxSelections).toBe(1);
 
-    const singleNull = await engine.createModifierGroup(TENANT, {
+    const singleNull = await engine.createModifierGroup(TENANT, ACTOR, {
       name: { ar: 'واحد بلا سقف' },
       selectionType: 'single',
       minSelections: 0,
@@ -269,25 +278,25 @@ describe('CatalogEngine', () => {
     });
     expect(singleNull.maxSelections).toBeNull();
 
-    const multiple = await engine.createModifierGroup(TENANT, {
+    const multiple = await engine.createModifierGroup(TENANT, ACTOR, {
       name: { ar: 'متعدد' },
       selectionType: 'multiple',
       minSelections: 0,
       maxSelections: 5,
     });
-    await expect(engine.updateModifierGroup(TENANT, multiple.id, { selectionType: 'single' })).rejects.toBeInstanceOf(
+    await expect(engine.updateModifierGroup(TENANT, ACTOR, multiple.id, { selectionType: 'single' })).rejects.toBeInstanceOf(
       ValidationError,
     );
-    await expect(engine.updateModifierGroup(TENANT, singleOne.id, { maxSelections: 5 })).rejects.toBeInstanceOf(
+    await expect(engine.updateModifierGroup(TENANT, ACTOR, singleOne.id, { maxSelections: 5 })).rejects.toBeInstanceOf(
       ValidationError,
     );
   });
 
   it('merges branch overrides: omitted fields keep, explicit null clears', async () => {
     const repo = new InMemoryCatalogRepository();
-    const engine = new CatalogEngine({ catalog: repo });
-    const category = await engine.createCategory(TENANT, { name: { ar: 'قهوة' } });
-    const item = await engine.createItem(TENANT, {
+    const engine = new CatalogEngine({ catalog: repo, authorization: allowAll });
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
       categoryId: category.id,
       name: { ar: 'لاتيه' },
       basePrice: money(1800n, SAR),
@@ -297,14 +306,14 @@ describe('CatalogEngine', () => {
       windows: [{ daysOfWeek: [3], start: '15:00', end: '16:00' }],
     };
 
-    await engine.setBranchOverride(TENANT, {
+    await engine.setBranchOverride(TENANT, ACTOR, {
       branchId: BRANCH_1,
       menuItemId: item.id,
       isAvailable: true,
       availabilitySchedule: lunch,
     });
 
-    const afterPrice = await engine.setBranchOverride(TENANT, {
+    const afterPrice = await engine.setBranchOverride(TENANT, ACTOR, {
       branchId: BRANCH_1,
       menuItemId: item.id,
       priceOverride: money(2200n, SAR),
@@ -321,7 +330,7 @@ describe('CatalogEngine', () => {
     expect(menuLunch.categories[0]?.items[0]?.isAvailable).toBe(true);
     expect(menuLunch.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2200n);
 
-    const cleared = await engine.setBranchOverride(TENANT, {
+    const cleared = await engine.setBranchOverride(TENANT, ACTOR, {
       branchId: BRANCH_1,
       menuItemId: item.id,
       availabilitySchedule: null,
@@ -334,7 +343,7 @@ describe('CatalogEngine', () => {
     expect(menuNoonAfterClear.categories[0]?.items[0]?.isAvailable).toBe(true);
     expect(menuNoonAfterClear.categories[0]?.items[0]?.effectivePrice.amountMinor).toBe(2200n);
 
-    const priceCleared = await engine.setBranchOverride(TENANT, {
+    const priceCleared = await engine.setBranchOverride(TENANT, ACTOR, {
       branchId: BRANCH_1,
       menuItemId: item.id,
       priceOverride: null,
@@ -350,12 +359,67 @@ describe('CatalogEngine', () => {
 
   it('builds an unbounded category forest from parent ids', async () => {
     const engine = makeEngine();
-    const root = await engine.createCategory(TENANT, { name: { ar: 'جذر' }, sortOrder: 1 });
-    const child = await engine.createCategory(TENANT, { name: { ar: 'فرع' }, parentCategoryId: root.id, sortOrder: 1 });
-    await engine.createCategory(TENANT, { name: { ar: 'حفيد' }, parentCategoryId: child.id, sortOrder: 1 });
+    const root = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'جذر' }, sortOrder: 1 });
+    const child = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'فرع' }, parentCategoryId: root.id, sortOrder: 1 });
+    await engine.createCategory(TENANT, ACTOR, { name: { ar: 'حفيد' }, parentCategoryId: child.id, sortOrder: 1 });
     const menu = await engine.getBranchMenu(TENANT, BRANCH_1);
     expect(menu.categories).toHaveLength(1);
     expect(menu.categories[0]?.children).toHaveLength(1);
     expect(menu.categories[0]?.children[0]?.children).toHaveLength(1);
+  });
+});
+
+describe('CatalogEngine B7 authorization wiring (recording stub)', () => {
+  it('checks exactly one key per mutation: write for creates/updates/attach/override, archive for archives', async () => {
+    const seen: { permissionKey: string; userId: string; tenantId: string; sensitive: unknown }[] = [];
+    const recording: Pick<AuthorizationEngine, 'check'> = {
+      check: async (input) => {
+        seen.push({
+          permissionKey: input.permissionKey,
+          userId: input.userId,
+          tenantId: input.tenantId,
+          sensitive: input.context.isSensitivePermission,
+        });
+        return { allowed: true, effectiveMaxAmountMinorUnits: null };
+      },
+    };
+    const engine = new CatalogEngine({ catalog: new InMemoryCatalogRepository(), authorization: recording });
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قسم' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
+      categoryId: category.id, name: { ar: 'صنف' }, basePrice: money(1000n, SAR),
+    });
+    const group = await engine.createModifierGroup(TENANT, ACTOR, {
+      name: { ar: 'إضافات' }, selectionType: 'multiple', minSelections: 0, maxSelections: null,
+    });
+    const modifier = await engine.createModifier(TENANT, ACTOR, {
+      modifierGroupId: group.id, name: { ar: 'جبن' }, priceDeltaAmountMinor: 200n,
+    });
+    await engine.attachModifierGroupToItem(TENANT, ACTOR, item.id, group.id);
+    await engine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_1, menuItemId: item.id, isAvailable: false });
+    await engine.updateCategory(TENANT, ACTOR, category.id, { sortOrder: 3 });
+    await engine.updateItem(TENANT, ACTOR, item.id, { sortOrder: 3 });
+    await engine.updateModifierGroup(TENANT, ACTOR, group.id, { sortOrder: 3 });
+    await engine.updateModifier(TENANT, ACTOR, modifier.id, { sortOrder: 3 });
+    await engine.archiveCategory(TENANT, ACTOR, category.id);
+    await engine.archiveItem(TENANT, ACTOR, item.id);
+    await engine.archiveModifierGroup(TENANT, ACTOR, group.id);
+    await engine.archiveModifier(TENANT, ACTOR, modifier.id);
+    // 14 mutations ⇒ exactly 14 checks: an archive delegating through the
+    // public update (two keys for one op) would surface here as 18 entries.
+    expect(seen.map((s) => s.permissionKey)).toEqual([
+      'catalog:write', 'catalog:write', 'catalog:write', 'catalog:write', 'catalog:write', 'catalog:write',
+      'catalog:write', 'catalog:write', 'catalog:write', 'catalog:write',
+      'catalog:archive', 'catalog:archive', 'catalog:archive', 'catalog:archive',
+    ]);
+    expect(seen.every((s) => s.userId === ACTOR && s.tenantId === TENANT && s.sensitive === false)).toBe(true);
+  });
+
+  it('a denied check rejects the mutation before any write', async () => {
+    const deny: Pick<AuthorizationEngine, 'check'> = {
+      check: async () => { throw new ForbiddenError('missing permission catalog:write'); },
+    };
+    const engine = new CatalogEngine({ catalog: new InMemoryCatalogRepository(), authorization: deny });
+    await expect(engine.createCategory(TENANT, ACTOR, { name: { ar: 'مرفوض' } })).rejects.toBeInstanceOf(ForbiddenError);
+    expect(await engine.listCategories(TENANT)).toHaveLength(0);
   });
 });
