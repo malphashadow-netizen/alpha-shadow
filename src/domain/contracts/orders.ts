@@ -446,7 +446,14 @@ export interface OrdersTxScope {
   // Void support.
   loadVoidReason(tenantId: string, voidReasonId: string): Promise<{ id: string; requiredPermissionTier: VoidPermissionTier; isEnabled: boolean; kindCode: string; kindSettingEnabled: boolean } | null>;
   loadVoidTimeLimitMinutes(tenantId: string): Promise<number | null>;
-  resolveVoidPermissionTier(tenantId: string, userId: string): Promise<VoidPermissionTier | null>;
+  /**
+   * Resolves the highest void tier the user holds through grants that COVER
+   * `branchId`: tenant-wide grants, or branch-scoped grants for exactly this
+   * branch. Branch-scoped grants for any OTHER branch are ignored entirely —
+   * they must never inflate the resolved tier (audit F-A). `branchId` is
+   * required and must be non-empty (orders always carry a branch).
+   */
+  resolveVoidPermissionTier(tenantId: string, userId: string, branchId: string): Promise<VoidPermissionTier | null>;
   userIsActiveMember(tenantId: string, userId: string): Promise<boolean>;
   appendEvent(tenantId: string, branchId: string, eventType: OrderEventType, payload: Readonly<Record<string, unknown>>): Promise<number>;
   markOrderItemsVoided(tenantId: string, orderItemIds: readonly string[]): Promise<void>;

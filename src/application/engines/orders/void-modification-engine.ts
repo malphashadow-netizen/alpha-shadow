@@ -155,7 +155,7 @@ export class VoidModificationEngine {
       }
 
       // Graded tier check: the actor's tier comes from the held atomic keys.
-      const actorTier = await scope.resolveVoidPermissionTier(tenantId, actor.userId);
+      const actorTier = await scope.resolveVoidPermissionTier(tenantId, actor.userId, order.branchId);
       if (actorTier === null) {
         // Defensive: the authorization check above passed, so the grant
         // vanished mid-transaction — fail closed either way.
@@ -179,7 +179,7 @@ export class VoidModificationEngine {
         if (!(await scope.userIsActiveMember(tenantId, challenge.managerUserId))) {
           throw new ManagerOverrideAuthenticationError('Manager override rejected: the approving manager is not an active member of the tenant');
         }
-        const managerTier = await scope.resolveVoidPermissionTier(tenantId, challenge.managerUserId);
+        const managerTier = await scope.resolveVoidPermissionTier(tenantId, challenge.managerUserId, order.branchId);
         if (managerTier !== 'manager') {
           throw new ManagerOverrideAuthenticationError('Manager override rejected: the approving manager does not hold the order:void:manager permission');
         }

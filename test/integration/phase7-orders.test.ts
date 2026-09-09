@@ -293,6 +293,33 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     return { userId, tokenSecV, pin };
   }
 
+  /**
+   * Audit F-A fixture: a user whose void keys live on SEPARATE roles so each
+   * key can carry its own scope. (Scope lives on the user_roles ASSIGNMENT
+   * while keys live on the ROLE — a single role can never model "tenant-wide
+   * server, branch-A-only manager"; that shape needs two roles, like here.)
+   */
+  async function createVoidUserWithRoles(
+    tenantId: string,
+    roles: readonly { keys: readonly string[]; scopeType: 'tenant' | 'branch'; scopeId: string | null }[],
+    pin = String(1000 + Math.trunc(Math.random() * 9000)),
+  ): Promise<TieredUser> {
+    const userId = randomUUID();
+    await withApp(tenantId, async (q) => {
+      await q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)', [userId, tenantId, `${userId}@example.test`, hashPin(PIN_PEPPER, tenantId, userId, pin)]);
+      for (const [index, role] of roles.entries()) {
+        const roleId = randomUUID();
+        await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, tenantId, `void-scoped-${index}-${roleId}`]);
+        for (const key of role.keys) {
+          await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenantId, roleId, key]);
+        }
+        await q.query('INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, $4, $5)', [tenantId, userId, roleId, role.scopeType, role.scopeId]);
+      }
+    });
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
+    return { userId, tokenSecV, pin };
+  }
+
   async function createVoidReason(tenantId: string, kindCode: string, tier: 'server' | 'shift_supervisor' | 'manager'): Promise<string> {
     const id = randomUUID();
     await withApp(tenantId, (q) => q.query(
@@ -713,6 +740,192 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       .rejects.toMatchObject({ code: '55006' });
     await expect(owner.query('DELETE FROM order_item_status_events WHERE id = $1', [eventId]))
       .rejects.toMatchObject({ code: '55006' });
+  });
+
+  // ── Audit F-A: the void tier is branch-covering ─────────────────────────
+  //
+  // A branch-scoped supervisor/manager key must NEVER inflate the tier
+  // outside its own branch: cross-branch, its holder is whatever their
+  // covering grants say (usually a mere server), and a higher-tier reason
+  // demands a live PIN challenge from a manager covering THAT branch.
+
+  it('F-A/a tenant-wide server who manages ONLY branch A voids manager-tier in A freely but must challenge in B', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+
+    // In the managed branch the tier is genuinely manager: no challenge.
+    const created = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const record = await voids.voidOrderItem(A, actor(mixed), { orderItemId: item.item.id, voidReasonId: reasonManager });
+    expect(record.actorPermissionTier).toBe('manager');
+    expect(record.requiredManagerOverride).toBe(false);
+    expect(record.managerUserId).toBeNull();
+
+    // Cross-branch the SAME user is a mere server: a manager-tier reason
+    // demands a live challenge (the F-A hole: this used to void silently).
+    const other = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+    const otherItem = other.items[0];
+    if (otherItem === undefined) throw new Error('Expected one order item');
+    await expect(voids.voidOrderItem(A, actor(mixed), { orderItemId: otherItem.item.id, voidReasonId: reasonManager }))
+      .rejects.toBeInstanceOf(ManagerOverrideRequiredError);
+
+    // The branch-A manager key cannot serve as the branch-B approver either —
+    // not even the user's OWN key for the other branch (rejected BEFORE any
+    // PIN is consumed, so no lockout/attempt side effects either).
+    await expect(voids.voidOrderItem(A, actor(mixed), {
+      orderItemId: otherItem.item.id, voidReasonId: reasonManager,
+      managerOverride: { managerUserId: mixed.userId, managerOverridePin: mixed.pin },
+    })).rejects.toBeInstanceOf(ManagerOverrideAuthenticationError);
+
+    // But a live manager OF BRANCH B approves normally.
+    const branchBManager = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchB.branchId },
+    ]);
+    const challenged = await voids.voidOrderItem(A, actor(mixed), {
+      orderItemId: otherItem.item.id, voidReasonId: reasonManager,
+      managerOverride: { managerUserId: branchBManager.userId, managerOverridePin: branchBManager.pin },
+    });
+    expect(challenged.requiredManagerOverride).toBe(true);
+    expect(challenged.managerUserId).toBe(branchBManager.userId);
+    expect(challenged.overrideAuthenticatedAt).not.toBeNull();
+  });
+
+  it('F-A/the supervisor rung is branch-covering too (supervisor-tier reason)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const reasonSupervisor = await createVoidReason(A, 'order_error', 'shift_supervisor');
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:shift_supervisor'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+
+    const inA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const itemA = inA.items[0];
+    if (itemA === undefined) throw new Error('Expected one order item');
+    const record = await voids.voidOrderItem(A, actor(mixed), { orderItemId: itemA.item.id, voidReasonId: reasonSupervisor });
+    expect(record.actorPermissionTier).toBe('shift_supervisor');
+    expect(record.requiredManagerOverride).toBe(false);
+
+    const inB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+    const itemB = inB.items[0];
+    if (itemB === undefined) throw new Error('Expected one order item');
+    await expect(voids.voidOrderItem(A, actor(mixed), { orderItemId: itemB.item.id, voidReasonId: reasonSupervisor }))
+      .rejects.toBeInstanceOf(ManagerOverrideRequiredError);
+  });
+
+  it('F-A/tenant-wide managers are unaffected (regression: both branches, no challenge)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const manager = await createTieredUser(A, 'manager');
+    for (const f of [branchA, branchB]) {
+      const created = await newOrder(A, f, [{ menuItemId: f.itemGrill }]);
+      const item = created.items[0];
+      if (item === undefined) throw new Error('Expected one order item');
+      const record = await voids.voidOrderItem(A, actor(manager), { orderItemId: item.item.id, voidReasonId: reasonManager });
+      expect(record.actorPermissionTier).toBe('manager');
+      expect(record.requiredManagerOverride).toBe(false);
+    }
+  });
+
+  it('F-A/trigger backstop: a forged no-override row above the actor covering tier is refused (42501)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const created = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    // Forge the pre-fix lie directly at the database level: a server-covering
+    // actor, a manager-tier reason, no override recorded.
+    const forged = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'manager', $4, false, 'open')`,
+      [A, created.order.id, mixed.userId, reasonManager],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forged?.code).toBe('42501');
+    expect(forged?.message ?? '').toContain('void actor lacks a branch-covering void permission');
+  });
+
+  it('F-A/trigger backstop: an override recorded for a non-covering manager, or laundering a keyless actor, is refused (42501)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchAManager = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const created = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    // (a) The recorded manager holds NO covering order:void:manager for the
+    //     order's branch (a branch-A manager against a branch-B order).
+    const forgedManager = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, true, $5, now(), 'open')`,
+      [A, created.order.id, serverUser.userId, reasonManager, branchAManager.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forgedManager?.code).toBe('42501');
+    expect(forgedManager?.message ?? '').toContain('active tenant permission order:void:manager is required');
+
+    // (b) Even with a genuinely covering manager, the override cannot launder
+    //     an actor who holds no covering base key at all.
+    const keylessId = randomUUID();
+    await withApp(A, (q) => q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [keylessId, A, `${keylessId}@example.test`, hashPin(PIN_PEPPER, A, keylessId, '9999')]));
+    const forgedActor = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, true, $5, now(), 'open')`,
+      [A, created.order.id, keylessId, reasonManager, managerUser.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forgedActor?.code).toBe('42501');
+    expect(forgedActor?.message ?? '').toContain('void actor must hold the order:void permission covering the order branch');
+  });
+
+  it('F-A/trigger backstop: a disabled reason is refused at INSERT even with full covering permission (23514)', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const reason = await createVoidReason(A, 'kitchen_issue', 'server');
+    const forgedVoid = () => withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'manager', $4, false, 'open')`,
+      [A, created.order.id, managerUser.userId, reason],
+    )).then(() => null, (error: unknown) => error) as Promise<{ code?: string; message?: string } | null>;
+
+    // (a) Row-level switch off.
+    await withApp(A, (q) => q.query('UPDATE tenant_void_reasons SET is_enabled = false WHERE id = $1', [reason]));
+    const rowDisabled = await forgedVoid();
+    expect(rowDisabled?.code).toBe('23514');
+    expect(rowDisabled?.message ?? '').toContain('void reason must be an enabled reason of the same tenant');
+
+    // (b) Kind-level switch off (row back on) — 'kitchen_issue' is unused
+    //     elsewhere in this file, and the switch is restored afterwards.
+    await withApp(A, (q) => q.query('UPDATE tenant_void_reasons SET is_enabled = true WHERE id = $1', [reason]));
+    try {
+      await withApp(A, (q) => q.query(
+        `INSERT INTO tenant_void_reason_kind_settings (tenant_id, void_reason_kind_code, is_enabled)
+         VALUES ($1, 'kitchen_issue', false)
+         ON CONFLICT (tenant_id, void_reason_kind_code) DO UPDATE SET is_enabled = false`,
+        [A],
+      ));
+      const kindDisabled = await forgedVoid();
+      expect(kindDisabled?.code).toBe('23514');
+      expect(kindDisabled?.message ?? '').toContain('void reason must be an enabled reason of the same tenant');
+    } finally {
+      await withApp(A, (q) => q.query(
+        `INSERT INTO tenant_void_reason_kind_settings (tenant_id, void_reason_kind_code, is_enabled)
+         VALUES ($1, 'kitchen_issue', true)
+         ON CONFLICT (tenant_id, void_reason_kind_code) DO UPDATE SET is_enabled = true`,
+        [A],
+      ));
+    }
   });
 
   // ── The four explicit design additions + resilience contract ────────────

@@ -46,6 +46,7 @@ import {
   InsufficientStockError,
   NotFoundError,
   OrderWorkflowNotConfiguredError,
+  ValidationError,
   WorkflowStateInUseError,
 } from '../../../shared/errors.ts';
 import { insertStockMovementRow, mapInventoryItem, type InventoryItemRow } from './stock-ledger-rows.ts';
@@ -605,7 +606,15 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       return result.rows[0]?.void_time_limit_minutes ?? null;
     },
 
-    async resolveVoidPermissionTier(tid: string, userId: string): Promise<VoidPermissionTier | null> {
+    async resolveVoidPermissionTier(tid: string, userId: string, branchId: string): Promise<VoidPermissionTier | null> {
+      // Audit F-A: the tier must come ONLY from grants that cover the order's
+      // branch (tenant-wide grants, or branch-scoped grants for exactly this
+      // branch). A branch-scoped supervisor/manager key for any other branch
+      // must never inflate the tier. The scope predicate mirrors
+      // assert_tenant_order_permission's covering rule (branch-to-branch).
+      if (typeof branchId !== 'string' || branchId.trim() === '') {
+        throw new ValidationError('branchId is required to resolve the branch-covering void tier', 'branchId');
+      }
       const result = await q.query<{ permission_key: string }>(
         `SELECT DISTINCT rp.permission_key
            FROM users u
@@ -614,8 +623,10 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
            JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
            JOIN role_permissions rp ON rp.role_id = r.id AND rp.tenant_id = r.tenant_id
           WHERE u.id = $2 AND u.tenant_id = $1 AND u.is_active AND t.status = 'active' AND ur.is_active
-            AND rp.permission_key = ANY($3::text[])`,
-        [tid, userId, ['order:void', 'order:void:shift_supervisor', 'order:void:manager']],
+            AND rp.permission_key = ANY($3::text[])
+            AND (ur.scope_type = 'tenant' AND ur.scope_id IS NULL
+                 OR ur.scope_type = 'branch' AND ur.scope_id IS NOT DISTINCT FROM $4)`,
+        [tid, userId, ['order:void', 'order:void:shift_supervisor', 'order:void:manager'], branchId],
       );
       let tier: VoidPermissionTier | null = null;
       for (const r of result.rows) {
