@@ -122,6 +122,17 @@ export interface WasteRefundKey {
 
 // ── The inventory store port (one transaction per use case) ─────────────────
 
+/** I4: a registered universal unit (platform-wide — no tenant scoping). */
+export type UnitKind = 'mass' | 'volume' | 'count';
+
+export interface UnitDefinition {
+  readonly code: string;
+  readonly kind: UnitKind;
+  readonly kindBaseUnit: string;
+  /** Factor to the kind's base unit (decimal text, scale 8 — 0051 mirrors 0038). */
+  readonly toBaseFactor: string;
+}
+
 /** I3: one actionable low-stock alert (live state, mute-aware). */
 export interface LowStockAlert {
   readonly branchId: string;
@@ -147,8 +158,9 @@ export interface InventoryTxScope {
   loadInventoryItem(tenantId: string, inventoryItemId: string): Promise<InventoryItemRecord | null>;
   /**
    * The purchase→base factor (exact decimal text, scale 8), or null when no
-   * conversion row exists for the direction. Missing rows fail closed at the
-   * engine (ValidationError) — reverse factors are never derived by division.
+   * conversion row exists for the direction. Missing rows fall through to
+   * the I4 universal tier at the engine — tier-2 rows themselves are never
+   * inverted or derived by division; an explicit row always wins on conflict.
    */
   loadConversionFactor(
     tenantId: string,
@@ -156,6 +168,14 @@ export interface InventoryTxScope {
     fromUnit: string,
     toUnit: string,
   ): Promise<string | null>;
+
+  /**
+   * I4: load registered unit definitions for the given codes (platform
+   * table — intentionally NO tenant parameter; unknown codes are simply
+   * absent from the result, never an error).
+   */
+  loadUnitDefinitions(codes: readonly string[]): Promise<readonly UnitDefinition[]>;
+
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
   /**
    * I1: the coded adjustment reason (tenant_void_reasons mirror — reason

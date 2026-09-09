@@ -57,7 +57,7 @@ export interface AdjustStockInput {
 
 /** Input scale for purchase quantities (NUMERIC(18,8)-compatible). */
 const RECEIVING_INPUT_SCALE = 8;
-/** Conversion factors live at NUMERIC(18,8) (0038). */
+/** Conversion factors live at NUMERIC(18,8) (0038); the I4 registry (0051) mirrors the same scale. */
 const CONVERSION_FACTOR_SCALE = 8;
 /** Scale-8 one, for same-unit receiving (uniform conversion path). */
 const UNITY_FACTOR_TEXT = '1.00000000';
@@ -88,10 +88,27 @@ export class InventoryEngine {
       if (item.branchId !== input.branchId) {
         throw new ValidationError('Inventory item does not belong to the receiving branch', 'branchId');
       }
-      const factorText =
+      // I4: two-tier conversion. Tier 2 (explicit per-item row) wins on
+      // conflict; tier 1 derives same-kind universal pairs through the
+      // registry's base factors (banker division to scale 8 — the working
+      // factor then follows the existing exact path below).
+      let factorText: string | null =
         input.purchaseUnit === item.baseUnit
           ? UNITY_FACTOR_TEXT
           : await scope.loadConversionFactor(tenantId, item.id, input.purchaseUnit, item.baseUnit);
+      if (factorText === null && input.purchaseUnit !== item.baseUnit) {
+        const units = await scope.loadUnitDefinitions([input.purchaseUnit, item.baseUnit]);
+        const from = units.find((u) => u.code === input.purchaseUnit) ?? null;
+        const to = units.find((u) => u.code === item.baseUnit) ?? null;
+        if (from !== null && to !== null && from.kind === to.kind) {
+          const fromMinor = nonNegativeDecimalTextToMinor(from.toBaseFactor, CONVERSION_FACTOR_SCALE, 'conversionFactor');
+          const toMinor = nonNegativeDecimalTextToMinor(to.toBaseFactor, CONVERSION_FACTOR_SCALE, 'conversionFactor');
+          factorText = minorToDecimalText(
+            divideRoundHalfToEven(fromMinor * 10n ** BigInt(CONVERSION_FACTOR_SCALE), toMinor),
+            CONVERSION_FACTOR_SCALE,
+          );
+        }
+      }
       if (factorText === null) {
         throw new ValidationError(
           `No conversion from '${input.purchaseUnit}' to base unit '${item.baseUnit}' for this component`,

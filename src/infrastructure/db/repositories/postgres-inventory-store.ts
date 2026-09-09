@@ -67,6 +67,28 @@ function buildScope(q: TenantQuery): InventoryTxScope {
       return result.rows[0]?.conversion_factor ?? null;
     },
 
+    // I4: universal registry lookup (platform table — no tenant predicate).
+    async loadUnitDefinitions(codes: readonly string[]) {
+      if (codes.length === 0) return [];
+      const result = await q.query<{
+        code: string;
+        kind: string;
+        kind_base_unit: string;
+        to_base_factor: string;
+      }>(
+        `SELECT code, kind, kind_base_unit, to_base_factor::text AS to_base_factor
+           FROM unit_registry
+          WHERE code = ANY($1)`,
+        [codes],
+      );
+      return result.rows.map((r) => ({
+        code: r.code,
+        kind: r.kind as 'mass' | 'volume' | 'count',
+        kindBaseUnit: r.kind_base_unit,
+        toBaseFactor: r.to_base_factor,
+      }));
+    },
+
     async insertStockMovement(tid: string, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
       return insertStockMovementRow(q, tid, movement);
     },

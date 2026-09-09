@@ -140,7 +140,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -935,9 +935,11 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     const sugar = await createComponent(till.branchId, 'سكر', 'Sugar', 'g', '10.0000');
     const actor = { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV };
 
-    // No oz→g conversion row exists for this component.
+    // I4: 'oz' is now a registered universal unit, so the unknown-unit leg
+    // uses 'sachet' — no item row AND no registry entry, still rejected.
+    // No sachet→g conversion exists anywhere for this component.
     await expect(inventory.receiveStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: sugar, purchaseUnit: 'oz', quantityText: '1.00000000',
+      branchId: till.branchId, inventoryItemId: sugar, purchaseUnit: 'sachet', quantityText: '1.00000000',
     })).rejects.toBeInstanceOf(ValidationError);
 
     for (const bad of ['1.000000001', '0', '0.00000000', '-5', 'abc', '1,000']) {
@@ -1470,5 +1472,84 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       await removeMenuRecipe(itemDrink, flourB);
       await inventory.unmuteLowStockAlerts(T, { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV }, tillA.branchId);
     }
+  });
+
+  // ── I4: universal unit registry ──────────────────────────────────────────
+
+  it('I4a/ universal same-kind pairs convert with no item row; an explicit item row wins on conflict', async () => {
+    const till = await setupTill();
+    const actor = { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV };
+    // 1 lb → kg, NO conversion row: 0.45359237 → banker → '0.4536'.
+    const spice = await createComponent(till.branchId, 'بهار', 'Spice', 'kg', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: spice, purchaseUnit: 'lb', quantityText: '1.00000000',
+    });
+    expect(await stockOf(spice)).toBe('0.4536');
+    // 2500 g → kg: exact math → '2.5000'.
+    const sugar = await createComponent(till.branchId, 'سكر', 'Sugar', 'kg', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: sugar, purchaseUnit: 'g', quantityText: '2500.00000000',
+    });
+    expect(await stockOf(sugar)).toBe('2.5000');
+    // 1 oz → g: exact seeded factor (28.34952313), banker at the quantity → '28.3495'.
+    const salt = await createComponent(till.branchId, 'ملح', 'Salt', 'g', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: salt, purchaseUnit: 'oz', quantityText: '1.00000000',
+    });
+    expect(await stockOf(salt)).toBe('28.3495');
+    // 100 g → oz: non-terminating division, banker-derived factor 0.03527396 → '3.5274'.
+    const saffron = await createComponent(till.branchId, 'زعفران', 'Saffron', 'oz', '0.0000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: saffron, purchaseUnit: 'g', quantityText: '100.00000000',
+    });
+    expect(await stockOf(saffron)).toBe('3.5274');
+    // Precedence: an explicit kg→g item row of 999 beats the universal 1000.
+    const odd = await createComponent(till.branchId, 'غريب', 'Odd', 'g', '0.0000');
+    await addConversion(odd, 'kg', 'g', '999.00000000');
+    await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: odd, purchaseUnit: 'kg', quantityText: '1.00000000',
+    });
+    expect(await stockOf(odd)).toBe('999.0000');
+  });
+
+  it('I4b/ cross-kind pairs and unknown units fail closed with the unchanged message', async () => {
+    const till = await setupTill();
+    const actor = { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV };
+    const milk = await createComponent(till.branchId, 'حليب', 'Milk', 'L', '0.0000');
+    // kg→L: BOTH registered, kinds differ (mass vs volume) → rejected.
+    const cross = await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: milk, purchaseUnit: 'kg', quantityText: '1.00000000',
+    }).then(() => null, (error: unknown) => error);
+    expect(cross).toBeInstanceOf(ValidationError);
+    expect((cross as ValidationError).message).toBe(`No conversion from 'kg' to base unit 'L' for this component`);
+    // 'sachet': no row, no registry entry → the same message shape.
+    const unknown = await inventory.receiveStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: milk, purchaseUnit: 'sachet', quantityText: '1.00000000',
+    }).then(() => null, (error: unknown) => error);
+    expect(unknown).toBeInstanceOf(ValidationError);
+    expect((unknown as ValidationError).message).toBe(`No conversion from 'sachet' to base unit 'L' for this component`);
+    expect(await stockOf(milk)).toBe('0.0000');
+  });
+
+  it('I4c/ the registry seeds the audited 8-code vocabulary (and the app role can read it)', async () => {
+    const rows = await withApp(T, (q) => q.query<{ code: string; kind: string; kind_base_unit: string; to_base_factor: string }>(
+      'SELECT code, kind, kind_base_unit, to_base_factor::text AS to_base_factor FROM unit_registry ORDER BY code',
+    ));
+    expect(rows.rows).toEqual([
+      { code: 'L', kind: 'volume', kind_base_unit: 'ml', to_base_factor: '1000.00000000' },
+      { code: 'g', kind: 'mass', kind_base_unit: 'g', to_base_factor: '1.00000000' },
+      { code: 'kg', kind: 'mass', kind_base_unit: 'g', to_base_factor: '1000.00000000' },
+      { code: 'lb', kind: 'mass', kind_base_unit: 'g', to_base_factor: '453.59237000' },
+      { code: 'mg', kind: 'mass', kind_base_unit: 'g', to_base_factor: '0.00100000' },
+      { code: 'ml', kind: 'volume', kind_base_unit: 'ml', to_base_factor: '1.00000000' },
+      { code: 'oz', kind: 'mass', kind_base_unit: 'g', to_base_factor: '28.34952313' },
+      { code: 'piece', kind: 'count', kind_base_unit: 'piece', to_base_factor: '1.00000000' },
+    ]);
+    // Tenant-context writes are structurally rejected (guard mirror — the
+    // SELECT-only grant and the guard trigger both speak 42501).
+    const failure = await withApp(T, (q) => q.query(
+      `INSERT INTO unit_registry (code, kind, kind_base_unit, to_base_factor) VALUES ('sachet', 'count', 'piece', 1)`,
+    )).then(() => null, (error: unknown) => error) as { code?: string } | null;
+    expect(failure?.code).toBe('42501');
   });
 });
