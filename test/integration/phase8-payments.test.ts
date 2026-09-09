@@ -448,6 +448,36 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     )).rejects.toMatchObject({ code: '23514' });
   });
 
+  it('F-B/caller-supplied shift openedAt/closedAt (past/future) are ignored: the server clock stamps open + close', async () => {
+    const branchId = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, 'f-b-shift', 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T]);
+    });
+    const cashier = await createTieredUser([], '3333', null);
+    const past = new Date('2020-01-01T00:00:00.000Z');
+    const future = new Date('2031-01-01T00:00:00.000Z');
+    const before = Date.now();
+    const shift = await shifts.openShift(T, {
+      branchId,
+      cashierUserId: cashier.userId,
+      openedByUserId: opener.userId,
+      openVerifiedByUserId: verifier.userId,
+      openedAt: past,
+      openCounts: [],
+    });
+    const closed = await shifts.closeShift(T, {
+      shiftId: shift.id, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
+      closedAt: future, closeCounts: [], notes: null,
+    });
+    const after = Date.now();
+    if (closed.closedAt === null) throw new Error('Expected the shift to be closed');
+    for (const [stamped, supplied] of [[shift.openedAt, past], [closed.closedAt, future]] as const) {
+      expect(stamped.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+      expect(stamped.getTime()).toBeLessThanOrEqual(after + 1_000);
+      expect(Math.abs(stamped.getTime() - supplied.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+    }
+  });
+
   it('shortage variance and the X-Report read-only contract', async () => {
     const till = await setupTill([{ denominationValue: '100.00', quantity: 1 }]); // float 100.00
     const order = await newOrder(till);

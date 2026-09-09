@@ -376,9 +376,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     tenantId: string,
     f: BranchFixture,
     lines: readonly { menuItemId: string; quantity?: number }[],
-    occurredAt = new Date(),
   ) {
     const cashierUserId = await ensureShiftCashier(tenantId, f.branchId);
+    // Audit F-B: no occurredAt is passed — the server clock stamps the order.
+    // (Deliberate extreme values are exercised only by the F-B tests below.)
     return creation.create(tenantId, {
       branchId: f.branchId,
       cashierUserId,
@@ -387,7 +388,6 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       deliveryPlatformId: null,
       tableId: null,
       items: lines.map((l) => ({ menuItemId: l.menuItemId, quantity: l.quantity ?? 1 })),
-      occurredAt,
     });
   }
 
@@ -617,9 +617,31 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     try {
       // Item created 10 minutes ago (created_at snapshot) → refused.
-      const old = await newOrder(C, fixtureC, [{ menuItemId: fixtureC.itemGrill }], new Date(Date.now() - 10 * 60_000));
+      // Audit F-B: the engine no longer accepts caller time, so the age is
+      // simulated by SQL time-travel (the P2 coupon-race precedent: create
+      // live, then move the timestamp), not by a passed occurredAt.
+      const old = await newOrder(C, fixtureC, [{ menuItemId: fixtureC.itemGrill }]);
       const oldItem = old.items[0];
       if (oldItem === undefined) throw new Error('Expected one order item');
+      // created_at is purchase evidence guarded by trg_guard_order_item_writes
+      // (even the owner cannot UPDATE it), so the age is simulated with a
+      // SESSION-LOCAL trigger bypass: SET LOCAL inside one owner transaction
+      // touches no global trigger state, so concurrent files asserting the
+      // guard (e.g. phase8 split_group_id) can never flake.
+      const timeTravel = await owner.connect();
+      try {
+        await timeTravel.query('BEGIN');
+        try {
+          await timeTravel.query("SET LOCAL session_replication_role = 'replica'");
+          await timeTravel.query("UPDATE order_items SET created_at = now() - interval '10 minutes' WHERE id = $1 AND tenant_id = $2", [oldItem.item.id, C]);
+          await timeTravel.query('COMMIT');
+        } catch (error) {
+          await timeTravel.query('ROLLBACK');
+          throw error;
+        }
+      } finally {
+        timeTravel.release();
+      }
       await expect(voids.voidOrderItem(C, actor(manager), { orderItemId: oldItem.item.id, voidReasonId: reason }))
         .rejects.toBeInstanceOf(VoidTimeLimitExceededError);
 
@@ -636,6 +658,57 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       // the settings table (a tenant clears the limit by UPDATE, not DELETE).
       await owner.query('DELETE FROM tenant_void_settings WHERE tenant_id = $1', [C]);
     }
+  });
+
+  it('F-B/a caller-supplied order occurredAt (past or future) is ignored: the server clock stamps the order, items, and events', async () => {
+    for (const occurredAt of [new Date('2020-01-01T00:00:00.000Z'), new Date('2031-01-01T00:00:00.000Z')]) {
+      const before = Date.now();
+      const created = await creation.create(A, {
+        branchId: fixture.branchId,
+        cashierUserId: await ensureShiftCashier(A, fixture.branchId),
+        orderType: 'dine_in',
+        salesChannelCode: 'dine_in',
+        deliveryPlatformId: null,
+        tableId: null,
+        items: [{ menuItemId: fixture.itemGrill, quantity: 1 }],
+        occurredAt,
+      });
+      const after = Date.now();
+      const item = created.items[0];
+      if (item === undefined) throw new Error('Expected one order item');
+      // placed_at, the item created_at, and the initial status event all
+      // land inside the server execution window — never near the supplied
+      // extreme (years away).
+      for (const stamped of [created.order.placedAt, item.item.createdAt]) {
+        expect(stamped.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+        expect(stamped.getTime()).toBeLessThanOrEqual(after + 1_000);
+        expect(Math.abs(stamped.getTime() - occurredAt.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+      }
+      const events = await owner.query<{ occurred_at: Date }>(
+        'SELECT occurred_at FROM order_item_status_events WHERE order_item_id = $1 ORDER BY occurred_at', [item.item.id]);
+      expect(events.rows).toHaveLength(1);
+      const eventAt = events.rows[0]?.occurred_at.getTime();
+      if (eventAt === undefined) throw new Error('Expected the initial status event');
+      expect(eventAt).toBeGreaterThanOrEqual(before - 1_000);
+      expect(eventAt).toBeLessThanOrEqual(after + 1_000);
+      expect(Math.abs(eventAt - occurredAt.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+    }
+  });
+
+  it('F-B/a caller-supplied transition occurredAt is ignored: the status event keeps server time', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const before = Date.now();
+    await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id, occurredAt: new Date('2020-05-05T05:05:05.000Z'),
+    });
+    const after = Date.now();
+    const latest = await owner.query<{ occurred_at: Date }>(
+      'SELECT occurred_at FROM order_item_status_events WHERE order_item_id = $1 ORDER BY occurred_at DESC LIMIT 1', [item.item.id]);
+    const at = row(latest.rows).occurred_at.getTime();
+    expect(at).toBeGreaterThanOrEqual(before - 1_000);
+    expect(at).toBeLessThanOrEqual(after + 1_000);
   });
 
   it('#9 disabling a void reason kind keeps every historical record (disable instead of delete)', async () => {

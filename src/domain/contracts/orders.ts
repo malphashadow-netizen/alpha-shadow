@@ -227,6 +227,13 @@ export interface NewOrderInput {
   /** Display only: how many people the check is split across (no sub-invoices). */
   readonly splitPeopleCount?: number | null;
   readonly items: readonly NewOrderItemLine[];
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock (`new Date()` in the
+   * creation engine) is the sole source of event time — any caller-supplied
+   * value, past or future, has no effect on placed_at, item created_at,
+   * status events, tax pricing, or stock movements. Kept only so existing
+   * callers compile.
+   */
   readonly occurredAt?: Date;
   /**
    * Optional creation-time stock override (Phase 9): when the order would
@@ -254,6 +261,11 @@ export interface ItemStatusTransitionInput {
   readonly orderItemId: string;
   readonly toWorkflowStateId: string;
   readonly actorUserId?: string;
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock stamps every status
+   * transition — any caller-supplied value, past or future, has no effect.
+   * Kept only so existing callers compile.
+   */
   readonly occurredAt?: Date;
 }
 

@@ -142,7 +142,8 @@ export class WorkflowTransitionEngine {
         fromWorkflowStateId: fromState.id,
         toWorkflowStateId: toState.id,
         actorUserId: input.actorUserId ?? null,
-        occurredAt: input.occurredAt ?? new Date(),
+        // Audit F-B: input.occurredAt is ignored — the server clock stamps every transition.
+        occurredAt: new Date(),
       });
       return {
         orderItemId: item.id,

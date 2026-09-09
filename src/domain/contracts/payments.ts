@@ -339,6 +339,11 @@ export interface OpenShiftInput {
   readonly cashierUserId: string;
   readonly openedByUserId: string;
   readonly openVerifiedByUserId: string;
+  /**
+   * @deprecated Audit F-B: IGNORED (kept REQUIRED only for signature
+   * stability). The server clock stamps the opening; any caller-supplied
+   * value, past or future, has no effect.
+   */
   readonly openedAt: Date;
   readonly openCounts: readonly CashCountLineInput[];
 }
@@ -347,6 +352,11 @@ export interface CloseShiftInput {
   readonly shiftId: string;
   readonly closedByUserId: string;
   readonly closeVerifiedByUserId: string;
+  /**
+   * @deprecated Audit F-B: IGNORED (kept REQUIRED only for signature
+   * stability). The server clock stamps the close; any caller-supplied
+   * value, past or future, has no effect.
+   */
   readonly closedAt: Date;
   readonly closeCounts: readonly CashCountLineInput[];
   readonly notes: string | null;

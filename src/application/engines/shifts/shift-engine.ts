@@ -128,7 +128,8 @@ export class ShiftEngine {
         cashierId: input.cashierUserId,
         openedById: input.openedByUserId,
         openVerifiedById: input.openVerifiedByUserId,
-        openedAt: input.openedAt,
+        // Audit F-B: input.openedAt is ignored (kept required for signature stability) — the server clock stamps the opening.
+        openedAt: new Date(),
         startingFloat: minorToDecimalText(floatMinor, digits),
       });
       await scope.insertCashCountDetails(tenantId, shift.id, 'open', input.openCounts);
@@ -181,7 +182,8 @@ export class ShiftEngine {
       return scope.closeShiftRow(tenantId, input.shiftId, {
         closedById: input.closedByUserId,
         closeVerifiedById: input.closeVerifiedByUserId,
-        closedAt: input.closedAt,
+        // Audit F-B: input.closedAt is ignored (kept required for signature stability) — the server clock stamps the close.
+        closedAt: new Date(),
         countedCash: minorToDecimalText(countedMinor, digits),
         recordedCashSales,
         varianceType,

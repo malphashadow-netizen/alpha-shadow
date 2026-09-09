@@ -107,7 +107,11 @@ export class OrderCreationEngine {
     if (input.splitPeopleCount !== undefined && input.splitPeopleCount !== null && (!Number.isInteger(input.splitPeopleCount) || input.splitPeopleCount < 1)) {
       throw new ValidationError('splitPeopleCount must be a positive integer (display-only)', 'splitPeopleCount');
     }
-    const occurredAt = input.occurredAt ?? new Date();
+    // Audit F-B: the server clock is the SOLE source of event time.
+    // input.occurredAt is accepted (deprecated) but ALWAYS ignored — a
+    // caller-supplied past/future date must never price taxes, age items,
+    // or backdate the ledger.
+    const occurredAt = new Date();
 
     // ── Step 1: pre-flight (ONE read transaction). Authorization gates run
     // BEFORE any stock read — fail fast, leak nothing.

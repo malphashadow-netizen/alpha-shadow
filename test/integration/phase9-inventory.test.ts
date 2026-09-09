@@ -1041,6 +1041,29 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(await stockOf(spice)).toBe('0.4536');
   });
 
+  it('F-B/a caller-supplied movement occurredAt (past or future) is ignored: receive + adjust stamp server time', async () => {
+    const till = await setupTill();
+    const sugar = await createComponent(till.branchId, 'سكر', 'Sugar', 'g', '10.0000');
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '10.0000');
+    const reason = await createAdjustmentReason();
+    const past = new Date('2020-01-01T00:00:00.000Z');
+    const future = new Date('2031-01-01T00:00:00.000Z');
+
+    const before = Date.now();
+    const received = await inventory.receiveStock(T, { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV }, {
+      branchId: till.branchId, inventoryItemId: sugar, purchaseUnit: 'kg', quantityText: '1.00000000', occurredAt: past,
+    });
+    const adjusted = await inventory.adjustStock(T, { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV }, {
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000', occurredAt: future,
+    });
+    const after = Date.now();
+    for (const [movement, supplied] of [[received, past], [adjusted, future]] as const) {
+      expect(movement.occurredAt.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+      expect(movement.occurredAt.getTime()).toBeLessThanOrEqual(after + 1_000);
+      expect(Math.abs(movement.occurredAt.getTime() - supplied.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+    }
+  });
+
   it('7b/ receiving rejects a missing conversion and every malformed quantity', async () => {
     const till = await setupTill();
     const sugar = await createComponent(till.branchId, 'سكر', 'Sugar', 'g', '10.0000');

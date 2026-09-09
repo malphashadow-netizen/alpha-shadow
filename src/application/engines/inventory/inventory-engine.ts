@@ -42,6 +42,11 @@ export interface ReceiveStockInput {
   readonly quantityText: string;
   /** The purchase unit (converted to the base unit; equal units skip the lookup). */
   readonly purchaseUnit: string;
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock stamps every movement;
+   * any caller-supplied value has no effect. Kept only so existing callers
+   * compile.
+   */
   readonly occurredAt?: Date;
 }
 
@@ -52,6 +57,11 @@ export interface AdjustStockInput {
   readonly quantityDeltaText: string;
   /** I1: MANDATORY coded reason (tenant_adjustment_reasons id, must be enabled). */
   readonly adjustmentReasonId: string;
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock stamps every movement;
+   * any caller-supplied value has no effect. Kept only so existing callers
+   * compile.
+   */
   readonly occurredAt?: Date;
 }
 
@@ -141,7 +151,8 @@ export class InventoryEngine {
         actorUserId: actor.userId,
         managerOverrideId: null,
         adjustmentReasonId: null,
-        occurredAt: input.occurredAt ?? new Date(),
+        // Audit F-B: input.occurredAt is ignored — the server clock stamps every movement.
+        occurredAt: new Date(),
       };
       return scope.insertStockMovement(tenantId, movement);
     });
@@ -180,7 +191,8 @@ export class InventoryEngine {
         actorUserId: actor.userId,
         managerOverrideId: null,
         adjustmentReasonId: reason.id,
-        occurredAt: input.occurredAt ?? new Date(),
+        // Audit F-B: input.occurredAt is ignored — the server clock stamps every movement.
+        occurredAt: new Date(),
       };
       return scope.insertStockMovement(tenantId, movement);
     });

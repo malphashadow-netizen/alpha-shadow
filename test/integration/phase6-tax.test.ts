@@ -137,21 +137,42 @@ describe('Phase 6 live acceptance', () => {
     return platform.createTaxRate(PLATFORM_ACTOR, { taxCategoryId: cat.id, rateBps: bps, isPriceInclusiveDefault: inclusive, effectiveFrom: '2020-01-01', effectiveTo: null });
   }
 
+  /** 'YYYY-MM-DD' in the branch timezone, N days before server-now (Riyadh has no DST — exact day arithmetic). */
+  function riyadhDateDaysAgo(days: number): string {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date(Date.now() - days * 86_400_000));
+  }
+
   it('#1 historical rate changes do not alter earlier immutable snapshots; both changes audited', async () => {
     const cat = await category(); const oldRate = await rate(cat, 500); const product = await item(cat.id);
+    // Audit F-B: lines resolve at server-now, so the superseding rate starts
+    // 7 Riyadh-days ago — the second line MUST pick it up while the first
+    // snapshot stays on the old rate (windows relative to now keep this test
+    // deterministic on any run date).
     const first = await orders.createLine(A, input(product));
     const next = await platform.closeAndSupersedeTaxRate(PLATFORM_ACTOR, { taxRateId: oldRate.id, rateBps: 1500,
-      isPriceInclusiveDefault: false, effectiveFrom: '2027-01-01' });
-    const second = await orders.createLine(A, input(product, { at: new Date('2027-01-01T10:00:00Z') }));
+      isPriceInclusiveDefault: false, effectiveFrom: riyadhDateDaysAgo(7) });
+    const second = await orders.createLine(A, input(product));
     expect(await reader.readSnapshots(A, first.orderLineId)).toMatchObject([{ taxRateId: oldRate.id, rateBps: 500, taxAmountMinor: 50n }]);
     expect(await reader.readSnapshots(A, second.orderLineId)).toMatchObject([{ taxRateId: next.id, rateBps: 1500, taxAmountMinor: 150n }]);
     const old = row((await owner.query<{ effective_to: string; superseded_by: string }>('SELECT effective_to::text, superseded_by FROM tax_rates WHERE id = $1', [oldRate.id])).rows);
-    expect(old).toEqual({ effective_to: '2026-12-31', superseded_by: next.id });
+    expect(old).toEqual({ effective_to: riyadhDateDaysAgo(8), superseded_by: next.id });
     const audit = await platformPool.query<{ tenant_id: string | null; scope: string; user_id: string }>("SELECT tenant_id, scope, user_id FROM audit_log WHERE resource = ANY($1::text[])", [[`tax_rates:${oldRate.id}`, `tax_rates:${next.id}`]]);
     expect(audit.rows).toHaveLength(3);
     expect(audit.rows.every((r) => r.scope === 'platform_tax' && r.tenant_id === null && r.user_id === PLATFORM_ACTOR)).toBe(true);
     await expect(withApp(A, async (q) => q.query('UPDATE order_line_tax_snapshots SET tax_amount_minor = 0 WHERE order_line_id = $1', [first.orderLineId]))).rejects.toMatchObject({ code: '42501' });
     await expect(owner.query('UPDATE order_line_tax_snapshots SET tax_amount_minor = 0 WHERE order_line_id = $1', [first.orderLineId])).rejects.toMatchObject({ code: '55006' });
+  });
+
+  it('F-B/a caller-supplied line date is ignored: the server clock selects the rate (no 2020 pricing on a present sale)', async () => {
+    const cat = await category(); const oldRate = await rate(cat, 500); const product = await item(cat.id);
+    const next = await platform.closeAndSupersedeTaxRate(PLATFORM_ACTOR, { taxRateId: oldRate.id, rateBps: 1500,
+      isPriceInclusiveDefault: false, effectiveFrom: riyadhDateDaysAgo(7) });
+    // A caller claiming "this sale happened in 2021" (when only the 500bps
+    // rate existed) must STILL be priced at the current 1500bps rate.
+    const line = await orders.createLine(A, input(product, { at: new Date('2021-06-15T10:00:00Z') }));
+    expect(await reader.readSnapshots(A, line.orderLineId)).toMatchObject([{ taxRateId: next.id, rateBps: 1500, taxAmountMinor: 150n }]);
+    expect(next.id).not.toBe(oldRate.id);
   });
 
   it('#2 PostgreSQL EXCLUDE GIST rejects overlapping and touching closed intervals', async () => {
