@@ -9,6 +9,11 @@
  *     (the same lossless read over plain HTTP);
  *   * received events are de-duplicated defensively by sequence_id (the
  *     server is the authority, but the client never double-applies).
+ *
+ * R1: the client authenticates EVERY connection with its device token
+ * (REQUIRED — a tokenless client cannot be constructed): the WebSocket
+ * handshake carries it as the `?token=` query parameter (browsers cannot set
+ * headers on an upgrade), the polling fallback as `Authorization: Bearer`.
  */
 export interface KdsClientEvent {
   readonly sequenceId: number;
@@ -22,6 +27,8 @@ export interface KdsRealtimeClientOptions {
   readonly baseUrl: string;
   readonly tenantId: string;
   readonly branchId: string;
+  /** R1 device token minted for THIS branch (KdsDeviceEngine.issueDeviceToken). */
+  readonly deviceToken: string;
   readonly onEvent: (event: KdsClientEvent) => void;
   readonly initialLastSequenceId?: number;
   /** Short-polling fallback period (default 250ms). */
@@ -111,7 +118,7 @@ export class KdsRealtimeClient {
     // The WebSocket constructor only accepts the ws/wss schemes; callers may
     // legitimately pass the plain-HTTP base URL of the KDS service.
     const wsBase = base.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
-    return `${wsBase}/kds/${this.options.tenantId}/branches/${this.options.branchId}/ws`;
+    return `${wsBase}/kds/${this.options.tenantId}/branches/${this.options.branchId}/ws?token=${encodeURIComponent(this.options.deviceToken)}`;
   }
 
   private pollUrl(): string {
@@ -185,7 +192,9 @@ export class KdsRealtimeClient {
     const poll = async (): Promise<void> => {
       if (this.state !== 'polling') return;
       try {
-        const response = await fetchImpl(this.pollUrl());
+        const response = await fetchImpl(this.pollUrl(), {
+          headers: { authorization: `Bearer ${this.options.deviceToken}` },
+        });
         if (response.ok) {
           const body = JSON.parse(await response.text()) as { events?: unknown };
           const events = Array.isArray(body.events) ? parseWireEvents(body.events) : [];

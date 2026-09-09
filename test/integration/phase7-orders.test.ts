@@ -13,6 +13,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { KdsDeviceEngine } from '../../src/application/engines/kds/kds-device-engine.ts';
 import { KdsEventService } from '../../src/application/engines/kds/kds-event-service.ts';
 import { SideEffectWorker } from '../../src/application/engines/kds/side-effect-worker.ts';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
@@ -30,6 +31,7 @@ import type { OrderOutboxEvent, SideEffectType, TenantWorkflowState, VoidActor }
 import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platform-tax-context.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
+import { PostgresKdsDeviceTokenStore } from '../../src/infrastructure/db/repositories/postgres-kds-device-token-store.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
@@ -115,6 +117,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let workflowAdmin: WorkflowAdminEngine;
   let voids: VoidModificationEngine;
   let kdsEvents: KdsEventService;
+  let kdsDevices: KdsDeviceEngine;
+  let kdsIssuerId: string;
   let saCategory: TaxCategory;
   const menuCategoryByTenant = new Map<string, string>();
   const catalogAdminByTenant = new Map<string, string>();
@@ -133,7 +137,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '014_backlog_r1_kds_device_tokens.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -169,6 +173,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
     kdsEvents = new KdsEventService({ store });
+    kdsDevices = new KdsDeviceEngine({ store: new PostgresKdsDeviceTokenStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
     await platform.configureJurisdiction(PLATFORM_ACTOR, 'SA', 'per_line', true);
@@ -213,6 +218,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       const category = await catalog.createCategory(tenant, adminId, { name: { ar: `قائمة ${tenant}` } });
       menuCategoryByTenant.set(tenant, category.id);
     }
+
+    // R1: one device-token issuer for the KDS tests (tenant A). Each KDS
+    // test mints its own screen token for its fresh branch.
+    kdsIssuerId = randomUUID();
+    await withApp(A, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [kdsIssuerId, A, `${kdsIssuerId}@example.test`, hashPin(PIN_PEPPER, A, kdsIssuerId, '0000')],
+    ));
+    await grantKeys(permWrite, A, kdsIssuerId, ['payments:methods_admin']);
   });
 
   beforeEach(async () => {
@@ -439,8 +453,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const preparing = state(A, 'preparing');
     const ready = state(A, 'ready');
 
+    // R1: the test screen holds a device token minted for this branch.
+    const { plaintextToken: screenToken } = await kdsDevices.issueDeviceToken(A, kdsIssuerId, {
+      branchId: fixture.branchId,
+      label: 'phase7-test-screen',
+    });
     const server = new KdsRealtimeServer({
       readEvents: (tenantId, branchId, after, limit) => kdsEvents.readEvents(tenantId, branchId, after, limit),
+      verifyDeviceToken: (tenantId, branchId, token) => kdsDevices.verifyDeviceToken(tenantId, branchId, token),
+      isTokenHashActive: (tenantId, tokenHash) => kdsDevices.isDeviceTokenActive(tenantId, tokenHash),
       pollIntervalMs: 40,
     });
     const port = await server.start();
@@ -449,6 +470,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       baseUrl: `http://127.0.0.1:${port}`,
       tenantId: A,
       branchId: fixture.branchId,
+      deviceToken: screenToken,
       onEvent: (event) => received.push(event),
       reconnectBaseDelayMs: 350,
       reconnectMaxDelayMs: 2_000,
@@ -856,8 +878,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
 
+    // R1: the polling test screen holds a device token minted for this branch.
+    const { plaintextToken: screenToken } = await kdsDevices.issueDeviceToken(A, kdsIssuerId, {
+      branchId: fixture.branchId,
+      label: 'phase7-polling-test-screen',
+    });
     const server = new KdsRealtimeServer({
       readEvents: (tenantId, branchId, after, limit) => kdsEvents.readEvents(tenantId, branchId, after, limit),
+      verifyDeviceToken: (tenantId, branchId, token) => kdsDevices.verifyDeviceToken(tenantId, branchId, token),
+      isTokenHashActive: (tenantId, tokenHash) => kdsDevices.isDeviceTokenActive(tenantId, tokenHash),
       disableWebSocket: true,
     });
     const port = await server.start();
@@ -866,6 +895,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       baseUrl: `http://127.0.0.1:${port}`,
       tenantId: A,
       branchId: fixture.branchId,
+      deviceToken: screenToken,
       onEvent: (event) => received.push(event),
       maxWebSocketRetries: 1,
       reconnectBaseDelayMs: 20,
