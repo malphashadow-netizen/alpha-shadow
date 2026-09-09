@@ -44,6 +44,7 @@ import {
   ManagerOverrideRequiredError,
   NoMatchingRoutingRuleError,
   PaymentReversalRequiredError,
+  ValidationError,
   VoidReasonUnavailableError,
   VoidTimeLimitExceededError,
   WorkflowStateInUseError,
@@ -956,5 +957,56 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const second = await routing.route(A, fixture.branchId, context);
     expect(second.stationId).toBe(expectedWinner.station_id);
     expect(second.ruleId).toBe(expectedWinner.id);
+  });
+
+  // ── B10: cross-currency lines are rejected, never converted ──────────────
+
+  async function createUsdItem(): Promise<string> {
+    const menuCategoryId = menuCategoryByTenant.get(A);
+    const adminId = catalogAdminByTenant.get(A);
+    if (menuCategoryId === undefined || adminId === undefined) throw new Error('Missing phase7 catalog fixture');
+    const item = (await catalog.createItem(A, adminId, {
+      categoryId: menuCategoryId, name: { ar: 'صنف دولار' }, basePrice: money(1000n, currencyCode('USD')), taxRuleId: saCategory.id,
+    })).id;
+    await withApp(A, (q) => q.query(
+      'INSERT INTO station_routing_rules (id, tenant_id, branch_id, station_id, menu_item_id) VALUES ($1, $2, $3, $4, $5)',
+      [randomUUID(), A, fixture.branchId, fixture.stationGrill, item],
+    ));
+    return item;
+  }
+
+  async function countOrders(): Promise<number> {
+    const result = await owner.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM orders WHERE tenant_id = $1', [A]);
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('Expected order count');
+    return Number(row.count);
+  }
+
+  it('B10a/ a USD-priced line at a SAR branch is rejected and writes nothing (no silent mispricing)', async () => {
+    const usdItem = await createUsdItem();
+    const before = await countOrders();
+    const failure = await newOrder(A, fixture, [{ menuItemId: usdItem }]).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ValidationError);
+    expect((failure as ValidationError).message).toMatch(/USD/);
+    expect((failure as ValidationError).message).toMatch(/SAR/);
+    expect(await countOrders()).toBe(before);
+  });
+
+  it('B10b/ an explicit unitPriceMinor is branch-currency by contract and bypasses the menu price', async () => {
+    const usdItem = await createUsdItem();
+    const cashierUserId = await ensureShiftCashier(A, fixture.branchId);
+    const created = await creation.create(A, {
+      branchId: fixture.branchId,
+      cashierUserId,
+      orderType: 'dine_in',
+      salesChannelCode: 'dine_in',
+      deliveryPlatformId: null,
+      tableId: null,
+      items: [{ menuItemId: usdItem, quantity: 1, unitPriceMinor: 5000n }],
+      occurredAt: new Date(),
+    });
+    const line = created.items[0];
+    if (line === undefined) throw new Error('Expected one order item');
+    expect(line.item.unitPriceMinor).toBe(5000n);
   });
 });

@@ -199,7 +199,12 @@ export interface OrderItemModifierSnapshot {
 export interface NewOrderItemLine {
   readonly menuItemId: string;
   readonly quantity: number;
-  /** Defaults to the menu item's current base price when omitted. */
+  /**
+   * Explicit branch-currency price (B10): denominated in the ORDER BRANCH's
+   * base currency, never the menu item's. Defaults to the menu item's
+   * current base price when omitted (which must then match the branch
+   * currency — cross-currency lines are rejected, never converted).
+   */
   readonly unitPriceMinor?: bigint;
   readonly modifiers?: readonly OrderItemModifierSnapshot[];
   /** Optional light check-split tag (frozen with the rest of the evidence). */
@@ -397,7 +402,7 @@ export interface OrdersTxScope {
   bumpOrderRevision(tenantId: string, orderId: string): Promise<void>;
   loadOrderItem(tenantId: string, orderItemId: string): Promise<OrderItemRecord | null>;
   loadActiveOrderItems(tenantId: string, orderId: string): Promise<readonly OrderItemRecord[]>;
-  loadMenuItem(tenantId: string, menuItemId: string): Promise<{ id: string; name: LocalizedText; basePriceMinor: bigint; isActive: boolean } | null>;
+  loadMenuItem(tenantId: string, menuItemId: string): Promise<{ id: string; name: LocalizedText; basePriceMinor: bigint; basePriceCurrencyCode: string; isActive: boolean } | null>;
   loadOrderStatusKindFlags(kindCode: string): Promise<OrderBehaviorFlags>;
   loadBranch(tenantId: string, branchId: string): Promise<{ id: string; baseCurrencyCode: string; isActive: boolean } | null>;
 

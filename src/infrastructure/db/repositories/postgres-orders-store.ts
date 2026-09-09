@@ -286,14 +286,14 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
     },
 
     async loadMenuItem(tid: string, menuItemId: string) {
-      const result = await q.query<{ id: string; name: unknown; base_price_amount_minor: string; is_active: boolean }>(
-        'SELECT id, name, base_price_amount_minor, is_active FROM menu_items WHERE tenant_id = $1 AND id = $2',
+      const result = await q.query<{ id: string; name: unknown; base_price_amount_minor: string; base_price_currency_code: string; is_active: boolean }>(
+        'SELECT id, name, base_price_amount_minor, base_price_currency_code, is_active FROM menu_items WHERE tenant_id = $1 AND id = $2',
         [tid, menuItemId],
       );
       const r = result.rows[0];
       return r === undefined
         ? null
-        : { id: r.id, name: localized(r.name), basePriceMinor: BigInt(r.base_price_amount_minor), isActive: r.is_active };
+        : { id: r.id, name: localized(r.name), basePriceMinor: BigInt(r.base_price_amount_minor), basePriceCurrencyCode: r.base_price_currency_code, isActive: r.is_active };
     },
 
     async loadOrderStatusKindFlags(kindCode: string): Promise<OrderBehaviorFlags> {

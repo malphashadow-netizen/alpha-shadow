@@ -211,6 +211,16 @@ export class OrderCreationEngine {
         if (!menuItem?.isActive) {
           throw new ValidationError(`Menu item ${line.menuItemId} is not an active catalog item`);
         }
+        // B10: the menu base price is denominated in the ITEM's currency —
+        // charging it raw under a different branch currency silently
+        // misprices the line (and mislabels its tax). Reject, never convert;
+        // an explicit unitPriceMinor is branch-currency by contract, so it
+        // legitimately bypasses the menu price.
+        if (line.unitPriceMinor === undefined && menuItem.basePriceCurrencyCode !== branch.baseCurrencyCode) {
+          throw new ValidationError(
+            `Menu item ${line.menuItemId} is priced in ${menuItem.basePriceCurrencyCode} but branch ${input.branchId} settles in ${branch.baseCurrencyCode}: cross-currency lines are rejected — reprice the item or pass an explicit branch-currency unitPriceMinor`,
+          );
+        }
         // FAIL-CLOSED routing: an item without an explicit station cannot
         // exist; the whole order creation is refused.
         const routing = await scope.resolveStationRoute(tenantId, input.branchId, {
