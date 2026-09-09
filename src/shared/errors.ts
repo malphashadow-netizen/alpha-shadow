@@ -564,6 +564,11 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
       logSink(error);
       return { status: 500, code: error.code, message: INTERNAL_ERROR_MESSAGE };
     default:
+      // تم التحقق يدويًا (2026-09-09) من عدم وجود أي مسار في المشروع يسرّب
+      // رمز PostgreSQL الخام (مثل 23514) كاستجابة HTTP بلا تصنيف — كل خطأ
+      // غير مصنَّف يسقط هنا بأمان. الاختبار في
+      // test/unit/shared/errors.test.ts ('pins the default contract') يقفل
+      // هذا العقد ضد أي انحراف مستقبلي في هذا الـchoke point الحساس.
       // Exhaustive over the current hierarchy: new codes must be added here,
       // and every unknown code is treated as 500-class (no detail leakage).
       logSink(error);

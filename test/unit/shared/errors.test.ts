@@ -170,6 +170,22 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(logs).toHaveLength(1);
   });
 
+  it('pins the default contract: a raw PostgreSQL-shaped error (unknown code) maps to internal 500 and the sink keeps the original (P2 mapper closure)', () => {
+    // The P2 recon proved no API path leaks raw SQLSTATEs — this locks the
+    // choke point so any future leak lands here, safely redacted.
+    const rawPgError = {
+      code: '23514',
+      message: 'new row for relation "order_discounts" violates check constraint "order_discounts_coupon_presence"',
+      detail: 'Failing row contains (6138a1b2-..., coupon-mechanism row without coupon_id)',
+    };
+    const logs: unknown[] = [];
+    const response = toErrorResponse(rawPgError, (e) => logs.push(e));
+    expect(response).toEqual({ status: 500, code: 'internal.error', message: 'Internal server error' });
+    // Exactly once, with the IDENTICAL object — nothing lost server-side.
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toBe(rawPgError);
+  });
+
   it('REDACTS ConfigurationError details from the response message (500 class) while logging them', () => {
     const secretDsn = 'postgresql://postgres:super-secret-pw@db.corp.internal:5432/prod?sslmode=require';
     const detailed = `DATABASE_URL points at the default postgres superuser URL ("${secretDsn}"); use a least-privilege application role.`;
