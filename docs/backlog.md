@@ -307,3 +307,17 @@ boundary, **without expanding the raw-pg import allow-list**. Its dedicated DB
 role cannot bypass RLS and has no direct tax-rate write grants. Tenant tax
 requests continue to use `withTenantContext`. No production marketplace law or
 branch-country mapping is guessed; both require explicit reviewed data.
+
+## Orders workflow (Phase 7) — F-D follow-ups
+
+- `WorkflowAdminEngine.ensureWorkflow` is UNGATED by design (bootstrap path,
+  zero production callers — F-D residual gap). Guarded structurally by
+  `test/unit/application/orders/ensure-workflow-guard.test.ts`, which fails if
+  any file under `src/` ever calls `.ensureWorkflow(`.
+- TEST-GAP: payments:methods_admin L1-cache non-caching proof missing — a
+  pre-F-D test gap, unrelated to F-D logic. The L1 suite at
+  `test/unit/application/rbac/authorization-engine.test.ts:182`
+  (`AuthorizationEngine — L1 cache and the sensitive bypass`) pins
+  `payment:refund` (sensitive) and `order:void` (non-sensitive control) but
+  never names `payments:methods_admin`; no engine-level spy test asserts that
+  the methods engine passes `isSensitivePermission: true` either.
