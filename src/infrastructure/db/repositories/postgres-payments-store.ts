@@ -66,6 +66,7 @@ interface PaymentRow {
   status: PaymentStatus;
   shift_id: string;
   created_by: string;
+  idempotency_key: string | null;
   voided_by: string | null;
   voided_at: Date | null;
   void_reason: string | null;
@@ -133,7 +134,7 @@ function mapPayment(r: PaymentRow): PaymentRecord {
     id: r.id, tenantId: r.tenant_id, orderId: r.order_id, paymentMethodId: r.payment_method_id,
     amount: r.amount, amountInBaseCurrency: r.amount_in_base_currency,
     exchangeRateSnapshot: r.exchange_rate_snapshot, changeGivenAmount: r.change_given_amount,
-    status: r.status, shiftId: r.shift_id, createdBy: r.created_by,
+    status: r.status, shiftId: r.shift_id, createdBy: r.created_by, idempotencyKey: r.idempotency_key,
     voidedById: r.voided_by, voidedAt: r.voided_at, voidReason: r.void_reason, createdAt: r.created_at,
   };
 }
@@ -335,6 +336,11 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       return result.rows[0] === undefined ? null : mapPayment(result.rows[0]);
     },
 
+    async loadPaymentByIdempotencyKey(tid, idempotencyKey) {
+      const result = await q.query<PaymentRow>('SELECT * FROM payments WHERE tenant_id = $1 AND idempotency_key = $2', [tid, idempotencyKey]);
+      return result.rows[0] === undefined ? null : mapPayment(result.rows[0]);
+    },
+
     async loadUserDiscountCaps(tid, userId): Promise<UserDiscountCaps | null> {
       const result = await q.query<{ max_discount_percentage: string | null; max_discount_fixed_amount: string | null }>(
         `SELECT max_discount_percentage::text, max_discount_fixed_amount::text
@@ -355,12 +361,13 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       const result = await q.query<PaymentRow>(
         `INSERT INTO payments
            (id, tenant_id, order_id, payment_method_id, amount, amount_in_base_currency,
-            exchange_rate_snapshot, change_given_amount, shift_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            exchange_rate_snapshot, change_given_amount, shift_id, created_by, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *`,
         [
           payment.id, tid, payment.orderId, payment.paymentMethodId, payment.amount, payment.amountInBaseCurrency,
           payment.exchangeRateSnapshot, payment.changeGivenAmount, payment.shiftId, payment.createdBy,
+          payment.idempotencyKey,
         ],
       );
       const r = result.rows[0];

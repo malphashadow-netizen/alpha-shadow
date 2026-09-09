@@ -75,6 +75,8 @@ export interface PaymentRecord {
   readonly status: PaymentStatus;
   readonly shiftId: string;
   readonly createdBy: string;
+  /** B8: the client idempotency key the payment was collected with (null = legacy/key-less collect). */
+  readonly idempotencyKey: string | null;
   readonly voidedById: string | null;
   readonly voidedAt: Date | null;
   readonly voidReason: string | null;
@@ -231,6 +233,7 @@ export interface InsertPaymentInput {
   readonly changeGivenAmount: string | null;
   readonly shiftId: string;
   readonly createdBy: string;
+  readonly idempotencyKey: string | null;
 }
 
 export interface InsertOrderDiscountInput {
@@ -279,6 +282,8 @@ export interface PaymentsTxScope {
   loadPaymentMethod(tenantId: string, paymentMethodId: string): Promise<PaymentMethodRecord | null>;
   findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<ShiftRecord | null>;
   loadPayment(tenantId: string, paymentId: string): Promise<PaymentRecord | null>;
+  /** B8: the idempotency probe — the recorded payment for a client key, if the key was already collected. */
+  loadPaymentByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<PaymentRecord | null>;
   loadUserDiscountCaps(tenantId: string, userId: string): Promise<UserDiscountCaps | null>;
   loadCouponByCode(tenantId: string, code: string): Promise<CouponRecord | null>;
 

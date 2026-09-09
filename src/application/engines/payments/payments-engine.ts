@@ -40,6 +40,7 @@ import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { minorToDecimalText, nonNegativeDecimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
 import {
   CashierShiftRequiredError,
+  ConflictError,
   NotFoundError,
   PaymentExceedsBalanceError,
   PaymentMethodUnavailableError,
@@ -72,6 +73,15 @@ export interface RecordPaymentInput {
   readonly amountText: string;
   /** Optional explicit change (base-currency minor units); default: auto-computed from the balance. */
   readonly explicitChangeMinor?: bigint;
+  /**
+   * B8: optional client-generated idempotency key (opaque, ≤ 128 chars,
+   * must not be blank). The FIRST collect with a key inserts; any repeat
+   * with the same key replays the recorded payment (no second row). The
+   * same key with a different order/amount/method is a 409 Conflict — a key
+   * identifies exactly one operation. Absent (null/undefined) = legacy
+   * behavior: every call is a new attempt.
+   */
+  readonly idempotencyKey?: string | null;
 }
 
 export interface RecordedPayment {
@@ -80,6 +90,31 @@ export interface RecordedPayment {
   readonly remainingBalanceMinor: bigint;
   /** Change handed back, in branch base currency minor units (0n for non-cash). */
   readonly changeGivenMinor: bigint;
+}
+
+const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+
+/**
+ * B8: normalizes the client key. Absent (null/undefined) = legacy path (no
+ * idempotency). A blank or over-long key is a client bug → ValidationError
+ * (fail-closed: never silently coerce a key).
+ */
+function normalizeIdempotencyKey(key: string | null | undefined): string | null {
+  if (key === null || key === undefined) return null;
+  if (key.trim() === '') throw new ValidationError('idempotencyKey must not be blank', 'idempotencyKey');
+  if (key.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    throw new ValidationError(`idempotencyKey must be ≤ ${String(IDEMPOTENCY_KEY_MAX_LENGTH)} chars`, 'idempotencyKey');
+  }
+  return key;
+}
+
+/**
+ * B8: true only for a raw PostgreSQL unique violation (23505 passes through
+ * the B3 mapper by identity, so the code survives). Domain errors never
+ * carry a '23505' code — no false positives.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
 }
 
 export class PaymentsEngine {
@@ -108,12 +143,26 @@ export class PaymentsEngine {
       permissionKey: PAYMENTS_COLLECT_PERMISSION_KEY,
       context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
     });
-    return this.dependencies.store.run(tenantId, async (scope) => {
+    // B8: null = legacy path (every call a new attempt — returned unwrapped
+    // below); otherwise the pre-check inside decides replay-vs-collect, and
+    // the catch at the bottom converts a lost uniqueness race into a replay.
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+    const collected = this.dependencies.store.run(tenantId, async (scope) => {
       // B2: lock FIRST, then decide. The order lock + revision bump serialize
       // every concurrent mutation of this order (exactly one wins; the loser
       // gets a 40001 serialization failure (retryable: ConcurrencyRetryableError → 503).
       const locked = await scope.lockOrder(tenantId, input.orderId);
       if (locked === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      // B8 pre-check (under the lock, before the bump — a replay mutates
+      // nothing, so it consumes no revision). Same-order racers serialize
+      // here (the loser replays); the cross-order race (separate order locks)
+      // falls through to the 23505 catch below.
+      if (idempotencyKey !== null) {
+        const existing = await scope.loadPaymentByIdempotencyKey(tenantId, idempotencyKey);
+        if (existing !== null) {
+          return this.buildReplay(scope, tenantId, existing, input);
+        }
+      }
       await scope.bumpOrderRevision(tenantId, input.orderId);
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
@@ -214,6 +263,7 @@ export class PaymentsEngine {
         changeGivenAmount: isCashLike && changeMinor > 0n ? minorToDecimalText(changeMinor, baseDigits) : null,
         shiftId: shift.id,
         createdBy: input.cashierUserId,
+        idempotencyKey,
       });
 
       const remainingAfter = totals.remainingBalanceMinor - netBaseMinor;
@@ -227,6 +277,93 @@ export class PaymentsEngine {
         changeGivenMinor: changeMinor,
       };
     });
+    if (idempotencyKey === null) return collected;
+    return collected.catch((error: unknown) => this.replayAfterConflict(tenantId, idempotencyKey, input, error));
+  }
+
+  /**
+   * B8: the 23505-catch path. The collect transaction died on a unique
+   * violation AFTER the pre-check missed — the only way that happens is a
+   * concurrent insert of the same key (the cross-order race: separate order
+   * locks, so both pre-checks can miss). The transaction already rolled
+   * back (a dead tx cannot be reused), so the probe runs in a FRESH
+   * read-only transaction: key found + params match → replay the recorded
+   * payment; key missing (some other unique violation) → rethrow the
+   * ORIGINAL error untouched (never convert a foreign failure into a replay).
+   */
+  private async replayAfterConflict(
+    tenantId: string,
+    idempotencyKey: string,
+    input: RecordPaymentInput,
+    error: unknown,
+  ): Promise<RecordedPayment> {
+    if (!isUniqueViolation(error)) throw error;
+    const replay = await this.dependencies.store.run(tenantId, async (scope) => {
+      const existing = await scope.loadPaymentByIdempotencyKey(tenantId, idempotencyKey);
+      if (existing === null) return null;
+      return this.buildReplay(scope, tenantId, existing, input);
+    });
+    if (replay === null) throw error;
+    return replay;
+  }
+
+  /**
+   * B8: rebuilds the collect response for an already-recorded payment. The
+   * payment ROW is the original (same id, same stored change); the totals
+   * are recomputed from the CURRENT snapshot (a replay mutates nothing, so
+   * live figures are the honest ones). Read-only: no revision bump, no
+   * status write, and no gate re-run (shift/method/status already passed at
+   * the original collect — a replay moves no money). A key identifies
+   * exactly one operation: order/method/tendered must match (plus the
+   * explicit change when the caller names one), else 409.
+   */
+  private async buildReplay(
+    scope: PaymentsTxScope,
+    tenantId: string,
+    existing: PaymentRecord,
+    input: RecordPaymentInput,
+  ): Promise<RecordedPayment> {
+    // No I/O yet: order + method are compared first so a cross-order key
+    // reuse fails without touching the snapshot.
+    if (existing.orderId !== input.orderId || existing.paymentMethodId !== input.paymentMethodId) {
+      throw new ConflictError(
+        `idempotencyKey '${existing.idempotencyKey ?? ''}' was already collected for a different order or payment method`,
+      );
+    }
+    const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
+    if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+    const method = await scope.loadPaymentMethod(tenantId, input.paymentMethodId);
+    if (method === null) throw new PaymentMethodUnavailableError(input.paymentMethodId, 'unknown or inactive');
+    // The tendered minor units must match (parsed, not string-compared —
+    // '46' and '46.00' are the same tender). When the caller names an
+    // explicit change it must equal the recorded one; an omitted change
+    // replays the original as-is.
+    const baseDigits = storageMinorUnitDigits(currencyCode(snapshot.baseCurrencyCode));
+    const tenderedDigits =
+      method.type === 'foreign_currency_cash' && method.currencyCode !== null
+        ? storageMinorUnitDigits(currencyCode(method.currencyCode))
+        : baseDigits;
+    const expectedTenderedMinor = nonNegativeDecimalTextToMinor(input.amountText, tenderedDigits, 'amount');
+    const recordedTenderedMinor = nonNegativeDecimalTextToMinor(existing.amount, tenderedDigits, 'amount');
+    const recordedChangeMinor =
+      existing.changeGivenAmount === null
+        ? 0n
+        : nonNegativeDecimalTextToMinor(existing.changeGivenAmount, baseDigits, 'changeGivenAmount');
+    if (
+      expectedTenderedMinor !== recordedTenderedMinor ||
+      (input.explicitChangeMinor !== undefined && input.explicitChangeMinor !== recordedChangeMinor)
+    ) {
+      throw new ConflictError(
+        `idempotencyKey '${existing.idempotencyKey ?? ''}' was already collected with a different amount or change`,
+      );
+    }
+    const totals = computeOrderTotals(snapshot);
+    return {
+      payment: existing,
+      orderTotalMinor: totals.totalMinor,
+      remainingBalanceMinor: totals.remainingBalanceMinor,
+      changeGivenMinor: recordedChangeMinor,
+    };
   }
 
   async voidPayment(tenantId: string, actor: PaymentActor, input: { paymentId: string; reason: string }): Promise<PaymentRecord> {

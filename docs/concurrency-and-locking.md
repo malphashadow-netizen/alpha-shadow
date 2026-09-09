@@ -30,9 +30,11 @@ a 500-class operational incident, never silently retried). Retrying a
 non-retryable error is a client bug; the T3 hammer test below fails loudly if
 one ever escapes as retryable.
 
-Until B8 lands idempotency keys, a retried operation is a NEW attempt: clients
-must re-read state (balance, shift status) before rebuilding the request
-rather than blindly replaying the same payload.
+B8 landed idempotency keys for collect: a retry that carries the SAME
+`idempotencyKey` replays the recorded payment (no second row); the same key
+with different order/amount/method is a 409. A retry WITHOUT a key is still a
+NEW attempt — key-less clients must re-read state (balance, shift status)
+before rebuilding the request rather than blindly replaying the payload.
 
 ## 2. Timeouts: bounded waits everywhere
 
