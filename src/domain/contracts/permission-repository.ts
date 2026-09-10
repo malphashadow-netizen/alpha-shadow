@@ -77,6 +77,14 @@ export interface IPermissionReadRepository {
     permissionKey: string,
     relevantBranch: string | null,
   ): Promise<readonly PermissionGrant[]>;
+
+  /** Candidate permission keys whose active role scope covers the branch. */
+  getCoveredPermissionKeys(
+    tenantId: string,
+    userId: string,
+    branchId: string,
+    candidateKeys: readonly string[],
+  ): Promise<readonly string[]>;
 }
 
 export interface IPermissionWriteRepository {

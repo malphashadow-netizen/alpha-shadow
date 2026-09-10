@@ -194,6 +194,29 @@ export class InMemoryPermissionReadRepository implements IPermissionReadReposito
     }
     return grants;
   }
+
+  async getCoveredPermissionKeys(
+    tenantId: string,
+    userId: string,
+    branchId: string,
+    candidateKeys: readonly string[],
+  ): Promise<readonly string[]> {
+    const candidateSet = new Set(candidateKeys);
+    const covered = new Set<string>();
+    const user = this.store.users.get(userId);
+    if (user?.tenantId !== tenantId || !user.isActive) return [];
+    for (const userRole of this.store.userRoles.values()) {
+      if (userRole.tenantId !== tenantId || userRole.userId !== userId || !userRole.isActive) continue;
+      if (!scopeCovers(userRole.scopeType, userRole.scopeId, branchId)) continue;
+      const role = this.store.roles.get(userRole.roleId);
+      if (role?.tenantId !== tenantId) continue;
+      for (const rolePermission of this.store.rolePermissions.values()) {
+        if (rolePermission.tenantId !== tenantId || rolePermission.roleId !== role.id) continue;
+        if (candidateSet.has(rolePermission.permissionKey)) covered.add(rolePermission.permissionKey);
+      }
+    }
+    return candidateKeys.filter((key, index) => covered.has(key) && candidateKeys.indexOf(key) === index);
+  }
 }
 
 export class InMemoryPermissionWriteRepository implements IPermissionWriteRepository {

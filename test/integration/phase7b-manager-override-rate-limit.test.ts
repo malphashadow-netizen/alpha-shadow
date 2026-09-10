@@ -156,6 +156,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     creation = new OrderCreationEngine({
       store,
       authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }),
+      permissionRead,
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });

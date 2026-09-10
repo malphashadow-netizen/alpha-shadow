@@ -162,6 +162,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     creation = new OrderCreationEngine({
       store,
       authorization,
+      permissionRead,
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });

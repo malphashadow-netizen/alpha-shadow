@@ -109,7 +109,7 @@ describe('B3 concurrency recovery (live)', () => {
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead: new PostgresPermissionReadRepository({ withTenantContext: withApp }), managerAuthenticator: authenticator });
     const methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.

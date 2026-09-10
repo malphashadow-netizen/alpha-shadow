@@ -167,7 +167,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead, managerAuthenticator: authenticator });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
@@ -272,6 +272,20 @@ describe('Phase 9 inventory-backed selling (live)', () => {
         await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [T, roleId, key]);
       }
       await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'tenant', NULL)", [T, user.userId, roleId]);
+    });
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(T, user.userId), await permissionRead.getSecurityVersion(T, user.userId), sha256Hex);
+    return { userId: user.userId, tokenSecV, pin };
+  }
+
+  async function createBranchTieredUser(keys: readonly string[], pin: string, branchId: string): Promise<TieredUser> {
+    const user = await createPlainUser(pin);
+    const roleId = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, T, `phase9-branch-${roleId}`]);
+      for (const key of keys) {
+        await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [T, roleId, key]);
+      }
+      await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'branch', $4)", [T, user.userId, roleId, branchId]);
     });
     const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(T, user.userId), await permissionRead.getSecurityVersion(T, user.userId), sha256Hex);
     return { userId: user.userId, tokenSecV, pin };
@@ -520,6 +534,33 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ], { managerOverride: { managerUserId: receiverUser.userId, managerOverridePin: receiverUser.pin } }).then(() => null, (error: unknown) => error);
     expect(failure).toBeInstanceOf(ManagerOverrideAuthenticationError);
     expect(await stockOf(flour)).toBe('1.0000');
+  });
+
+  it('2d/ a manager holding inventory:adjust only on a DIFFERENT branch cannot approve a stock override', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const branchBManager = await createBranchTieredUser(['inventory:adjust'], '8888', tillB.branchId);
+    const flour = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '1.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+
+    const failure = await placeOrder(tillA.cashier.userId, tillA, [
+      { menuItemId: itemMeal, quantity: 5 },
+    ], { managerOverride: { managerUserId: branchBManager.userId, managerOverridePin: branchBManager.pin } }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ManagerOverrideAuthenticationError);
+    expect(await stockOf(flour)).toBe('1.0000');
+  });
+
+  it('2e/ a manager holding inventory:adjust on the SAME branch can approve a stock override', async () => {
+    const tillA = await setupTill();
+    const branchManager = await createBranchTieredUser(['inventory:adjust'], '8989', tillA.branchId);
+    const flour = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '1.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+
+    const created = await placeOrder(tillA.cashier.userId, tillA, [
+      { menuItemId: itemMeal, quantity: 5 },
+    ], { managerOverride: { managerUserId: branchManager.userId, managerOverridePin: branchManager.pin } });
+    expect(await stockOf(flour)).toBe('-1.5000');
+    expect(row(await movementsFor(created.order.id)).manager_override_id).not.toBeNull();
   });
 
   it('B2/ an override cannot sell a component missing AT THIS BRANCH (409, not a trigger 500)', async () => {

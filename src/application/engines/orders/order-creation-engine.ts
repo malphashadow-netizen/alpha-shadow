@@ -52,6 +52,7 @@ import {
   type RecipeRequirementLine,
 } from '../../../domain/contracts/inventory.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
+import type { IPermissionReadRepository } from '../../../domain/contracts/permission-repository.ts';
 import { decimalTextToMinor, minorToDecimalText } from '../../../shared/decimal-text.ts';
 import {
   CashierShiftRequiredError,
@@ -68,6 +69,7 @@ import {
 export interface OrderCreationEngineDependencies {
   readonly store: OrdersStore;
   readonly authorization: Pick<AuthorizationEngine, 'check'>;
+  readonly permissionRead: IPermissionReadRepository;
   /** The live manager-override PIN challenge port (never a name list). */
   readonly managerAuthenticator: ManagerOverrideAuthenticator;
 }
@@ -148,12 +150,13 @@ export class OrderCreationEngine {
         throw new InsufficientStockError(shortage.displayName, shortage.inventoryItemId, input.branchId);
       }
       try {
-        await this.dependencies.authorization.check({
+        const coveredKeys = await this.dependencies.permissionRead.getCoveredPermissionKeys(
           tenantId,
-          userId: challenge.managerUserId,
-          permissionKey: MANAGER_STOCK_PERMISSION_KEY,
-          context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
-        });
+          challenge.managerUserId,
+          input.branchId,
+          [MANAGER_STOCK_PERMISSION_KEY],
+        );
+        if (coveredKeys.length === 0) throw new Error('permission not covered');
       } catch (error: unknown) {
         throw new ManagerOverrideAuthenticationError(
           'Manager override rejected: the approving manager does not hold the inventory:adjust permission',

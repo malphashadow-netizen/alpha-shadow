@@ -101,7 +101,7 @@ describe('B4 invoice_total creation (live)', () => {
     const ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead: new PostgresPermissionReadRepository({ withTenantContext: withApp }), managerAuthenticator: authenticator });
 
     // Platform tax fixture: SA, INVOICE_TOTAL rounding, 5% exclusive VAT.
     const platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));

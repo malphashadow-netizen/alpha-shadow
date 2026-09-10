@@ -26,6 +26,7 @@ import type {
 import { isLastActiveMember } from '../../../domain/contracts/super-admin-guard.ts';
 import { TENANT_SUPER_ADMIN_ROLE_NAME } from '../../../domain/contracts/system-roles.ts';
 import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
+import { getCoveredPermissionKeys } from './shared/permission-queries.ts';
 
 interface ActiveUserRoleRow {
   readonly role_id: string;
@@ -146,6 +147,15 @@ export class PostgresPermissionReadRepository implements IPermissionReadReposito
         isSensitive: row.is_sensitive,
       }));
     });
+  }
+
+  async getCoveredPermissionKeys(
+    tenantId: string,
+    userId: string,
+    branchId: string,
+    candidateKeys: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.withTenantContext(tenantId, (q) => getCoveredPermissionKeys(q, tenantId, userId, branchId, candidateKeys));
   }
 }
 
