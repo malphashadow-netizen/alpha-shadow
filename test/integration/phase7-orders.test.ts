@@ -1533,4 +1533,31 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const after = await states();
     expect(after.map((s) => s.id).sort()).toEqual(before.map((s) => s.id).sort());
   });
+
+  it('F-A/branch-scoped void permission tier is promoted only for the covered branch (A/B isolation)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchScopedSupervisor = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:shift_supervisor'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const supervisorReason = await createVoidReason(A, 'order_error', 'shift_supervisor');
+    const serverReason = await createVoidReason(A, 'kitchen_issue', 'server');
+    const orderA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const orderB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    const voidA = await voids.voidOrder(A, actor(branchScopedSupervisor), {
+      orderId: orderA.order.id,
+      voidReasonId: supervisorReason,
+    });
+    console.log(`[branch-scoped void tier] branch A actual=${voidA.actorPermissionTier}`);
+    expect(voidA.actorPermissionTier).toBe('shift_supervisor');
+
+    const voidB = await voids.voidOrder(A, actor(branchScopedSupervisor), {
+      orderId: orderB.order.id,
+      voidReasonId: serverReason,
+    });
+    console.log(`[branch-scoped void tier] branch B actual=${voidB.actorPermissionTier}`);
+    expect(voidB.actorPermissionTier).toBe('server');
+  });
 });
