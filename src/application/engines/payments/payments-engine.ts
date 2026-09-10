@@ -82,6 +82,14 @@ export interface RecordPaymentInput {
    * behavior: every call is a new attempt.
    */
   readonly idempotencyKey?: string | null;
+  /**
+   * Optional presented token sec_v. When provided, AuthorizationEngine.check
+   * verifies it matches the actor's current role set (a stale/revoked token
+   * is rejected). Absent (legacy callers) = the freshness check is skipped,
+   * same as any other AuthorizationEngine caller with no tokenSecV — this is
+   * a transitional allowance until every caller is migrated.
+   */
+  readonly tokenSecV?: string;
 }
 
 export interface RecordedPayment {
@@ -141,6 +149,7 @@ export class PaymentsEngine {
       tenantId,
       userId: input.cashierUserId,
       permissionKey: PAYMENTS_COLLECT_PERMISSION_KEY,
+      ...(input.tokenSecV === undefined ? {} : { tokenSecV: input.tokenSecV }),
       context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
     });
     // B8: null = legacy path (every call a new attempt — returned unwrapped

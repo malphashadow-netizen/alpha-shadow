@@ -407,6 +407,9 @@ export class CatalogEngine {
 
   async setBranchOverride(tenantId: string, actorUserId: string, input: SetBranchOverrideInput): Promise<BranchMenuItemOverride> {
     await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
+    if (!(await this.catalog.branchBelongsToTenant(tenantId, input.branchId))) {
+      throw new NotFoundError(`Branch ${input.branchId} not found`);
+    }
     const item = requireFound(await this.catalog.getItem(tenantId, input.menuItemId), `item ${input.menuItemId} not found`);
     const current = await this.catalog.getBranchOverride(tenantId, input.branchId, input.menuItemId);
     return this.catalog.upsertBranchOverride(tenantId, {
@@ -451,6 +454,9 @@ export class CatalogEngine {
     at: Date = new Date(),
     fallbackTimeZone = 'UTC',
   ): Promise<BranchMenu> {
+    if (!(await this.catalog.branchBelongsToTenant(tenantId, branchId))) {
+      throw new NotFoundError(`Branch ${branchId} not found`);
+    }
     const [categories, items, groups, modifiers, links, overrides] = await Promise.all([
       this.catalog.listCategories(tenantId),
       this.catalog.listItems(tenantId),
