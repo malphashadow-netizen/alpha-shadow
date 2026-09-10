@@ -32,9 +32,17 @@ import type {
   UpdatePaymentMethodInput,
   UserDiscountCaps,
 } from '../../../domain/contracts/payments.ts';
+import type {
+  InsertStockMovementInput,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+  WasteRefundKey,
+} from '../../../domain/contracts/inventory.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
-import { decimalTextToMinor } from '../../../shared/decimal-text.ts';
-import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
+import { insertStockMovementRow } from './stock-ledger-rows.ts';
+import { decimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
+import { CouponAvailabilityRaceError } from '../../../shared/errors.ts';
+import { currencyCode } from '../../../shared/money.ts';
 
 interface PaymentMethodRow {
   id: string;
@@ -59,6 +67,7 @@ interface PaymentRow {
   status: PaymentStatus;
   shift_id: string;
   created_by: string;
+  idempotency_key: string | null;
   voided_by: string | null;
   voided_at: Date | null;
   void_reason: string | null;
@@ -126,7 +135,7 @@ function mapPayment(r: PaymentRow): PaymentRecord {
     id: r.id, tenantId: r.tenant_id, orderId: r.order_id, paymentMethodId: r.payment_method_id,
     amount: r.amount, amountInBaseCurrency: r.amount_in_base_currency,
     exchangeRateSnapshot: r.exchange_rate_snapshot, changeGivenAmount: r.change_given_amount,
-    status: r.status, shiftId: r.shift_id, createdBy: r.created_by,
+    status: r.status, shiftId: r.shift_id, createdBy: r.created_by, idempotencyKey: r.idempotency_key,
     voidedById: r.voided_by, voidedAt: r.voided_at, voidReason: r.void_reason, createdAt: r.created_at,
   };
 }
@@ -159,8 +168,31 @@ function mapShift(r: ShiftRow): ShiftRecord {
   };
 }
 
+/**
+ * Stable text of the 0034/0036 coupon-expiry rejection ('coupon is expired',
+ * no interpolation). Pinned here AND in the unit test — the migrations stand
+ * as-pushed, so any reword there must update this predicate in the same
+ * change (D9 discipline).
+ */
+export const COUPON_EXPIRED_MESSAGE_PREFIX = 'coupon is expired';
+
+/**
+ * True only for the trigger's expiry rejection: code 23514 AND the stable
+ * text. Sibling rejections (inactive coupon, max uses, below minimum) and
+ * every other database error propagate untouched — fail-closed, and each
+ * sibling keeps alarming as 500 (a check-then-changed race on THOSE paths
+ * has no honest-API shape: only the time boundary can cross mid-tx).
+ */
+export function isCouponExpiredTriggerError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if (!('code' in error) || !('message' in error)) return false;
+  return error.code === '23514' && typeof error.message === 'string' && error.message.startsWith(COUPON_EXPIRED_MESSAGE_PREFIX);
+}
+
 export interface PostgresPaymentsStoreDependencies {
   readonly withTenantContext: WithTenantContext;
+  /** B3: per-transaction lock_timeout override (ms). undefined = inherit the context default. */
+  readonly lockTimeoutMs?: number | undefined;
 }
 
 export class PostgresPaymentsStore implements PaymentsStore {
@@ -174,7 +206,13 @@ export class PostgresPaymentsStore implements PaymentsStore {
     return this.dependencies.withTenantContext(
       tenantId,
       async (q) => fn(buildScope(q)),
-      { isolationLevel: 'repeatable read', verifyTenantExists: true },
+      {
+        isolationLevel: 'repeatable read',
+        verifyTenantExists: true,
+        // B3: spread ONLY when set — an explicit undefined would wipe the
+        // production lock_timeout default during option merging.
+        ...(this.dependencies.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: this.dependencies.lockTimeoutMs }),
+      },
     );
   }
 }
@@ -205,7 +243,7 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       );
       const h = header.rows[0];
       if (h === undefined) return null;
-      const baseDigits = minorUnitScale(currencyCode(h.base_currency));
+      const baseDigits = storageMinorUnitDigits(currencyCode(h.base_currency));
 
       const items = await q.query<{ id: string; unit_price_minor: string; quantity: number }>(
         `SELECT id, unit_price_minor, quantity FROM order_items
@@ -294,8 +332,34 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
     },
 
+    // B2: the uniform serialization point — lock FIRST, bump, then decide
+    // (orders → shift_reconciliations; see OrdersTxScope.lockOrder).
+    async lockOrder(tid, orderId) {
+      const result = await q.query<{ id: string }>('SELECT id FROM orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, orderId]);
+      const row = result.rows[0];
+      return row === undefined ? null : { id: row.id };
+    },
+
+    async bumpOrderRevision(tid, orderId) {
+      await q.query('UPDATE orders SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, orderId]);
+    },
+
+    async lockShift(tid, shiftId) {
+      const result = await q.query<ShiftRow>('SELECT * FROM shift_reconciliations WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, shiftId]);
+      return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
+    },
+
+    async bumpShiftRevision(tid, shiftId) {
+      await q.query('UPDATE shift_reconciliations SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, shiftId]);
+    },
+
     async loadPayment(tid, paymentId) {
       const result = await q.query<PaymentRow>('SELECT * FROM payments WHERE tenant_id = $1 AND id = $2', [tid, paymentId]);
+      return result.rows[0] === undefined ? null : mapPayment(result.rows[0]);
+    },
+
+    async loadPaymentByIdempotencyKey(tid, idempotencyKey) {
+      const result = await q.query<PaymentRow>('SELECT * FROM payments WHERE tenant_id = $1 AND idempotency_key = $2', [tid, idempotencyKey]);
       return result.rows[0] === undefined ? null : mapPayment(result.rows[0]);
     },
 
@@ -319,12 +383,13 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       const result = await q.query<PaymentRow>(
         `INSERT INTO payments
            (id, tenant_id, order_id, payment_method_id, amount, amount_in_base_currency,
-            exchange_rate_snapshot, change_given_amount, shift_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            exchange_rate_snapshot, change_given_amount, shift_id, created_by, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *`,
         [
           payment.id, tid, payment.orderId, payment.paymentMethodId, payment.amount, payment.amountInBaseCurrency,
           payment.exchangeRateSnapshot, payment.changeGivenAmount, payment.shiftId, payment.createdBy,
+          payment.idempotencyKey,
         ],
       );
       const r = result.rows[0];
@@ -358,6 +423,14 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       await q.query('UPDATE orders SET payment_status = $3 WHERE tenant_id = $1 AND id = $2', [tid, orderId, paymentStatus]);
     },
 
+    async hasActiveOrderItems(tid: string, orderId: string): Promise<boolean> {
+      const result = await q.query<{ exists: boolean }>(
+        'SELECT EXISTS(SELECT 1 FROM order_items WHERE tenant_id = $1 AND order_id = $2 AND NOT is_voided) AS exists',
+        [tid, orderId],
+      );
+      return result.rows[0]?.exists ?? false;
+    },
+
     async appendAuditEvidence(tid, evidence: AuditEvidenceInput) {
       await q.query(
         `INSERT INTO audit_log (tenant_id, user_id, action, resource, before, after)
@@ -367,21 +440,34 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
     },
 
     async insertOrderDiscount(tid, discount: InsertOrderDiscountInput) {
-      const result = await q.query<OrderDiscountRow>(
-        `INSERT INTO order_discounts
-           (id, tenant_id, order_id, mechanism, coupon_id, discount_kind, discount_value,
-            discount_amount_applied, required_manager_override, manager_override_attempt_id, applied_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING *`,
-        [
-          discount.id, tid, discount.orderId, discount.mechanism, discount.couponId, discount.discountKind,
-          discount.discountValue, discount.discountAmountApplied, discount.requiredManagerOverride,
-          discount.managerOverrideAttemptId, discount.appliedBy,
-        ],
-      );
-      const r = result.rows[0];
-      if (r === undefined) throw new Error(`Order discount ${discount.id} could not be inserted`);
-      return mapDiscount(r);
+      // P2: the expiry gate lives in the trigger (the backstop for the
+      // midnight race — the engine's JS-clock check cannot see the boundary
+      // crossing before the DB-clock insert). Map it to the cashier-facing
+      // 409 race error with the coupon code in-hand (D9 discipline: code +
+      // stable text, never parsed pg); every other error propagates
+      // untouched (siblings keep alarming as 500 — see the predicate doc).
+      try {
+        const result = await q.query<OrderDiscountRow>(
+          `INSERT INTO order_discounts
+             (id, tenant_id, order_id, mechanism, coupon_id, discount_kind, discount_value,
+              discount_amount_applied, required_manager_override, manager_override_attempt_id, applied_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING *`,
+          [
+            discount.id, tid, discount.orderId, discount.mechanism, discount.couponId, discount.discountKind,
+            discount.discountValue, discount.discountAmountApplied, discount.requiredManagerOverride,
+            discount.managerOverrideAttemptId, discount.appliedBy,
+          ],
+        );
+        const r = result.rows[0];
+        if (r === undefined) throw new Error(`Order discount ${discount.id} could not be inserted`);
+        return mapDiscount(r);
+      } catch (error: unknown) {
+        if (isCouponExpiredTriggerError(error)) {
+          throw new CouponAvailabilityRaceError(discount.couponCode ?? discount.couponId ?? 'unknown coupon');
+        }
+        throw error;
+      }
     },
 
     async incrementCouponUses(tid, couponId) {
@@ -423,6 +509,69 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       const r = result.rows[0];
       if (r === undefined) throw new Error(`Payment method ${paymentMethodId} could not be updated`);
       return mapMethod(r);
+    },
+
+    async loadNonVoidedOrderItemIds(tid, orderId): Promise<readonly string[]> {
+      // Refund waste covers the live lines only: voided lines were already
+      // restored-or-wasted by the void path (never double-counted).
+      const result = await q.query<{ id: string }>(
+        'SELECT id FROM order_items WHERE tenant_id = $1 AND order_id = $2 AND NOT is_voided ORDER BY created_at ASC, id ASC',
+        [tid, orderId],
+      );
+      return result.rows.map((r) => r.id);
+    },
+
+    async loadSaleDeductionsForOrderItems(tid, orderItemIds): Promise<readonly SaleDeductionAggregate[]> {
+      if (orderItemIds.length === 0) return [];
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string; total_deducted: string }>(
+        `SELECT order_item_id, inventory_item_id, SUM(quantity_delta) AS total_deducted
+           FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'sale_deduction'
+          GROUP BY order_item_id, inventory_item_id`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({
+        orderItemId: r.order_item_id,
+        inventoryItemId: r.inventory_item_id,
+        totalDeducted: r.total_deducted,
+      }));
+    },
+
+    async loadWasteRefundKeys(tid, orderId): Promise<readonly WasteRefundKey[]> {
+      // The refund dedup guard covers BOTH refund-written types: a
+      // void_restoration row on a still-live line can only come from a prior
+      // refund (the void path restores voided lines only), so it suppresses
+      // a second restoration exactly like a waste row suppresses waste.
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string }>(
+        `SELECT order_item_id, inventory_item_id FROM stock_movements
+          WHERE tenant_id = $1 AND order_id = $2 AND movement_type IN ('waste_refund', 'void_restoration')`,
+        [tid, orderId],
+      );
+      return result.rows.map((r) => ({ orderItemId: r.order_item_id, inventoryItemId: r.inventory_item_id }));
+    },
+
+    async loadItemsWithKitchenTicketFired(tid: string, orderItemIds: readonly string[]): Promise<readonly string[]> {
+      if (orderItemIds.length === 0) return [];
+      // "Has this item EVER been in a ticket-firing state" — across the FULL
+      // immutable event history (initial event included), resolved through
+      // the tenant's workflow states to the platform kind flags.
+      const result = await q.query<{ order_item_id: string }>(
+        `SELECT DISTINCT e.order_item_id
+           FROM order_item_status_events e
+           JOIN tenant_order_workflow_states s ON s.id = e.to_status_kind_id AND s.tenant_id = e.tenant_id
+           JOIN order_status_kinds k ON k.code = s.kind_code
+          WHERE e.tenant_id = $1 AND e.order_item_id = ANY($2::uuid[])
+            AND (k.behavior_flags ->> 'fires_kitchen_ticket')::boolean IS TRUE`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => r.order_item_id);
+    },
+
+    async insertStockMovement(tid, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
+      // Refund rows are waste (ZERO delta) or restoration (POSITIVE delta):
+      // neither can trip the sale-only shortage gate — plain insert, no
+      // error mapping.
+      return insertStockMovementRow(q, tid, movement);
     },
   };
 }

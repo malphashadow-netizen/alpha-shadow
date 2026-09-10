@@ -43,6 +43,7 @@ import {
   minorToDecimalText,
   nonNegativeDecimalTextToMinor,
   percentTextToDbps,
+  storageMinorUnitDigits,
 } from '../../../shared/decimal-text.ts';
 import {
   CouponUnavailableError,
@@ -53,7 +54,7 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../../shared/errors.ts';
-import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
+import { currencyCode } from '../../../shared/money.ts';
 import { computeDiscountStage, discountOverrideRequirement, parseDiscountCaps, parseDiscountRequest } from './discount-math.ts';
 import { computeOrderTotals } from './order-totals.ts';
 
@@ -106,7 +107,7 @@ export class DiscountEngine {
     const pre = await this.dependencies.store.run(tenantId, async (scope) => {
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
       if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
-      const baseDigits = minorUnitScale(currencyCode(snapshot.baseCurrencyCode));
+      const baseDigits = storageMinorUnitDigits(currencyCode(snapshot.baseCurrencyCode));
       const totals = computeOrderTotals(snapshot);
       const remainingSubtotal = totals.subtotalMinor - totals.discountTotalMinor;
       const request = parseDiscountRequest(input.discountKind, input.discountValueText, baseDigits);
@@ -153,6 +154,13 @@ export class DiscountEngine {
     }
 
     return this.dependencies.store.run(tenantId, async (scope) => {
+      // B2: lock FIRST, then decide. The order lock + revision bump serialize
+      // every concurrent mutation of this order (exactly one wins; the loser
+      // gets a 40001 serialization failure (retryable: ConcurrencyRetryableError → 503), so the fresh
+      // re-computation below runs on race-free data.
+      const locked = await scope.lockOrder(tenantId, input.orderId);
+      if (locked === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      await scope.bumpOrderRevision(tenantId, input.orderId);
       // FRESH re-computation (the write transaction's own snapshot): the
       // order may have changed since the pre-pass.
       const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
@@ -196,9 +204,14 @@ export class DiscountEngine {
         orderId: input.orderId,
         mechanism: input.mechanism,
         couponId,
+        // P2: canonical row code for the store's race-error message (in-hand
+        // context — the mapping never parses pg text). Spread ONLY when set:
+        // exactOptionalPropertyTypes forbids an explicit undefined, and a
+        // manual-mechanism row has no coupon at all.
+        ...(couponId === null ? {} : { couponCode: mustCouponCode(input) }),
         discountKind: input.discountKind,
         discountValue: canonicalValueText(input.discountKind, input.discountValueText),
-        discountAmountApplied: minorToDecimalText(stage.appliedMinor, 2),
+        discountAmountApplied: minorToDecimalText(stage.appliedMinor, pre.baseDigits),
         requiredManagerOverride: requirement.required,
         managerOverrideAttemptId,
         appliedBy: actor.userId,

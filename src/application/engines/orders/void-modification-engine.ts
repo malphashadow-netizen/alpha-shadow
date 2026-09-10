@@ -44,6 +44,8 @@ import {
   VoidTimeLimitExceededError,
 } from '../../../shared/errors.ts';
 import { assertVoidAllowedUnderPaymentStatus } from '../payments/index.ts';
+import { STOCK_QUANTITY_SCALE } from '../../../domain/contracts/inventory.ts';
+import { decimalTextToMinor, minorToDecimalText } from '../../../shared/decimal-text.ts';
 
 export interface VoidModificationEngineDependencies {
   readonly store: OrdersStore;
@@ -86,6 +88,12 @@ export class VoidModificationEngine {
       resolveTarget: async (scope): Promise<VoidTarget> => {
         const order = await scope.loadOrder(tenantId, input.orderId);
         if (order === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+        // B9-a: an order-level void with no ACTIVE lines left is a repeat —
+        // reject it (item-void parity: already-voided → ValidationError)
+        // instead of writing an empty void record + a duplicate event.
+        if ((await scope.loadActiveOrderItems(tenantId, order.id)).length === 0) {
+          throw new ValidationError(`Order ${input.orderId} is already fully voided`);
+        }
         return { order, orderItemId: null, itemCreatedAt: null };
       },
       voidReasonId: input.voidReasonId,
@@ -147,7 +155,7 @@ export class VoidModificationEngine {
       }
 
       // Graded tier check: the actor's tier comes from the held atomic keys.
-      const actorTier = await scope.resolveVoidPermissionTier(tenantId, actor.userId);
+      const actorTier = await scope.resolveVoidPermissionTier(tenantId, actor.userId, order.branchId);
       if (actorTier === null) {
         // Defensive: the authorization check above passed, so the grant
         // vanished mid-transaction — fail closed either way.
@@ -171,7 +179,7 @@ export class VoidModificationEngine {
         if (!(await scope.userIsActiveMember(tenantId, challenge.managerUserId))) {
           throw new ManagerOverrideAuthenticationError('Manager override rejected: the approving manager is not an active member of the tenant');
         }
-        const managerTier = await scope.resolveVoidPermissionTier(tenantId, challenge.managerUserId);
+        const managerTier = await scope.resolveVoidPermissionTier(tenantId, challenge.managerUserId, order.branchId);
         if (managerTier !== 'manager') {
           throw new ManagerOverrideAuthenticationError('Manager override rejected: the approving manager does not hold the order:void:manager permission');
         }
@@ -185,6 +193,20 @@ export class VoidModificationEngine {
         );
         managerUserId = challenge.managerUserId;
       }
+
+      // B2: the order lock + revision bump serialize this void against every
+      // concurrent mutation of the order (exactly one wins; the loser gets a
+      // 40001 serialization failure (retryable: ConcurrencyRetryableError → 503). Positioned AFTER the
+      // live challenge ON PURPOSE: the challenge runs in its own transaction
+      // on a second connection, and its attempt row carries an FK to orders —
+      // holding FOR UPDATE across it deadlocks the FK check in a way the
+      // detector cannot see (this tx waits in JS, the challenge waits on the
+      // lock) and hangs forever. Under REPEATABLE READ the late lock loses
+      // nothing: any interleaved mutation bumped the row, so a stale void
+      // still 40001s here, and the snapshot is identical before/after.
+      const lockedOrder = await scope.lockOrder(tenantId, order.id);
+      if (lockedOrder === null) throw new NotFoundError(`Order ${order.id} not found`);
+      await scope.bumpOrderRevision(tenantId, order.id);
 
       const record = await scope.insertOrderVoid(tenantId, {
         id: randomUUID(),
@@ -209,6 +231,14 @@ export class VoidModificationEngine {
         for (const item of await scope.loadActiveOrderItems(tenantId, order.id)) voidedItemIds.push(item.id);
       }
       await scope.markOrderItemsVoided(tenantId, voidedItemIds);
+      // B11: no active lines left (a full order void, or the last line
+      // falling to an item void) ⇒ the order is terminally 'voided' — never
+      // 'open' ("re-collection required" would be a lie on a dead order).
+      if ((await scope.loadActiveOrderItems(tenantId, order.id)).length === 0) {
+        await scope.setOrderPaymentStatus(tenantId, order.id, 'voided');
+      }
+      // Phase-9 stock: restoration-or-waste per voided line, same transaction.
+      await this.writeVoidStockMovements(scope, tenantId, order, voidedItemIds, actor.userId);
       for (const itemId of voidedItemIds) {
         await scope.appendEvent(tenantId, order.branchId, 'order_item.voided', {
           order_id: order.id,
@@ -228,5 +258,51 @@ export class VoidModificationEngine {
 
       return record;
     });
+  }
+
+  /**
+   * Phase-9 void stock: per voided line, restoration mirrors the RECORDED
+   * sale deductions exactly (never recomputed from live recipes — immune to
+   * recipe edits between sale and void) — but ONLY when the line never
+   * entered a fires_kitchen_ticket state; a prepared line is waste (zero
+   * delta, the consumed quantity stays consumed). Lines with no recorded
+   * deductions (pre-Phase-9 orders, recipe-less lines) yield no rows at all.
+   * Pairs already carrying a void_restoration row (a prior partial refund
+   * came home first) are skipped: stock is restored exactly once per
+   * (line, component), never twice.
+   */
+  private async writeVoidStockMovements(
+    scope: OrdersTxScope,
+    tenantId: string,
+    order: OrderRecord,
+    voidedItemIds: readonly string[],
+    actorUserId: string,
+  ): Promise<void> {
+    if (voidedItemIds.length === 0) return;
+    const deductions = await scope.loadSaleDeductionsForOrderItems(tenantId, voidedItemIds);
+    if (deductions.length === 0) return;
+    const fired = new Set(await scope.loadItemsWithKitchenTicketFired(tenantId, voidedItemIds));
+    const restored = new Set(
+      (await scope.loadVoidRestorationKeys(tenantId, voidedItemIds)).map((key) => `${key.orderItemId}:${key.inventoryItemId}`),
+    );
+    const occurredAt = new Date();
+    for (const deduction of deductions) {
+      if (restored.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
+      const restores = !fired.has(deduction.orderItemId);
+      await scope.insertStockMovement(tenantId, {
+        branchId: order.branchId,
+        inventoryItemId: deduction.inventoryItemId,
+        movementType: restores ? 'void_restoration' : 'waste_void',
+        quantityDelta: restores
+          ? minorToDecimalText(-decimalTextToMinor(deduction.totalDeducted, STOCK_QUANTITY_SCALE, 'totalDeducted'), STOCK_QUANTITY_SCALE)
+          : minorToDecimalText(0n, STOCK_QUANTITY_SCALE),
+        orderId: order.id,
+        orderItemId: deduction.orderItemId,
+        actorUserId,
+        managerOverrideId: null,
+        adjustmentReasonId: null,
+        occurredAt,
+      });
+    }
   }
 }

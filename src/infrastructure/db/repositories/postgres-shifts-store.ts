@@ -91,6 +91,8 @@ function mapCount(r: CashCountRow): CashCountDetailRecord {
 
 export interface PostgresShiftsStoreDependencies {
   readonly withTenantContext: WithTenantContext;
+  /** B3: per-transaction lock_timeout override (ms). undefined = inherit the context default. */
+  readonly lockTimeoutMs?: number | undefined;
 }
 
 export class PostgresShiftsStore implements ShiftsStore {
@@ -104,7 +106,13 @@ export class PostgresShiftsStore implements ShiftsStore {
     return this.dependencies.withTenantContext(
       tenantId,
       async (q) => fn(buildScope(q)),
-      { isolationLevel: 'repeatable read', verifyTenantExists: true },
+      {
+        isolationLevel: 'repeatable read',
+        verifyTenantExists: true,
+        // B3: spread ONLY when set — an explicit undefined would wipe the
+        // production lock_timeout default during option merging.
+        ...(this.dependencies.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: this.dependencies.lockTimeoutMs }),
+      },
     );
   }
 }
@@ -151,6 +159,16 @@ function buildScope(q: TenantQuery): ShiftsTxScope {
     async loadShift(tid, shiftId) {
       const result = await q.query<ShiftRow>('SELECT * FROM shift_reconciliations WHERE tenant_id = $1 AND id = $2', [tid, shiftId]);
       return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
+    },
+
+    // B2: the uniform serialization point — lock FIRST, bump, then decide.
+    async lockShift(tid, shiftId) {
+      const result = await q.query<ShiftRow>('SELECT * FROM shift_reconciliations WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, shiftId]);
+      return result.rows[0] === undefined ? null : mapShift(result.rows[0]);
+    },
+
+    async bumpShiftRevision(tid, shiftId) {
+      await q.query('UPDATE shift_reconciliations SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, shiftId]);
     },
 
     async loadCashCounts(tid, shiftId) {

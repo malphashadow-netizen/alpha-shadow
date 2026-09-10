@@ -1,9 +1,7 @@
 /**
- * Payment-method administration (Phase 8).
+ * Payment-method administration (Phase 8; B7: gated by payments:methods_admin).
  *
- * Tenant configuration only — no permission key is mandated by the Phase-8
- * spec for this surface, so the engine enforces the STRUCTURAL rules and
- * leaves access control to the caller's admin surface:
+ * Tenant configuration — the engine enforces the STRUCTURAL rules:
  *   * the fixed type vocabulary,
  *   * foreign currency is cash-only: a foreign_currency_cash method REQUIRES
  *     a currency and a positive manual fixed rate; every other type carries
@@ -11,13 +9,23 @@
  *   * every provisioning/change of the manual rate is appended to the
  *     tenant's exchange_rates ledger by the DB trigger (migration 0033) —
  *     this engine just writes the row.
+ *
+ * B7: BOTH mutations require the payments:methods_admin key (sensitive —
+ * structural tender configuration, tax:configure parity). The actor is
+ * AUTH-ONLY (no actor column on the row), so it travels as a positional
+ * `actorUserId` parameter — the same convention as the catalog engine's
+ * mutating methods (actor-inside-input is reserved for actors that are also
+ * stored domain data, e.g. recordPayment's cashierUserId).
  */
 
 import type { NewPaymentMethodInput, PaymentMethodRecord, PaymentsStore, PaymentMethodType, UpdatePaymentMethodInput } from '../../../domain/contracts/payments.ts';
+import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import { isCurrencyCode } from '../../../shared/money.ts';
 
 const METHOD_TYPES: readonly PaymentMethodType[] = ['cash', 'card', 'wallet', 'foreign_currency_cash', 'other'];
+
+const PAYMENT_METHODS_ADMIN_PERMISSION_KEY = 'payments:methods_admin';
 
 function assertTypeShape(input: { type: PaymentMethodType; currencyCode: string | null; fixedExchangeRate: string | null }): void {
   if (!METHOD_TYPES.includes(input.type)) {
@@ -38,19 +46,31 @@ function assertTypeShape(input: { type: PaymentMethodType; currencyCode: string 
 }
 
 export class PaymentMethodsEngine {
-  private readonly dependencies: { readonly store: PaymentsStore };
+  private readonly dependencies: { readonly store: PaymentsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> };
 
-  constructor(dependencies: { readonly store: PaymentsStore }) {
+  constructor(dependencies: { readonly store: PaymentsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> }) {
     this.dependencies = dependencies;
   }
 
-  async create(tenantId: string, input: NewPaymentMethodInput): Promise<PaymentMethodRecord> {
+  async create(tenantId: string, actorUserId: string, input: NewPaymentMethodInput): Promise<PaymentMethodRecord> {
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: actorUserId,
+      permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     if (input.name.trim() === '') throw new ValidationError('A payment method requires a name', 'name');
     assertTypeShape(input);
     return this.dependencies.store.run(tenantId, (scope) => scope.insertPaymentMethod(tenantId, input));
   }
 
-  async update(tenantId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord> {
+  async update(tenantId: string, actorUserId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord> {
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: actorUserId,
+      permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     return this.dependencies.store.run(tenantId, async (scope) => {
       const existing = await scope.loadPaymentMethod(tenantId, paymentMethodId);
       if (existing === null) throw new NotFoundError(`Payment method ${paymentMethodId} not found`);

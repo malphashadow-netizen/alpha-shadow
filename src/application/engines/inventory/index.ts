@@ -1,4 +1,4 @@
-// FUTURE: inventory engine — placeholder only, no implementation until its phase.
-// Every permission registered here later uses the `resource:action` key format
-// and sets `is_sensitive = true` for money-affecting actions.
-export {};
+// Phase 9: manual receiving (the single conversion point in the system) and
+// manual stock adjustments. Receiving needs 'inventory:receive'; adjustments
+// need the sensitive 'inventory:adjust' (never cached).
+export { InventoryEngine } from './inventory-engine.ts';

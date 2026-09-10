@@ -28,8 +28,8 @@ import type { TaxCategory, TaxRate } from '../../../domain/contracts/tax.ts';
 import type { TaxComputationPlan } from '../tax/cascading.ts';
 import { calculateCascadingTaxes } from '../tax/cascading.ts';
 import { TaxConfigurationError } from '../../../shared/errors.ts';
-import { decimalTextToMinor, minorToDecimalText } from '../../../shared/decimal-text.ts';
-import { currencyCode, minorUnitScale } from '../../../shared/money.ts';
+import { decimalTextToMinor, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
+import { currencyCode } from '../../../shared/money.ts';
 
 export interface OrderTotalsComputation {
   readonly subtotalMinor: bigint;
@@ -100,7 +100,7 @@ function toApplicableTax(line: OrderLineTaxPlanLine): { category: TaxCategory; r
 }
 
 export function computeOrderTotals(snapshot: OrderFinancialSnapshot): OrderTotalsComputation {
-  const baseMinorDigits = minorUnitScale(currencyCode(snapshot.baseCurrencyCode));
+  const baseMinorDigits = storageMinorUnitDigits(currencyCode(snapshot.baseCurrencyCode));
 
   // Step 1 — subtotal over active items.
   const subtotalMinor = snapshot.lines.reduce((sum, line) => sum + line.lineAmountMinor, 0n);
@@ -162,7 +162,3 @@ export function computeOrderTotals(snapshot: OrderFinancialSnapshot): OrderTotal
   };
 }
 
-/** Renders any minor figure of a computation as canonical NUMERIC(18,2) text. */
-export function totalsToDecimalText(minor: bigint): string {
-  return minorToDecimalText(minor, 2);
-}

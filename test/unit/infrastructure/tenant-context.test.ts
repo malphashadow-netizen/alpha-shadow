@@ -327,10 +327,10 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
   });
 
   it('16. verifyTenantExists throws NotFoundError for an unregistered tenant and never calls fn', async () => {
-    const existsMock = vi.fn(async () => ({ rows: [{ exists: false }] }));
+    const statusMock = vi.fn(async () => ({ rows: [] }));
     const queryMock = vi.fn(async (text: string) => {
-      if (text.startsWith('SELECT EXISTS')) {
-        return (await existsMock()) as never;
+      if (text.startsWith('SELECT status FROM tenants')) {
+        return (await statusMock()) as never;
       }
       return { rows: [], rowCount: 0 } as never;
     });
@@ -349,7 +349,7 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
       }),
     ).rejects.toBeInstanceOf(NotFoundError);
     expect(callbackRan).toBe(false);
-    expect(existsMock).toHaveBeenCalledTimes(1);
+    expect(statusMock).toHaveBeenCalledTimes(1);
   });
 
   it('17. call-level options can inject a replacement pool without touching the factory pool', async () => {
@@ -365,10 +365,10 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
     expect(factoryPool.connectCalls).toBe(0);
   });
 
-  it('18. exported withTenantContext applies production defaults (timeout + tenant check) with a safe pool override', async () => {
-    const existsRows = { rows: [{ exists: true }] };
+  it('18. exported withTenantContext applies production defaults (timeouts + tenant check) with a safe pool override', async () => {
+    const statusRows = { rows: [{ status: 'active' }] };
     const queryMock = vi.fn(async (text: string) => {
-      if (text.startsWith('SELECT EXISTS')) return existsRows as never;
+      if (text.startsWith('SELECT status FROM tenants')) return statusRows as never;
       if (text === 'BEGIN' || text === 'COMMIT' || text === 'DISCARD ALL' || text.startsWith('SELECT set_config')) {
         return { rows: [], rowCount: 0 } as never;
       }
@@ -388,12 +388,43 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
       'BEGIN',
       `SELECT set_config($1, $2, true)`,
       `SELECT set_config($1, $2, true)`,
-      'SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1) AS exists',
+      // B3: the lock_timeout bound is the third transaction-scoped default.
+      `SELECT set_config($1, $2, true)`,
+      // B5: existence AND active status in one in-transaction probe.
+      'SELECT status FROM tenants WHERE id = $1',
       'COMMIT',
       'DISCARD ALL',
     ]);
     const timeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'statement_timeout');
     expect(timeoutCall?.[1]?.[1]).toBe('30000');
+    const lockTimeoutCall = (queryMock.mock.calls as unknown as [string, unknown[]][]).find((c) => c[1]?.[0] === 'lock_timeout');
+    expect(lockTimeoutCall?.[1]?.[1]).toBe('5000');
+  });
+
+  it('19. verifyTenantExists throws TenantSuspendedError for a non-active tenant and never calls fn', async () => {
+    const statusMock = vi.fn(async () => ({ rows: [{ status: 'suspended' }] }));
+    const queryMock = vi.fn(async (text: string) => {
+      if (text.startsWith('SELECT status FROM tenants')) {
+        return (await statusMock()) as never;
+      }
+      return { rows: [], rowCount: 0 } as never;
+    });
+    const client: TenantClient = {
+      query: queryMock as TenantClient['query'],
+      release: vi.fn() as TenantClient['release'],
+    };
+    const pool = createMockPool(client);
+    const w = createWithTenantContext(pool, { verifyTenantExists: true });
+
+    let callbackRan = false;
+    await expect(
+      w(VALID_TENANT, async () => {
+        callbackRan = true;
+        return 1;
+      }),
+    ).rejects.toMatchObject({ code: 'tenant.suspended', status: 'suspended' });
+    expect(callbackRan).toBe(false);
+    expect(statusMock).toHaveBeenCalledTimes(1);
   });
 });
 

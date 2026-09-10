@@ -151,7 +151,8 @@ export class TaxResolutionEngine {
     }
     if (prepared.context.roundingStrategy === 'invoice_total') throw new InvoiceTaxBatchRequiredError();
     if (prepared.computation === null) throw new TaxConfigurationError('Missing tax computation plan');
-    // 4b/c. Lower-priority tax cascades into the working base, half-up per tax.
+    // 4b/c. Lower-priority EXCLUSIVE tax cascades into the working base,
+    // half-up per tax (B6: inclusive tax is already embedded — never added).
     const taxes = calculateCascadingTaxes([prepared.computation], 'per_line').get(this.orderLineId);
     if (taxes === undefined) throw new TaxConfigurationError('Missing resolved tax lines');
     await persistPrepared(this.transaction, prepared, taxes);

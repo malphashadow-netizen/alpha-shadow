@@ -4,12 +4,16 @@ import {
   AuthorizationError,
   ConfigurationError,
   ConflictError,
+  CouponAvailabilityRaceError,
   DomainError,
   ForbiddenError,
   ManagerOverrideRateLimitedError,
+  NoApplicableTaxLiabilityRuleError,
+  NoApplicableTaxRateError,
   NotFoundError,
   RateLimitError,
   TenantIsolationViolationError,
+  TenantSuspendedError,
   toErrorResponse,
   ValidationError,
 } from '../../../src/shared/errors.ts';
@@ -124,10 +128,28 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(toErrorResponse(new AuthorizationError('unauth'), noop).status).toBe(401);
     expect(toErrorResponse(new ForbiddenError('no'), noop).status).toBe(403);
     expect(toErrorResponse(new TenantIsolationViolationError('iso'), noop).status).toBe(403);
+    expect(toErrorResponse(new TenantSuspendedError('suspended'), noop)).toMatchObject({ status: 403, code: 'tenant.suspended' });
     expect(toErrorResponse(new NotFoundError('nf'), noop).status).toBe(404);
     expect(toErrorResponse(new ConflictError('c'), noop).status).toBe(409);
+    // R2: missing tax configuration is 409 with a dedicated tax.* code —
+    // mechanically distinct from both 404 and retry-now conflicts.
+    expect(toErrorResponse(new NoApplicableTaxRateError('cat', '2026-01-01'), noop)).toMatchObject({ status: 409, code: 'tax.no_applicable_rate' });
+    expect(toErrorResponse(new NoApplicableTaxLiabilityRuleError('SA', 'delivery_app', '2026-01-01'), noop)).toMatchObject({
+      status: 409,
+      code: 'tax.no_applicable_liability_rule',
+    });
     expect(toErrorResponse(new RateLimitError('rl'), noop).status).toBe(429);
     expect(toErrorResponse(new ConfigurationError('cfg'), noop).status).toBe(500);
+  });
+
+  it('CouponAvailabilityRaceError rides the EXISTING conflict case (409, full code echoed, never sinked) — no new switch case (P2 coupon race)', () => {
+    const failure = new CouponAvailabilityRaceError('P2-RACE-01');
+    expect(failure.code).toBe('conflict');
+    expect(failure.message).toContain('P2-RACE-01');
+    const response = toErrorResponse(failure, () => {
+      throw new Error('a 409 race outcome must never hit the alarm sink');
+    });
+    expect(response).toEqual({ status: 409, code: 'conflict', message: failure.message });
   });
 
   it('ManagerOverrideRateLimitedError: 429 + ONE fixed generic message for BOTH lock shapes (anti-oracle)', () => {
@@ -157,6 +179,22 @@ describe('shared/errors — central error mapping (toErrorResponse)', () => {
     expect(JSON.stringify(response)).not.toContain('secret internal detail');
     // The detailed error goes ONLY to the server-side log sink.
     expect(logs).toHaveLength(1);
+  });
+
+  it('pins the default contract: a raw PostgreSQL-shaped error (unknown code) maps to internal 500 and the sink keeps the original (P2 mapper closure)', () => {
+    // The P2 recon proved no API path leaks raw SQLSTATEs — this locks the
+    // choke point so any future leak lands here, safely redacted.
+    const rawPgError = {
+      code: '23514',
+      message: 'new row for relation "order_discounts" violates check constraint "order_discounts_coupon_presence"',
+      detail: 'Failing row contains (6138a1b2-..., coupon-mechanism row without coupon_id)',
+    };
+    const logs: unknown[] = [];
+    const response = toErrorResponse(rawPgError, (e) => logs.push(e));
+    expect(response).toEqual({ status: 500, code: 'internal.error', message: 'Internal server error' });
+    // Exactly once, with the IDENTICAL object — nothing lost server-side.
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toBe(rawPgError);
   });
 
   it('REDACTS ConfigurationError details from the response message (500 class) while logging them', () => {

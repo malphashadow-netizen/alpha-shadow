@@ -166,4 +166,25 @@ describe('data-driven TaxResolutionEngine', () => {
     expect(result.get('a')).toMatchObject([{ taxAmountMinor: 1n }, { taxableAmountMinor: 2n, taxAmountMinor: 1n }]);
     expect(result.get('b')).toMatchObject([{ taxAmountMinor: 0n }, { taxableAmountMinor: 1n, taxAmountMinor: 1n }]);
   });
+  it('B6 mixed-direction cascade: inclusive lower NEVER cascades, exclusive lower ALWAYS does', () => {
+    const result = calculateCascadingTaxes([
+      { orderLineId: 'incl-lower', amountMinor: 1000n, currencyCode: 'SAR',
+        taxes: [{ category: EXCISE_CATEGORY, rate: { ...EXCISE_RATE, isPriceInclusiveDefault: true } },
+          { category: VAT_CATEGORY, rate: VAT_RATE }] },
+      { orderLineId: 'excl-lower', amountMinor: 1000n, currencyCode: 'SAR',
+        taxes: [{ category: EXCISE_CATEGORY, rate: EXCISE_RATE },
+          { category: VAT_CATEGORY, rate: { ...VAT_RATE, isPriceInclusiveDefault: true } }] },
+    ], 'per_line');
+    // Direction A (the B6 fix — Saudi tobacco): the embedded 500 does NOT
+    // inflate the VAT base (pre-fix this VAT read 225 on a 1500 base).
+    expect(result.get('incl-lower')).toMatchObject([
+      { taxFamily: 'excise', taxableAmountMinor: 500n, taxAmountMinor: 500n },
+      { taxFamily: 'vat', taxableAmountMinor: 1000n, taxAmountMinor: 150n },
+    ]);
+    // Direction B (preserved): the on-top 1000 DOES enter the VAT base.
+    expect(result.get('excl-lower')).toMatchObject([
+      { taxFamily: 'excise', taxableAmountMinor: 1000n, taxAmountMinor: 1000n },
+      { taxFamily: 'vat', taxableAmountMinor: 1739n, taxAmountMinor: 261n },
+    ]);
+  });
 });

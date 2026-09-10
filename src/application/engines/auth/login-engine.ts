@@ -4,11 +4,16 @@
  *
  * Uniform failure (anti-enumeration / timing-oracle defence):
  *   EVERY failure — unknown user, wrong password/PIN, locked account,
- *   inactive account, an existing email under a DIFFERENT tenant — returns
+ *   inactive account, a SUSPENDED tenant, an existing email under a
+ *   DIFFERENT tenant — returns
  *   the SAME `InvalidCredentialsError` (→ 401 INVALID_CREDENTIALS), same body
  *   and headers. The unknown-user path performs a REAL dummy password/PIN
  *   verification (genuine scrypt/HMAC cost) so its latency is statistically
  *   indistinguishable from a wrong-password attempt on an existing user.
+ *   A suspended tenant folds into the null-user branch BEFORE verification,
+ *   so it pays the identical dummy cost (no timing oracle); a suspension
+ *   landing MID-login (past the lookup) is caught at each subsequent store
+ *   call and collapses to the same 401.
  *
  * Lockout (atomic, per-mode limits): PIN is stricter (3) than password (5).
  * The failed-attempt counter and `locked_until` are advanced by ONE atomic
@@ -16,9 +21,9 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { InvalidCredentialsError, RateLimitError } from '../../../shared/errors.ts';
+import { InvalidCredentialsError, RateLimitError, TenantSuspendedError } from '../../../shared/errors.ts';
 import { sha256Hex } from '../../../shared/crypto.ts';
-import type { IAuthAuditSink, IAuthRepository, IRefreshTokenStore } from '../../../domain/contracts/auth.ts';
+import type { AuthUserRecord, IAuthAuditSink, IAuthRepository, IRefreshTokenStore } from '../../../domain/contracts/auth.ts';
 import type { IPasswordHasher, IPinHasher, ITokenService, Sha256Hex } from '../../../shared/auth/ports.ts';
 import { deriveSecV } from '../../../domain/contracts/sec-v.ts';
 import type { LoginRequest } from './request-schema.ts';
@@ -131,10 +136,20 @@ export class LoginEngine {
 
     // 2) Load the candidate account within the claimed tenant. null ==
     //    unknown user OR the email belongs to a different tenant — identical.
-    const user =
-      mode === 'password'
-        ? await this.authRepository.findByEmail(request.tenantId, normaliseEmail(request.email))
-        : await this.authRepository.findByPinIdentifier(request.tenantId, request.userIdOrStaffCode);
+    //    B5: a suspended tenant throws TenantSuspendedError from the
+    //    repository (the in-tx status probe); fold it into the null-user
+    //    branch BEFORE secret verification so it pays the identical dummy
+    //    KDF/HMAC cost — no timing oracle, uniform 401 below.
+    let user: AuthUserRecord | null;
+    try {
+      user =
+        mode === 'password'
+          ? await this.authRepository.findByEmail(request.tenantId, normaliseEmail(request.email))
+          : await this.authRepository.findByPinIdentifier(request.tenantId, request.userIdOrStaffCode);
+    } catch (error: unknown) {
+      if (!(error instanceof TenantSuspendedError)) throw error;
+      user = null;
+    }
 
     // 3) Verify the SECRET first (constant-time, real KDF/HMAC cost) BEFORE
     //    any state check, so locked/inactive/unknown accounts do not
@@ -164,12 +179,19 @@ export class LoginEngine {
       // Blocked accounts are not counted again (already over threshold).
       if (user !== null && !secretValid && !accountBlocked) {
         const limit = mode === 'password' ? this.passwordThreshold : this.pinThreshold;
-        await this.authRepository.registerFailedAttempt({
-          tenantId: request.tenantId,
-          userId: user.id,
-          limit,
-          lockWindowMs: this.lockWindowMs,
-        });
+        try {
+          await this.authRepository.registerFailedAttempt({
+            tenantId: request.tenantId,
+            userId: user.id,
+            limit,
+            lockWindowMs: this.lockWindowMs,
+          });
+        } catch (error: unknown) {
+          // B5 race backstop: suspension landed between the lookup and this
+          // write — the counter is meaningless on a suspended tenant; fall
+          // through to the uniform 401 below.
+          if (!(error instanceof TenantSuspendedError)) throw error;
+        }
       }
       await this.auditSink.recordAttempt({
         tenantIdAttempted,
@@ -188,7 +210,24 @@ export class LoginEngine {
     const account = user;
 
     // 5) Success — atomic reset + FRESH sec_v, issue tokens, audit.
-    const secVInputs = await this.authRepository.registerSuccessfulLogin(request.tenantId, account.id);
+    //    B5 race backstop: a suspension landing between the lookup and this
+    //    write collapses to the uniform 401 (no tokens are issued).
+    let secVInputs: Awaited<ReturnType<IAuthRepository['registerSuccessfulLogin']>>;
+    try {
+      secVInputs = await this.authRepository.registerSuccessfulLogin(request.tenantId, account.id);
+    } catch (error: unknown) {
+      if (!(error instanceof TenantSuspendedError)) throw error;
+      await this.auditSink.recordAttempt({
+        tenantIdAttempted,
+        userIdAttempted: account.id,
+        identifierAttempted: identifierKey,
+        mode,
+        success: false,
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
+      invalidCredentials();
+    }
     const secV = deriveSecV(secVInputs.activeRoles, secVInputs.securityVersion, this.sha256);
     const now = new Date();
     const accessToken = this.tokenService.issueAccessToken({
@@ -208,13 +247,29 @@ export class LoginEngine {
       now,
     });
     // Persist the rotation ledger row (hash of jti only — never the token).
-    await this.refreshTokenStore.store({
-      tenantId: request.tenantId,
-      userId: account.id,
-      tokenHash: this.sha256(jti),
-      familyId,
-      expiresAt: new Date(now.getTime() + this.refreshTtlSeconds * 1000),
-    });
+    // B5 race backstop: same collapse as above (the access token already
+    // issued is useless — every operation re-verifies the tenant status).
+    try {
+      await this.refreshTokenStore.store({
+        tenantId: request.tenantId,
+        userId: account.id,
+        tokenHash: this.sha256(jti),
+        familyId,
+        expiresAt: new Date(now.getTime() + this.refreshTtlSeconds * 1000),
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof TenantSuspendedError)) throw error;
+      await this.auditSink.recordAttempt({
+        tenantIdAttempted,
+        userIdAttempted: account.id,
+        identifierAttempted: identifierKey,
+        mode,
+        success: false,
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
+      invalidCredentials();
+    }
     await this.auditSink.recordAttempt({
       tenantIdAttempted,
       userIdAttempted: account.id,

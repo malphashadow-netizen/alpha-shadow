@@ -13,6 +13,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { KdsDeviceEngine } from '../../src/application/engines/kds/kds-device-engine.ts';
 import { KdsEventService } from '../../src/application/engines/kds/kds-event-service.ts';
 import { SideEffectWorker } from '../../src/application/engines/kds/side-effect-worker.ts';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
@@ -30,20 +31,23 @@ import type { OrderOutboxEvent, SideEffectType, TenantWorkflowState, VoidActor }
 import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platform-tax-context.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositories/postgres-catalog-repository.ts';
+import { PostgresKdsDeviceTokenStore } from '../../src/infrastructure/db/repositories/postgres-kds-device-token-store.ts';
 import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts';
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { KdsRealtimeClient, type KdsClientEvent } from '../../src/presentation/kds/kds-realtime-client.ts';
 import { KdsRealtimeServer } from '../../src/presentation/kds/kds-realtime-server.ts';
 import { hashPin } from '../../src/shared/auth/pin.ts';
 import {
+  ForbiddenError,
   ManagerOverrideAuthenticationError,
   ManagerOverrideRequiredError,
   NoMatchingRoutingRuleError,
   PaymentReversalRequiredError,
+  ValidationError,
   VoidReasonUnavailableError,
   VoidTimeLimitExceededError,
   WorkflowStateInUseError,
@@ -52,6 +56,7 @@ import {
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 const A = '11111111-1111-4111-8111-111111111111'; // main flow tenant
 const B = '22222222-2222-4222-8222-222222222222'; // cross-tenant boundary
@@ -104,6 +109,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let catalog: CatalogEngine;
   let permissionRead: PostgresPermissionReadRepository;
   let authorization: AuthorizationEngine;
+  let permWrite: PostgresPermissionWriteRepository;
   let store: PostgresOrdersStore;
   let creation: OrderCreationEngine;
   let shifts: ShiftEngine;
@@ -112,8 +118,11 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   let workflowAdmin: WorkflowAdminEngine;
   let voids: VoidModificationEngine;
   let kdsEvents: KdsEventService;
+  let kdsDevices: KdsDeviceEngine;
+  let kdsIssuerId: string;
   let saCategory: TaxCategory;
   const menuCategoryByTenant = new Map<string, string>();
+  const catalogAdminByTenant = new Map<string, string>();
   // Phase 8 shift-gateway fixtures: one lazily-created cashier (with a
   // standing OPEN shift, zero float) per branch, opened by two DISTINCT
   // people (dual verification is a database CHECK).
@@ -129,7 +138,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '014_backlog_r1_kds_device_tokens.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -146,21 +155,29 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
     platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
-    creation = new OrderCreationEngine({ store });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    creation = new OrderCreationEngine({
+      store,
+      authorization,
+      managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
+    });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     routing = new StationRoutingEngine({ store });
-    transitions = new WorkflowTransitionEngine({ store });
-    workflowAdmin = new WorkflowAdminEngine({ store });
+    transitions = new WorkflowTransitionEngine({ store, authorization });
+    workflowAdmin = new WorkflowAdminEngine({ store, authorization });
     voids = new VoidModificationEngine({
       store,
       authorization,
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
     kdsEvents = new KdsEventService({ store });
+    kdsDevices = new KdsDeviceEngine({ store: new PostgresKdsDeviceTokenStore({ withTenantContext: withApp }), authorization });
+    // Audit F-D: created early — the workflow-setup addState below is gated
+    // and needs a granted admin actor before any other fixture exists.
+    permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
     await platform.configureJurisdiction(PLATFORM_ACTOR, 'SA', 'per_line', true);
@@ -181,7 +198,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       { kindCode: 'delivered', position: 50, label: { ar: 'تم التسليم' } },
       { kindCode: 'cancelled', position: 60, label: { ar: 'ملغي' } },
     ]);
-    await workflowAdmin.addState(A, { kindCode: 'preparing', parentKindCode: 'preparing', position: 35, label: { ar: 'قيد التحضير - في انتظار مكوّن' } });
+    const setupAdminA = await adminUser(A);
+    await workflowAdmin.addState(A, setupAdminA.userId, setupAdminA.tokenSecV, { kindCode: 'preparing', parentKindCode: 'preparing', position: 35, label: { ar: 'قيد التحضير - في انتظار مكوّن' } });
     for (const tenant of [B, C, D]) {
       await workflowAdmin.ensureWorkflow(tenant, [
         { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
@@ -192,9 +210,27 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     }
     for (const tenant of [A, B, C, D]) {
       workflowStatesByTenant.set(tenant, await workflowAdmin.listStates(tenant, false));
-      const category = await catalog.createCategory(tenant, { name: { ar: `قائمة ${tenant}` } });
+      // B7: one catalog admin per tenant (the authz check is tenant-scoped,
+      // so a single cross-tenant actor cannot serve all four tenants).
+      const adminId = randomUUID();
+      await withApp(tenant, (q) => q.query(
+        'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+        [adminId, tenant, `${adminId}@example.test`, hashPin(PIN_PEPPER, tenant, adminId, '0000')],
+      ));
+      await grantKeys(permWrite, tenant, adminId, ['catalog:write']);
+      catalogAdminByTenant.set(tenant, adminId);
+      const category = await catalog.createCategory(tenant, adminId, { name: { ar: `قائمة ${tenant}` } });
       menuCategoryByTenant.set(tenant, category.id);
     }
+
+    // R1: one device-token issuer for the KDS tests (tenant A). Each KDS
+    // test mints its own screen token for its fresh branch.
+    kdsIssuerId = randomUUID();
+    await withApp(A, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [kdsIssuerId, A, `${kdsIssuerId}@example.test`, hashPin(PIN_PEPPER, A, kdsIssuerId, '0000')],
+    ));
+    await grantKeys(permWrite, A, kdsIssuerId, ['payments:methods_admin']);
   });
 
   beforeEach(async () => {
@@ -219,13 +255,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const stationSalads = randomUUID();
     const menuCategoryId = menuCategoryByTenant.get(tenantId);
     if (menuCategoryId === undefined) throw new Error(`Missing menu category for tenant ${tenantId}`);
-    const itemGrill = (await catalog.createItem(tenantId, {
+    const adminId = catalogAdminByTenant.get(tenantId);
+    if (adminId === undefined) throw new Error(`Missing catalog admin for tenant ${tenantId}`);
+    const itemGrill = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'شيش طاووق' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    const itemSalad = (await catalog.createItem(tenantId, {
+    const itemSalad = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'سلطة' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    const itemNoRule = (await catalog.createItem(tenantId, {
+    const itemNoRule = (await catalog.createItem(tenantId, adminId, {
       categoryId: menuCategoryId, name: { ar: 'عنصر بلا قاعدة' }, basePrice: money(900n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
     await withApp(tenantId, async (q) => {
@@ -254,6 +292,78 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
         await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenantId, roleId, key]);
       }
       await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'tenant', NULL)", [tenantId, userId, roleId]);
+    });
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
+    return { userId, tokenSecV, pin };
+  }
+
+  /**
+   * Audit F-D: a minimal actor carrying exactly ONE key (no void keys — the
+   * transition/admin gates must not depend on unrelated grants). The secV is
+   * derived AFTER the grant, so it is fresh by construction.
+   */
+  async function createKeyUser(tenantId: string, key: string): Promise<TieredUser> {
+    const userId = randomUUID();
+    const pin = String(1000 + Math.trunc(Math.random() * 9000));
+    await withApp(tenantId, (q) => q.query(
+      'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [userId, tenantId, `${userId}@example.test`, hashPin(PIN_PEPPER, tenantId, userId, pin)],
+    ));
+    await grantKeys(permWrite, tenantId, userId, [key]);
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
+    return { userId, tokenSecV, pin };
+  }
+
+  /** Audit F-D: one transition-authorized actor per tenant, cached across tests. */
+  const transitionUserByTenant = new Map<string, TieredUser>();
+  async function transitionUser(tenantId: string): Promise<TieredUser> {
+    let user = transitionUserByTenant.get(tenantId);
+    if (user === undefined) {
+      user = await createKeyUser(tenantId, 'order:item:transition');
+      transitionUserByTenant.set(tenantId, user);
+    }
+    return user;
+  }
+
+  /** Audit F-D: one workflow-admin actor per tenant, cached across tests. */
+  const adminUserByTenant = new Map<string, TieredUser>();
+  async function adminUser(tenantId: string): Promise<TieredUser> {
+    let user = adminUserByTenant.get(tenantId);
+    if (user === undefined) {
+      user = await createKeyUser(tenantId, 'order:workflow:admin');
+      adminUserByTenant.set(tenantId, user);
+    }
+    return user;
+  }
+
+  /** Audit F-D: authorized transition — every legacy bare call routes through here. */
+  async function moveItem(tenantId: string, orderItemId: string, toWorkflowStateId: string) {
+    const user = await transitionUser(tenantId);
+    return transitions.transitionItem(tenantId, { orderItemId, toWorkflowStateId, actorUserId: user.userId, tokenSecV: user.tokenSecV });
+  }
+
+  /**
+   * Audit F-A fixture: a user whose void keys live on SEPARATE roles so each
+   * key can carry its own scope. (Scope lives on the user_roles ASSIGNMENT
+   * while keys live on the ROLE — a single role can never model "tenant-wide
+   * server, branch-A-only manager"; that shape needs two roles, like here.)
+   */
+  async function createVoidUserWithRoles(
+    tenantId: string,
+    roles: readonly { keys: readonly string[]; scopeType: 'tenant' | 'branch'; scopeId: string | null }[],
+    pin = String(1000 + Math.trunc(Math.random() * 9000)),
+  ): Promise<TieredUser> {
+    const userId = randomUUID();
+    await withApp(tenantId, async (q) => {
+      await q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)', [userId, tenantId, `${userId}@example.test`, hashPin(PIN_PEPPER, tenantId, userId, pin)]);
+      for (const [index, role] of roles.entries()) {
+        const roleId = randomUUID();
+        await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, tenantId, `void-scoped-${index}-${roleId}`]);
+        for (const key of role.keys) {
+          await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenantId, roleId, key]);
+        }
+        await q.query('INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, $4, $5)', [tenantId, userId, roleId, role.scopeType, role.scopeId]);
+      }
     });
     const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
     return { userId, tokenSecV, pin };
@@ -291,6 +401,8 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       ));
       verifiers = { openerId, verifierId };
       shiftVerifiersByTenant.set(tenantId, verifiers);
+      // B7: the lazy opener needs shift:open (granted once, at creation).
+      await grantKeys(permWrite, tenantId, openerId, ['shift:open']);
     }
     const cashierId = randomUUID();
     await withApp(tenantId, (q) => q.query(
@@ -313,9 +425,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     tenantId: string,
     f: BranchFixture,
     lines: readonly { menuItemId: string; quantity?: number }[],
-    occurredAt = new Date(),
   ) {
     const cashierUserId = await ensureShiftCashier(tenantId, f.branchId);
+    // Audit F-B: no occurredAt is passed — the server clock stamps the order.
+    // (Deliberate extreme values are exercised only by the F-B tests below.)
     return creation.create(tenantId, {
       branchId: f.branchId,
       cashierUserId,
@@ -324,7 +437,6 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       deliveryPlatformId: null,
       tableId: null,
       items: lines.map((l) => ({ menuItemId: l.menuItemId, quantity: l.quantity ?? 1 })),
-      occurredAt,
     });
   }
 
@@ -341,28 +453,29 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     // (a) A state of ANOTHER tenant's workflow is invisible (RLS) → rejected.
     const foreignPreparing = state(B, 'preparing');
-    await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: foreignPreparing.id }))
+    await expect(moveItem(A, item.item.id, foreignPreparing.id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
 
     // (b) A DISABLED state of the tenant's own workflow is not part of the
     //     effective sequence → rejected (engine + DB trigger).
     const confirmed = state(A, 'confirmed');
-    await workflowAdmin.disableState(A, confirmed.id);
+    const adminA = await adminUser(A);
+    await workflowAdmin.disableState(A, adminA.userId, adminA.tokenSecV, confirmed.id);
     try {
-      await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: confirmed.id }))
+      await expect(moveItem(A, item.item.id, confirmed.id))
         .rejects.toBeInstanceOf(WorkflowTransitionError);
       await expect(withApp(A, (q) => q.query(
         'INSERT INTO order_item_status_events (tenant_id, order_item_id, order_id, to_status_kind_id) VALUES ($1, $2, $3, $4)',
         [A, item.item.id, created.order.id, confirmed.id],
       ))).rejects.toMatchObject({ code: '23514' });
     } finally {
-      await workflowAdmin.enableState(A, confirmed.id);
+      await workflowAdmin.enableState(A, adminA.userId, adminA.tokenSecV, confirmed.id);
     }
 
     // (c) A BACKWARD move inside the tenant's sequence is rejected too.
     const preparing = state(A, 'preparing');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: preparing.id });
-    await expect(transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'received').id }))
+    await moveItem(A, item.item.id, preparing.id);
+    await expect(moveItem(A, item.item.id, state(A, 'received').id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
   });
 
@@ -377,19 +490,19 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     expect(created.order.currentStatusKindId).toBe(received.id);
 
-    await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: preparing.id });
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: waiting.id });
+    await moveItem(A, first.item.id, preparing.id);
+    await moveItem(A, second.item.id, waiting.id);
     // One item preparing + one in the "waiting for ingredient" sub-state → the
     // parent order is STILL "preparing".
     expect((await store.run(A, (s) => s.loadOrder(A, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
 
-    await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: ready.id });
+    await moveItem(A, first.item.id, ready.id);
     // One item ready + one still waiting → the order stays "preparing".
     expect((await store.run(A, (s) => s.loadOrder(A, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
 
     // Ingredient arrived: sub-state → plain preparing → then ready.
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: preparing.id });
-    await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: ready.id });
+    await moveItem(A, second.item.id, preparing.id);
+    await moveItem(A, second.item.id, ready.id);
     const finalOrder = await store.run(A, (s) => s.loadOrder(A, created.order.id));
     expect(finalOrder?.currentStatusKindId).toBe(ready.id);
     expect(finalOrder?.closedAt).toBeNull();
@@ -417,8 +530,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const preparing = state(A, 'preparing');
     const ready = state(A, 'ready');
 
+    // R1: the test screen holds a device token minted for this branch.
+    const { plaintextToken: screenToken } = await kdsDevices.issueDeviceToken(A, kdsIssuerId, {
+      branchId: fixture.branchId,
+      label: 'phase7-test-screen',
+    });
     const server = new KdsRealtimeServer({
       readEvents: (tenantId, branchId, after, limit) => kdsEvents.readEvents(tenantId, branchId, after, limit),
+      verifyDeviceToken: (tenantId, branchId, token) => kdsDevices.verifyDeviceToken(tenantId, branchId, token),
+      isTokenHashActive: (tenantId, tokenHash) => kdsDevices.isDeviceTokenActive(tenantId, tokenHash),
       pollIntervalMs: 40,
     });
     const port = await server.start();
@@ -427,6 +547,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       baseUrl: `http://127.0.0.1:${port}`,
       tenantId: A,
       branchId: fixture.branchId,
+      deviceToken: screenToken,
       onEvent: (event) => received.push(event),
       reconnectBaseDelayMs: 350,
       reconnectMaxDelayMs: 2_000,
@@ -440,10 +561,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       // Simulate the network drop; the client auto-reconnects after backoff.
       client.forceDrop();
       // While disconnected, four transitions + two parent-order changes land.
-      await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: preparing.id });          // seq 3 + order→preparing seq 4
-      await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: preparing.id });         // seq 5
-      await transitions.transitionItem(A, { orderItemId: first.item.id, toWorkflowStateId: ready.id });              // seq 6 (order still preparing)
-      await transitions.transitionItem(A, { orderItemId: second.item.id, toWorkflowStateId: ready.id });             // seq 7 + order→ready seq 8
+      await moveItem(A, first.item.id, preparing.id);          // seq 3 + order→preparing seq 4
+      await moveItem(A, second.item.id, preparing.id);         // seq 5
+      await moveItem(A, first.item.id, ready.id);              // seq 6 (order still preparing)
+      await moveItem(A, second.item.id, ready.id);             // seq 7 + order→ready seq 8
 
       await waitFor(() => received.length >= 8);
       expect(received.map((e) => e.sequenceId)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -546,9 +667,31 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     try {
       // Item created 10 minutes ago (created_at snapshot) → refused.
-      const old = await newOrder(C, fixtureC, [{ menuItemId: fixtureC.itemGrill }], new Date(Date.now() - 10 * 60_000));
+      // Audit F-B: the engine no longer accepts caller time, so the age is
+      // simulated by SQL time-travel (the P2 coupon-race precedent: create
+      // live, then move the timestamp), not by a passed occurredAt.
+      const old = await newOrder(C, fixtureC, [{ menuItemId: fixtureC.itemGrill }]);
       const oldItem = old.items[0];
       if (oldItem === undefined) throw new Error('Expected one order item');
+      // created_at is purchase evidence guarded by trg_guard_order_item_writes
+      // (even the owner cannot UPDATE it), so the age is simulated with a
+      // SESSION-LOCAL trigger bypass: SET LOCAL inside one owner transaction
+      // touches no global trigger state, so concurrent files asserting the
+      // guard (e.g. phase8 split_group_id) can never flake.
+      const timeTravel = await owner.connect();
+      try {
+        await timeTravel.query('BEGIN');
+        try {
+          await timeTravel.query("SET LOCAL session_replication_role = 'replica'");
+          await timeTravel.query("UPDATE order_items SET created_at = now() - interval '10 minutes' WHERE id = $1 AND tenant_id = $2", [oldItem.item.id, C]);
+          await timeTravel.query('COMMIT');
+        } catch (error) {
+          await timeTravel.query('ROLLBACK');
+          throw error;
+        }
+      } finally {
+        timeTravel.release();
+      }
       await expect(voids.voidOrderItem(C, actor(manager), { orderItemId: oldItem.item.id, voidReasonId: reason }))
         .rejects.toBeInstanceOf(VoidTimeLimitExceededError);
 
@@ -565,6 +708,59 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       // the settings table (a tenant clears the limit by UPDATE, not DELETE).
       await owner.query('DELETE FROM tenant_void_settings WHERE tenant_id = $1', [C]);
     }
+  });
+
+  it('F-B/a caller-supplied order occurredAt (past or future) is ignored: the server clock stamps the order, items, and events', async () => {
+    for (const occurredAt of [new Date('2020-01-01T00:00:00.000Z'), new Date('2031-01-01T00:00:00.000Z')]) {
+      const before = Date.now();
+      const created = await creation.create(A, {
+        branchId: fixture.branchId,
+        cashierUserId: await ensureShiftCashier(A, fixture.branchId),
+        orderType: 'dine_in',
+        salesChannelCode: 'dine_in',
+        deliveryPlatformId: null,
+        tableId: null,
+        items: [{ menuItemId: fixture.itemGrill, quantity: 1 }],
+        occurredAt,
+      });
+      const after = Date.now();
+      const item = created.items[0];
+      if (item === undefined) throw new Error('Expected one order item');
+      // placed_at, the item created_at, and the initial status event all
+      // land inside the server execution window — never near the supplied
+      // extreme (years away).
+      for (const stamped of [created.order.placedAt, item.item.createdAt]) {
+        expect(stamped.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+        expect(stamped.getTime()).toBeLessThanOrEqual(after + 1_000);
+        expect(Math.abs(stamped.getTime() - occurredAt.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+      }
+      const events = await owner.query<{ occurred_at: Date }>(
+        'SELECT occurred_at FROM order_item_status_events WHERE order_item_id = $1 ORDER BY occurred_at', [item.item.id]);
+      expect(events.rows).toHaveLength(1);
+      const eventAt = events.rows[0]?.occurred_at.getTime();
+      if (eventAt === undefined) throw new Error('Expected the initial status event');
+      expect(eventAt).toBeGreaterThanOrEqual(before - 1_000);
+      expect(eventAt).toBeLessThanOrEqual(after + 1_000);
+      expect(Math.abs(eventAt - occurredAt.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+    }
+  });
+
+  it('F-B/a caller-supplied transition occurredAt is ignored: the status event keeps server time', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const before = Date.now();
+    const mover = await transitionUser(A);
+    await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id, occurredAt: new Date('2020-05-05T05:05:05.000Z'),
+      actorUserId: mover.userId, tokenSecV: mover.tokenSecV,
+    });
+    const after = Date.now();
+    const latest = await owner.query<{ occurred_at: Date }>(
+      'SELECT occurred_at FROM order_item_status_events WHERE order_item_id = $1 ORDER BY occurred_at DESC LIMIT 1', [item.item.id]);
+    const at = row(latest.rows).occurred_at.getTime();
+    expect(at).toBeGreaterThanOrEqual(before - 1_000);
+    expect(at).toBeLessThanOrEqual(after + 1_000);
   });
 
   it('#9 disabling a void reason kind keeps every historical record (disable instead of delete)', async () => {
@@ -646,7 +842,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, item.item.id, state(A, 'preparing').id);
     const record = await voids.voidOrderItem(A, actor(serverUser), { orderItemId: item.item.id, voidReasonId: reasonServer });
     const eventId = row((await owner.query<{ id: string }>('SELECT id FROM order_item_status_events WHERE order_item_id = $1 LIMIT 1', [item.item.id])).rows).id;
 
@@ -671,13 +867,199 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       .rejects.toMatchObject({ code: '55006' });
   });
 
+  // ── Audit F-A: the void tier is branch-covering ─────────────────────────
+  //
+  // A branch-scoped supervisor/manager key must NEVER inflate the tier
+  // outside its own branch: cross-branch, its holder is whatever their
+  // covering grants say (usually a mere server), and a higher-tier reason
+  // demands a live PIN challenge from a manager covering THAT branch.
+
+  it('F-A/a tenant-wide server who manages ONLY branch A voids manager-tier in A freely but must challenge in B', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+
+    // In the managed branch the tier is genuinely manager: no challenge.
+    const created = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const record = await voids.voidOrderItem(A, actor(mixed), { orderItemId: item.item.id, voidReasonId: reasonManager });
+    expect(record.actorPermissionTier).toBe('manager');
+    expect(record.requiredManagerOverride).toBe(false);
+    expect(record.managerUserId).toBeNull();
+
+    // Cross-branch the SAME user is a mere server: a manager-tier reason
+    // demands a live challenge (the F-A hole: this used to void silently).
+    const other = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+    const otherItem = other.items[0];
+    if (otherItem === undefined) throw new Error('Expected one order item');
+    await expect(voids.voidOrderItem(A, actor(mixed), { orderItemId: otherItem.item.id, voidReasonId: reasonManager }))
+      .rejects.toBeInstanceOf(ManagerOverrideRequiredError);
+
+    // The branch-A manager key cannot serve as the branch-B approver either —
+    // not even the user's OWN key for the other branch (rejected BEFORE any
+    // PIN is consumed, so no lockout/attempt side effects either).
+    await expect(voids.voidOrderItem(A, actor(mixed), {
+      orderItemId: otherItem.item.id, voidReasonId: reasonManager,
+      managerOverride: { managerUserId: mixed.userId, managerOverridePin: mixed.pin },
+    })).rejects.toBeInstanceOf(ManagerOverrideAuthenticationError);
+
+    // But a live manager OF BRANCH B approves normally.
+    const branchBManager = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchB.branchId },
+    ]);
+    const challenged = await voids.voidOrderItem(A, actor(mixed), {
+      orderItemId: otherItem.item.id, voidReasonId: reasonManager,
+      managerOverride: { managerUserId: branchBManager.userId, managerOverridePin: branchBManager.pin },
+    });
+    expect(challenged.requiredManagerOverride).toBe(true);
+    expect(challenged.managerUserId).toBe(branchBManager.userId);
+    expect(challenged.overrideAuthenticatedAt).not.toBeNull();
+  });
+
+  it('F-A/the supervisor rung is branch-covering too (supervisor-tier reason)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const reasonSupervisor = await createVoidReason(A, 'order_error', 'shift_supervisor');
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:shift_supervisor'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+
+    const inA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const itemA = inA.items[0];
+    if (itemA === undefined) throw new Error('Expected one order item');
+    const record = await voids.voidOrderItem(A, actor(mixed), { orderItemId: itemA.item.id, voidReasonId: reasonSupervisor });
+    expect(record.actorPermissionTier).toBe('shift_supervisor');
+    expect(record.requiredManagerOverride).toBe(false);
+
+    const inB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+    const itemB = inB.items[0];
+    if (itemB === undefined) throw new Error('Expected one order item');
+    await expect(voids.voidOrderItem(A, actor(mixed), { orderItemId: itemB.item.id, voidReasonId: reasonSupervisor }))
+      .rejects.toBeInstanceOf(ManagerOverrideRequiredError);
+  });
+
+  it('F-A/tenant-wide managers are unaffected (regression: both branches, no challenge)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const manager = await createTieredUser(A, 'manager');
+    for (const f of [branchA, branchB]) {
+      const created = await newOrder(A, f, [{ menuItemId: f.itemGrill }]);
+      const item = created.items[0];
+      if (item === undefined) throw new Error('Expected one order item');
+      const record = await voids.voidOrderItem(A, actor(manager), { orderItemId: item.item.id, voidReasonId: reasonManager });
+      expect(record.actorPermissionTier).toBe('manager');
+      expect(record.requiredManagerOverride).toBe(false);
+    }
+  });
+
+  it('F-A/trigger backstop: a forged no-override row above the actor covering tier is refused (42501)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const mixed = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const created = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    // Forge the pre-fix lie directly at the database level: a server-covering
+    // actor, a manager-tier reason, no override recorded.
+    const forged = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'manager', $4, false, 'open')`,
+      [A, created.order.id, mixed.userId, reasonManager],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forged?.code).toBe('42501');
+    expect(forged?.message ?? '').toContain('void actor lacks a branch-covering void permission');
+  });
+
+  it('F-A/trigger backstop: an override recorded for a non-covering manager, or laundering a keyless actor, is refused (42501)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchAManager = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:manager'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const created = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    // (a) The recorded manager holds NO covering order:void:manager for the
+    //     order's branch (a branch-A manager against a branch-B order).
+    const forgedManager = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, true, $5, now(), 'open')`,
+      [A, created.order.id, serverUser.userId, reasonManager, branchAManager.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forgedManager?.code).toBe('42501');
+    expect(forgedManager?.message ?? '').toContain('active tenant permission order:void:manager is required');
+
+    // (b) Even with a genuinely covering manager, the override cannot launder
+    //     an actor who holds no covering base key at all.
+    const keylessId = randomUUID();
+    await withApp(A, (q) => q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
+      [keylessId, A, `${keylessId}@example.test`, hashPin(PIN_PEPPER, A, keylessId, '9999')]));
+    const forgedActor = await withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, true, $5, now(), 'open')`,
+      [A, created.order.id, keylessId, reasonManager, managerUser.userId],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forgedActor?.code).toBe('42501');
+    expect(forgedActor?.message ?? '').toContain('void actor must hold the order:void permission covering the order branch');
+  });
+
+  it('F-A/trigger backstop: a disabled reason is refused at INSERT even with full covering permission (23514)', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const reason = await createVoidReason(A, 'kitchen_issue', 'server');
+    const forgedVoid = () => withApp(A, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+                                required_manager_override, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'manager', $4, false, 'open')`,
+      [A, created.order.id, managerUser.userId, reason],
+    )).then(() => null, (error: unknown) => error) as Promise<{ code?: string; message?: string } | null>;
+
+    // (a) Row-level switch off.
+    await withApp(A, (q) => q.query('UPDATE tenant_void_reasons SET is_enabled = false WHERE id = $1', [reason]));
+    const rowDisabled = await forgedVoid();
+    expect(rowDisabled?.code).toBe('23514');
+    expect(rowDisabled?.message ?? '').toContain('void reason must be an enabled reason of the same tenant');
+
+    // (b) Kind-level switch off (row back on) — 'kitchen_issue' is unused
+    //     elsewhere in this file, and the switch is restored afterwards.
+    await withApp(A, (q) => q.query('UPDATE tenant_void_reasons SET is_enabled = true WHERE id = $1', [reason]));
+    try {
+      await withApp(A, (q) => q.query(
+        `INSERT INTO tenant_void_reason_kind_settings (tenant_id, void_reason_kind_code, is_enabled)
+         VALUES ($1, 'kitchen_issue', false)
+         ON CONFLICT (tenant_id, void_reason_kind_code) DO UPDATE SET is_enabled = false`,
+        [A],
+      ));
+      const kindDisabled = await forgedVoid();
+      expect(kindDisabled?.code).toBe('23514');
+      expect(kindDisabled?.message ?? '').toContain('void reason must be an enabled reason of the same tenant');
+    } finally {
+      await withApp(A, (q) => q.query(
+        `INSERT INTO tenant_void_reason_kind_settings (tenant_id, void_reason_kind_code, is_enabled)
+         VALUES ($1, 'kitchen_issue', true)
+         ON CONFLICT (tenant_id, void_reason_kind_code) DO UPDATE SET is_enabled = true`,
+        [A],
+      ));
+    }
+  });
+
   // ── The four explicit design additions + resilience contract ────────────
 
   it('#12 side effects are exactly-once per external effect: a partial failure retries ONLY the failed half (claim-then-execute)', async () => {
     const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
-    await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, item.item.id, state(A, 'preparing').id);
     // Event seq 1: item → received (notifies_customer). Event seq 2: item →
     // preparing (fires_kitchen_ticket). Seq 3 is the order event (no flags).
 
@@ -730,10 +1112,11 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     if (item === undefined) throw new Error('Expected one order item');
     const preparing = state(D, 'preparing');
     const ready = state(D, 'ready');
-    await transitions.transitionItem(D, { orderItemId: item.item.id, toWorkflowStateId: preparing.id });
+    await moveItem(D, item.item.id, preparing.id);
+    const adminD = await adminUser(D);
 
     // HARD DELETE: rejected by the application pre-check…
-    await expect(workflowAdmin.deleteState(D, preparing.id)).rejects.toBeInstanceOf(WorkflowStateInUseError);
+    await expect(workflowAdmin.deleteState(D, adminD.userId, adminD.tokenSecV, preparing.id)).rejects.toBeInstanceOf(WorkflowStateInUseError);
     // …and structurally by the FK RESTRICT chain (even for the DB owner;
     // ON DELETE RESTRICT raises SQLSTATE 23001 restrict_violation).
     await expect(owner.query('DELETE FROM tenant_order_workflow_states WHERE id = $1', [preparing.id]))
@@ -741,14 +1124,14 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     // SOFT DISABLE: always allowed — historical rows keep pointing at the
     // state, but no NEW transition may enter or leave it.
-    await workflowAdmin.disableState(D, preparing.id);
+    await workflowAdmin.disableState(D, adminD.userId, adminD.tokenSecV, preparing.id);
     expect((await store.run(D, (s) => s.loadOrder(D, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
-    await expect(transitions.transitionItem(D, { orderItemId: item.item.id, toWorkflowStateId: ready.id }))
+    await expect(moveItem(D, item.item.id, ready.id))
       .rejects.toBeInstanceOf(WorkflowTransitionError);
 
     // REORDER: always allowed — orders reference the state id, never the
     // position, so historical evidence is immune.
-    await workflowAdmin.reorderState(D, ready.id, 15);
+    await workflowAdmin.reorderState(D, adminD.userId, adminD.tokenSecV, ready.id, 15);
     expect((await store.run(D, (s) => s.loadOrder(D, created.order.id)))?.currentStatusKindId).toBe(preparing.id);
     const reordered = await workflowAdmin.listStates(D, false);
     expect(reordered.find((s) => s.id === ready.id)?.position).toBe(15);
@@ -759,10 +1142,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const first = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }, { menuItemId: fixture.itemSalad }]);
     const firstItem = must(first.items[0], 'first order item');
     const secondItem = must(first.items[1], 'second order item');
-    await transitions.transitionItem(A, { orderItemId: firstItem.item.id, toWorkflowStateId: state(A, 'preparing').id });
-    await transitions.transitionItem(A, { orderItemId: secondItem.item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, firstItem.item.id, state(A, 'preparing').id);
+    await moveItem(A, secondItem.item.id, state(A, 'preparing').id);
     const second = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
-    await transitions.transitionItem(A, { orderItemId: must(second.items[0], 'order item').item.id, toWorkflowStateId: state(A, 'preparing').id });
+    await moveItem(A, must(second.items[0], 'order item').item.id, state(A, 'preparing').id);
 
     const branchSequences = await owner.query<{ sequence_id: string }>(
       'SELECT sequence_id FROM order_events_outbox WHERE branch_id = $1 ORDER BY sequence_id',
@@ -834,8 +1217,15 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const item = created.items[0];
     if (item === undefined) throw new Error('Expected one order item');
 
+    // R1: the polling test screen holds a device token minted for this branch.
+    const { plaintextToken: screenToken } = await kdsDevices.issueDeviceToken(A, kdsIssuerId, {
+      branchId: fixture.branchId,
+      label: 'phase7-polling-test-screen',
+    });
     const server = new KdsRealtimeServer({
       readEvents: (tenantId, branchId, after, limit) => kdsEvents.readEvents(tenantId, branchId, after, limit),
+      verifyDeviceToken: (tenantId, branchId, token) => kdsDevices.verifyDeviceToken(tenantId, branchId, token),
+      isTokenHashActive: (tenantId, tokenHash) => kdsDevices.isDeviceTokenActive(tenantId, tokenHash),
       disableWebSocket: true,
     });
     const port = await server.start();
@@ -844,6 +1234,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       baseUrl: `http://127.0.0.1:${port}`,
       tenantId: A,
       branchId: fixture.branchId,
+      deviceToken: screenToken,
       onEvent: (event) => received.push(event),
       maxWebSocketRetries: 1,
       reconnectBaseDelayMs: 20,
@@ -855,7 +1246,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
       expect(received.map((e) => e.sequenceId)).toEqual([1]);
 
       // New events still arrive through the polling fallback.
-      await transitions.transitionItem(A, { orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id });
+      await moveItem(A, item.item.id, state(A, 'preparing').id);
       await waitFor(() => received.length >= 3);
       expect(received.map((e) => e.sequenceId)).toEqual([1, 2, 3]);
       expect(client.lastReceivedSequenceId).toBe(3);
@@ -891,7 +1282,9 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const stationDom = randomUUID();
     const menuCategoryId = menuCategoryByTenant.get(A);
     if (menuCategoryId === undefined) throw new Error('Missing menu category');
-    const itemTie = (await catalog.createItem(A, {
+    const adminA = catalogAdminByTenant.get(A);
+    if (adminA === undefined) throw new Error('Missing catalog admin');
+    const itemTie = (await catalog.createItem(A, adminA, {
       categoryId: menuCategoryId, name: { ar: 'عنصر التعادل' }, basePrice: money(1200n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
 
@@ -933,5 +1326,210 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     const second = await routing.route(A, fixture.branchId, context);
     expect(second.stationId).toBe(expectedWinner.station_id);
     expect(second.ruleId).toBe(expectedWinner.id);
+  });
+
+  // ── B10: cross-currency lines are rejected, never converted ──────────────
+
+  async function createUsdItem(): Promise<string> {
+    const menuCategoryId = menuCategoryByTenant.get(A);
+    const adminId = catalogAdminByTenant.get(A);
+    if (menuCategoryId === undefined || adminId === undefined) throw new Error('Missing phase7 catalog fixture');
+    const item = (await catalog.createItem(A, adminId, {
+      categoryId: menuCategoryId, name: { ar: 'صنف دولار' }, basePrice: money(1000n, currencyCode('USD')), taxRuleId: saCategory.id,
+    })).id;
+    await withApp(A, (q) => q.query(
+      'INSERT INTO station_routing_rules (id, tenant_id, branch_id, station_id, menu_item_id) VALUES ($1, $2, $3, $4, $5)',
+      [randomUUID(), A, fixture.branchId, fixture.stationGrill, item],
+    ));
+    return item;
+  }
+
+  async function countOrders(): Promise<number> {
+    const result = await owner.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM orders WHERE tenant_id = $1', [A]);
+    const row = result.rows[0];
+    if (row === undefined) throw new Error('Expected order count');
+    return Number(row.count);
+  }
+
+  it('B10a/ a USD-priced line at a SAR branch is rejected and writes nothing (no silent mispricing)', async () => {
+    const usdItem = await createUsdItem();
+    const before = await countOrders();
+    const failure = await newOrder(A, fixture, [{ menuItemId: usdItem }]).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ValidationError);
+    expect((failure as ValidationError).message).toMatch(/USD/);
+    expect((failure as ValidationError).message).toMatch(/SAR/);
+    expect(await countOrders()).toBe(before);
+  });
+
+  it('B10b/ an explicit unitPriceMinor is branch-currency by contract and bypasses the menu price', async () => {
+    const usdItem = await createUsdItem();
+    const cashierUserId = await ensureShiftCashier(A, fixture.branchId);
+    const created = await creation.create(A, {
+      branchId: fixture.branchId,
+      cashierUserId,
+      orderType: 'dine_in',
+      salesChannelCode: 'dine_in',
+      deliveryPlatformId: null,
+      tableId: null,
+      items: [{ menuItemId: usdItem, quantity: 1, unitPriceMinor: 5000n }],
+      occurredAt: new Date(),
+    });
+    const line = created.items[0];
+    if (line === undefined) throw new Error('Expected one order item');
+    expect(line.item.unitPriceMinor).toBe(5000n);
+  });
+
+  // ── B9-a: order-level double void ────────────────────────────────────────
+
+  it('B9a/ voiding an already fully-voided order is rejected (no second void record, no duplicate order.voided event)', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const first = await voids.voidOrder(A, actor(serverUser), { orderId: created.order.id, voidReasonId: reasonServer });
+    expect(first.orderId).toBe(created.order.id);
+    expect(first.orderItemId).toBeNull();
+
+    const second = await voids.voidOrder(A, actor(serverUser), { orderId: created.order.id, voidReasonId: reasonServer }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(second).toBeInstanceOf(ValidationError);
+    expect((second as ValidationError).message).toMatch(/already fully voided/);
+
+    // Exactly one order_voids row and exactly one order.voided outbox event.
+    const voidRows = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_voids WHERE tenant_id = $1 AND order_id = $2 AND order_item_id IS NULL',
+      [A, created.order.id],
+    );
+    expect(Number(row(voidRows.rows).count)).toBe(1);
+    const voidedEvents = await owner.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM order_events_outbox
+        WHERE tenant_id = $1 AND event_type = 'order.voided' AND payload ->> 'order_id' = $2`,
+      [A, created.order.id],
+    );
+    expect(Number(row(voidedEvents.rows).count)).toBe(1);
+  });
+
+  // ── B11: terminal 'voided' payment status ────────────────────────────────
+
+  async function paymentStatusOf(orderId: string): Promise<string> {
+    const result = await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2',
+      [orderId, A],
+    );
+    return row(result.rows).payment_status;
+  }
+
+  it('B11a/ a full order void flips payment_status to voided; a partial item void leaves it open', async () => {
+    // Full order void ⇒ 'voided'.
+    const full = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    await voids.voidOrder(A, actor(serverUser), { orderId: full.order.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(full.order.id)).toBe('voided');
+
+    // Partial item void ⇒ still 'open' (the order lives on).
+    const partial = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }, { menuItemId: fixture.itemSalad }]);
+    const itemA = partial.items[0];
+    if (itemA === undefined) throw new Error('Expected first order item');
+    await voids.voidOrderItem(A, actor(serverUser), { orderItemId: itemA.item.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(partial.order.id)).toBe('open');
+
+    // Voiding the LAST line via the item path ⇒ 'voided' too (uniform rule).
+    const itemB = partial.items[1];
+    if (itemB === undefined) throw new Error('Expected second order item');
+    await voids.voidOrderItem(A, actor(serverUser), { orderItemId: itemB.item.id, voidReasonId: reasonServer });
+    expect(await paymentStatusOf(partial.order.id)).toBe('voided');
+  });
+
+  // ── B9-c: terminal workflow states never block money ─────────────────────
+  // (Permissive BY APPROVED SPEC — pins the semantic; no prod change.)
+
+  it('B9c/ voiding a terminal (delivered) line succeeds — complaint-voids are never blocked', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const delivered = state(A, 'delivered');
+    const moved = await moveItem(A, item.item.id, delivered.id);
+    expect(moved.toWorkflowStateId).toBe(delivered.id);
+    const record = await voids.voidOrderItem(A, actor(serverUser), { orderItemId: item.item.id, voidReasonId: reasonServer });
+    expect(record.orderItemId).toBe(item.item.id);
+    expect(await paymentStatusOf(created.order.id)).toBe('voided');
+  });
+
+  // ── Audit F-D: the workflow gates ──────────────────────────────────────────
+
+  it('F-D/transition keyless actor is rejected and writes no status event', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    // serverUser holds order:void with a FRESH secV — authenticated, but the
+    // transition key is missing → stage-2 denial, before any store call.
+    // (Creation itself writes one event row; the rejected move must add none.)
+    const countEvents = () => owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_item_status_events WHERE tenant_id = $1 AND order_item_id = $2', [A, item.item.id]);
+    const before = Number(row((await countEvents()).rows).count);
+    const failure = await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id,
+      actorUserId: serverUser.userId, tokenSecV: serverUser.tokenSecV,
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ForbiddenError);
+    expect((failure as ForbiddenError).message).toBe('missing permission order:item:transition');
+    expect(Number(row((await countEvents()).rows).count)).toBe(before);
+  });
+
+  it('F-D/transition granted actor moves the item and the event carries the authorized actor', async () => {
+    const created = await newOrder(A, fixture, [{ menuItemId: fixture.itemGrill }]);
+    const item = created.items[0];
+    if (item === undefined) throw new Error('Expected one order item');
+    const mover = await transitionUser(A);
+    const moved = await transitions.transitionItem(A, {
+      orderItemId: item.item.id, toWorkflowStateId: state(A, 'preparing').id,
+      actorUserId: mover.userId, tokenSecV: mover.tokenSecV,
+    });
+    expect(moved.toWorkflowStateId).toBe(state(A, 'preparing').id);
+    const events = await owner.query<{ actor_user_id: string | null }>(
+      'SELECT actor_user_id FROM order_item_status_events WHERE tenant_id = $1 AND order_item_id = $2 ORDER BY occurred_at DESC LIMIT 1', [A, item.item.id]);
+    expect(row(events.rows).actor_user_id).toBe(mover.userId);
+  });
+
+  it('F-D/workflow-admin keyless actor is rejected on all five mutations — bogus inputs prove the check runs first', async () => {
+    // Every input below is deliberately INVALID (unknown kind / unknown state
+    // id): a ForbiddenError — not ValidationError/NotFoundError — proves the
+    // gate runs before any validation or store read.
+    const bogusStateId = randomUUID();
+    const keyless = { userId: serverUser.userId, tokenSecV: serverUser.tokenSecV };
+    await expect(workflowAdmin.addState(A, keyless.userId, keyless.tokenSecV,
+      { kindCode: 'bogus-kind', parentKindCode: null, position: 1, label: { ar: 'x' } }))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.disableState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.enableState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.reorderState(A, keyless.userId, keyless.tokenSecV, bogusStateId, 99))
+      .rejects.toThrow('missing permission order:workflow:admin');
+    await expect(workflowAdmin.deleteState(A, keyless.userId, keyless.tokenSecV, bogusStateId))
+      .rejects.toThrow('missing permission order:workflow:admin');
+  });
+
+  it('F-D/workflow-admin granted actor runs the full state lifecycle with zero residue', async () => {
+    // Tenant C: nothing else asserts on its workflow, and the lifecycle ends
+    // with a delete — net mutation zero.
+    const admin = await adminUser(C);
+    const states = () => workflowAdmin.listStates(C, false);
+    const before = await states();
+
+    const addedId = await workflowAdmin.addState(C, admin.userId, admin.tokenSecV,
+      { kindCode: 'preparing', parentKindCode: 'preparing', position: 99, label: { ar: 'حالة ف-D' } });
+    expect((await states()).some((s) => s.id === addedId)).toBe(true);
+
+    await workflowAdmin.reorderState(C, admin.userId, admin.tokenSecV, addedId, 100);
+    expect((await states()).find((s) => s.id === addedId)?.position).toBe(100);
+
+    await workflowAdmin.disableState(C, admin.userId, admin.tokenSecV, addedId);
+    expect((await states()).find((s) => s.id === addedId)?.isEnabled).toBe(false);
+
+    await workflowAdmin.enableState(C, admin.userId, admin.tokenSecV, addedId);
+    expect((await states()).find((s) => s.id === addedId)?.isEnabled).toBe(true);
+
+    await workflowAdmin.deleteState(C, admin.userId, admin.tokenSecV, addedId);
+    const after = await states();
+    expect(after.map((s) => s.id).sort()).toEqual(before.map((s) => s.id).sort());
   });
 });

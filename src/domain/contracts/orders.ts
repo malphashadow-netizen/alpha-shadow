@@ -21,10 +21,20 @@
  *   * A manager override is a LIVE PIN challenge at void time — never a name.
  */
 import type { LocalizedText } from './catalog.ts';
+import type {
+  ClaimStockOverrideInput,
+  InsertStockMovementInput,
+  InventoryItemRecord,
+  RecipeOwnerRef,
+  RecipeRequirementLine,
+  RestorationKey,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+} from './inventory.ts';
 import type { TaxResolution } from './tax.ts';
 
 export type OrderType = 'dine_in' | 'takeaway' | 'delivery';
-export type OrderPaymentStatus = 'open' | 'paid' | 'refund_pending' | 'refunded';
+export type OrderPaymentStatus = 'open' | 'paid' | 'refund_pending' | 'refunded' | 'voided';
 export type VoidPermissionTier = 'server' | 'shift_supervisor' | 'manager';
 
 /** The graded void permission ladder (atomic keys in permissions_registry). */
@@ -190,7 +200,12 @@ export interface OrderItemModifierSnapshot {
 export interface NewOrderItemLine {
   readonly menuItemId: string;
   readonly quantity: number;
-  /** Defaults to the menu item's current base price when omitted. */
+  /**
+   * Explicit branch-currency price (B10): denominated in the ORDER BRANCH's
+   * base currency, never the menu item's. Defaults to the menu item's
+   * current base price when omitted (which must then match the branch
+   * currency — cross-currency lines are rejected, never converted).
+   */
   readonly unitPriceMinor?: bigint;
   readonly modifiers?: readonly OrderItemModifierSnapshot[];
   /** Optional light check-split tag (frozen with the rest of the evidence). */
@@ -212,7 +227,22 @@ export interface NewOrderInput {
   /** Display only: how many people the check is split across (no sub-invoices). */
   readonly splitPeopleCount?: number | null;
   readonly items: readonly NewOrderItemLine[];
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock (`new Date()` in the
+   * creation engine) is the sole source of event time — any caller-supplied
+   * value, past or future, has no effect on placed_at, item created_at,
+   * status events, tax pricing, or stock movements. Kept only so existing
+   * callers compile.
+   */
   readonly occurredAt?: Date;
+  /**
+   * Optional creation-time stock override (Phase 9): when the order would
+   * drive any component below zero, the approving manager's live PIN
+   * challenge authorizes this single order (context 'stock_override'). The
+   * challenge commits its own transaction BEFORE the write transaction
+   * starts, and is bound to the order via a single-use claim.
+   */
+  readonly managerOverride?: ManagerOverrideChallenge;
 }
 
 export interface CreatedOrderItem {
@@ -230,7 +260,23 @@ export interface CreatedOrder {
 export interface ItemStatusTransitionInput {
   readonly orderItemId: string;
   readonly toWorkflowStateId: string;
-  readonly actorUserId?: string;
+  /**
+   * Audit F-D: REQUIRED. The human actor is the authorization subject of
+   * every transition — `order:item:transition` is checked FIRST, before any
+   * store call. Optional-before was the hole (audit-only, never gated).
+   */
+  readonly actorUserId: string;
+  /**
+   * Audit F-D: REQUIRED. Freshness proof for the actor's role assignment
+   * (stage 1 of the check). A stale token fails closed — the transition is
+   * rejected even when the actor holds the key.
+   */
+  readonly tokenSecV: string;
+  /**
+   * @deprecated Audit F-B: IGNORED. The server clock stamps every status
+   * transition — any caller-supplied value, past or future, has no effect.
+   * Kept only so existing callers compile.
+   */
   readonly occurredAt?: Date;
 }
 
@@ -288,20 +334,28 @@ export interface VoidActor {
  * A locked challenge (either shape) fails with ManagerOverrideRateLimitedError
  * carrying a client-safe retryAfterSeconds.
  *
- * Context (Phase 8): every attempt records its business context ('void' |
- * 'discount') so EVIDENCE is context-scoped — but the RATE LIMITING above is
- * deliberately NOT: the counters stay shared across all contexts per manager
- * and per initiating actor, otherwise an active lock could be bypassed by
- * simply alternating between Void and Discount challenges.
+ * Context (Phase 8, extended in Phase 9): every attempt records its business
+ * context ('void' | 'discount' | 'stock_override') so EVIDENCE is
+ * context-scoped — but the RATE LIMITING above is deliberately NOT: the
+ * counters stay shared across all contexts per manager and per initiating
+ * actor, otherwise an active lock could be bypassed by simply alternating
+ * between challenge contexts.
  */
 /**
  * The business context a manager-override challenge is issued for. Every
  * attempt row on the Phase-7b ledger records its context, so override
  * evidence can never cross contexts: a successful 'void' challenge does not
- * authorize a discount, and a successful 'discount' challenge does not
- * authorize a void.
+ * authorize a discount, a successful 'discount' challenge does not authorize
+ * a void, and only a 'stock_override' challenge authorizes a sale into
+ * shortage (bound to exactly one order via a single-use claim).
  */
-export type ManagerOverrideContextType = 'void' | 'discount';
+export type ManagerOverrideContextType = 'void' | 'discount' | 'stock_override';
+
+/** A verified challenge PLUS the attempt row id (for single-use claim binding). */
+export interface VerifiedManagerOverride {
+  readonly authenticatedAt: Date;
+  readonly attemptId: string;
+}
 
 export interface ManagerOverrideAuthenticator {
   verifyLiveChallenge(
@@ -314,6 +368,19 @@ export interface ManagerOverrideAuthenticator {
     /** Optional order link, recorded on the attempt ledger when provided. */
     orderId?: string,
   ): Promise<Date>;
+  /**
+   * Phase 9: the IDENTICAL challenge transaction (same rate limiting, same
+   * errors) that additionally returns the attempt id, so the caller binds
+   * its evidence to the exact attempt it just verified — never a lookup.
+   */
+  verifyLiveChallengeWithId(
+    tenantId: string,
+    managerUserId: string,
+    managerOverridePin: string,
+    initiatingActorUserId: string,
+    contextType: ManagerOverrideContextType,
+    orderId?: string,
+  ): Promise<VerifiedManagerOverride>;
 }
 
 // ── Side effects (claim-then-execute) ───────────────────────────────────────
@@ -342,9 +409,24 @@ export interface OrdersTxScope {
   // Workflow configuration + reads.
   loadWorkflowStates(tenantId: string, enabledOnly: boolean): Promise<readonly TenantWorkflowState[]>;
   loadOrder(tenantId: string, orderId: string): Promise<OrderRecord | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on the orders row — the FIRST statement of every
+   * order-mutating transaction (uniform lock order: orders →
+   * shift_reconciliations). Under REPEATABLE READ the lock alone is not
+   * enough (the waiter's snapshot stays stale), so every locker also calls
+   * bumpOrderRevision: exactly one concurrent mutation wins, the loser gets a
+   * 40001 serialization failure (retryable: ConcurrencyRetryableError → 503).
+   */
+  lockOrder(tenantId: string, orderId: string): Promise<OrderRecord | null>;
+  /**
+   * B2: UPDATE orders SET revision = revision + 1 — the conflict generator
+   * that makes the order lock decisive under REPEATABLE READ. Called
+   * immediately after lockOrder, before any decision read.
+   */
+  bumpOrderRevision(tenantId: string, orderId: string): Promise<void>;
   loadOrderItem(tenantId: string, orderItemId: string): Promise<OrderItemRecord | null>;
   loadActiveOrderItems(tenantId: string, orderId: string): Promise<readonly OrderItemRecord[]>;
-  loadMenuItem(tenantId: string, menuItemId: string): Promise<{ id: string; name: LocalizedText; basePriceMinor: bigint; isActive: boolean } | null>;
+  loadMenuItem(tenantId: string, menuItemId: string): Promise<{ id: string; name: LocalizedText; basePriceMinor: bigint; basePriceCurrencyCode: string; isActive: boolean } | null>;
   loadOrderStatusKindFlags(kindCode: string): Promise<OrderBehaviorFlags>;
   loadBranch(tenantId: string, branchId: string): Promise<{ id: string; baseCurrencyCode: string; isActive: boolean } | null>;
 
@@ -365,7 +447,14 @@ export interface OrdersTxScope {
   /** The Phase-8 shift gateway probe: the cashier's standing OPEN shift at the branch, or null. */
   findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<{ id: string } | null>;
   insertInitialStatusEvent(tenantId: string, orderItemId: string, orderId: string, toWorkflowStateId: string, occurredAt: Date): Promise<void>;
-  resolveLineTax(tenantId: string, input: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }): Promise<TaxResolution>;
+  /**
+   * B4: the complete-invoice tax call — ONE call per order carrying EVERY
+   * line, resolved via resolveInvoiceAndSnapshot in this same transaction.
+   * Per-line resolution cannot serve invoice_total jurisdictions (the rounded
+   * unit is the invoice sum, not the line), so creation never resolves lines
+   * in isolation. Returns the per-line resolutions keyed by orderLineId.
+   */
+  resolveInvoiceTax(tenantId: string, inputs: readonly { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }[]): Promise<ReadonlyMap<string, TaxResolution>>;
 
   // Transitions.
   insertStatusEvent(tenantId: string, input: { orderItemId: string; orderId: string; fromWorkflowStateId: string | null; toWorkflowStateId: string; actorUserId: string | null; occurredAt: Date }): Promise<void>;
@@ -380,12 +469,44 @@ export interface OrdersTxScope {
   // Void support.
   loadVoidReason(tenantId: string, voidReasonId: string): Promise<{ id: string; requiredPermissionTier: VoidPermissionTier; isEnabled: boolean; kindCode: string; kindSettingEnabled: boolean } | null>;
   loadVoidTimeLimitMinutes(tenantId: string): Promise<number | null>;
-  resolveVoidPermissionTier(tenantId: string, userId: string): Promise<VoidPermissionTier | null>;
+  /**
+   * Resolves the highest void tier the user holds through grants that COVER
+   * `branchId`: tenant-wide grants, or branch-scoped grants for exactly this
+   * branch. Branch-scoped grants for any OTHER branch are ignored entirely —
+   * they must never inflate the resolved tier (audit F-A). `branchId` is
+   * required and must be non-empty (orders always carry a branch).
+   */
+  resolveVoidPermissionTier(tenantId: string, userId: string, branchId: string): Promise<VoidPermissionTier | null>;
   userIsActiveMember(tenantId: string, userId: string): Promise<boolean>;
   appendEvent(tenantId: string, branchId: string, eventType: OrderEventType, payload: Readonly<Record<string, unknown>>): Promise<number>;
   markOrderItemsVoided(tenantId: string, orderItemIds: readonly string[]): Promise<void>;
+  /** B11: direct payment-status write (order void → 'voided'); the lifecycle recompute owns all other transitions. */
+  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;
   recomputeOrderStatus(tenantId: string, orderId: string): Promise<string | null>;
   insertOrderVoid(tenantId: string, record: { id: string; orderId: string; orderItemId: string | null; actorUserId: string; actorPermissionTier: VoidPermissionTier; voidReasonId: string; requiredManagerOverride: boolean; managerUserId: string | null; overrideAuthenticatedAt: Date | null; orderPaymentStatusAtVoidTime: OrderPaymentStatus; notes: string | null }): Promise<OrderVoidAuditRecord>;
+
+  // Stock ledger (Phase 9).
+  /** Single read over the recipe_ingredients view for the given owners. */
+  loadRecipeRequirements(tenantId: string, owners: readonly RecipeOwnerRef[]): Promise<readonly RecipeRequirementLine[]>;
+  /** Branch-scoped component rows for availability math. */
+  loadInventoryItems(tenantId: string, branchId: string, inventoryItemIds: readonly string[]): Promise<readonly InventoryItemRecord[]>;
+  /**
+   * Appends ONE movement row. A trigger shortage rejection (23514 + the
+   * 'stock: insufficient quantity' prefix) is mapped to InsufficientStockError.
+   */
+  insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  /** Binds one override attempt to exactly one order (single-use claim). */
+  insertStockOverrideClaim(tenantId: string, claim: ClaimStockOverrideInput): Promise<void>;
+  /** Recorded sale deductions per (order item, component) — restoration mirrors these exactly. */
+  loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
+  /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
+  loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
+  /**
+   * (order item, component) pairs that already carry a void_restoration row
+   * — void-written or written by a prior partial refund. The void path
+   * skips these: the stock is already home.
+   */
+  loadVoidRestorationKeys(tenantId: string, orderItemIds: readonly string[]): Promise<readonly RestorationKey[]>;
 }
 
 export interface OrdersStore {

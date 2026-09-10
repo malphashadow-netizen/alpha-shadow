@@ -56,14 +56,29 @@ export class MissingExchangeRateError extends NotFoundError {
   }
 }
 
-/** Fail closed: missing tax configuration is NEVER an implicit zero rate. */
-export class NoApplicableTaxRateError extends NotFoundError {
-  constructor(readonly taxCategoryId: string, readonly on: string) {
+/**
+ * Fail closed: missing tax configuration is NEVER an implicit zero rate.
+ * R2: a dedicated tax.* code + 409 (NOT 404 — this is no missing resource,
+ * and NOT a retry-now conflict — the tenant's tax setup needs an
+ * admin/accountant in the admin panel). Clients distinguish "needs admin"
+ * from "retry now" mechanically by the code.
+ */
+export class NoApplicableTaxRateError extends DomainError {
+  readonly code = 'tax.no_applicable_rate' as const;
+  constructor(
+    readonly taxCategoryId: string,
+    readonly on: string,
+  ) {
     super(`No applicable tax rate for category ${taxCategoryId} on ${on}`);
   }
 }
-export class NoApplicableTaxLiabilityRuleError extends NotFoundError {
-  constructor(readonly countryCode: string, readonly salesChannel: string, readonly on: string) {
+export class NoApplicableTaxLiabilityRuleError extends DomainError {
+  readonly code = 'tax.no_applicable_liability_rule' as const;
+  constructor(
+    readonly countryCode: string,
+    readonly salesChannel: string,
+    readonly on: string,
+  ) {
     super(`No applicable tax liability rule for ${countryCode}/${salesChannel} on ${on}`);
   }
 }
@@ -103,6 +118,21 @@ export class AuthorizationError extends DomainError {
  */
 export class ForbiddenError extends DomainError {
   readonly code = 'forbidden' as const;
+}
+
+/**
+ * B5: the tenant exists but is not 'active' (suspended, or any future
+ * non-active status — the check is positive on 'active', fail-closed).
+ * Operations surface this as a distinct 403; login/refresh NEVER surface
+ * it (they fold it into the uniform 401 — tenant status must not be
+ * enumerable through authentication).
+ */
+export class TenantSuspendedError extends DomainError {
+  readonly code = 'tenant.suspended' as const;
+
+  constructor(readonly status: string) {
+    super(`Tenant account is not active (status: "${status}")`);
+  }
 }
 
 /** Explicit procedural opt-in is required, independently of VAT registration. */
@@ -160,6 +190,12 @@ export class WorkflowStateInUseError extends ConflictError {
 export class VoidReasonUnavailableError extends ValidationError {
   constructor(readonly voidReasonId: string) {
     super(`Void reason ${voidReasonId} is not enabled for this tenant`);
+  }
+}
+/** I1: the tenant_void_reasons mirror — unknown, disabled, or kind-disabled. */
+export class AdjustmentReasonUnavailableError extends ValidationError {
+  constructor(readonly adjustmentReasonId: string) {
+    super(`Adjustment reason ${adjustmentReasonId} is not enabled for this tenant`);
   }
 }
 
@@ -226,6 +262,29 @@ export class CashierShiftRequiredError extends DomainError {
 }
 
 /**
+ * Phase-9 stock gate: the order would drive a component below zero and
+ * carries no manager-override evidence. The creation engine raises this from
+ * its pre-flight read; the database trigger re-enforces the same gate (23514
+ * + the 'stock: insufficient quantity' prefix) and the orders store maps that
+ * trigger rejection back to this error — the cashier always sees a
+ * meaningful message naming the component and branch, never a raw code.
+ */
+export class InsufficientStockError extends DomainError {
+  readonly code = 'inventory.insufficient_stock' as const;
+  constructor(
+    readonly inventoryItemDisplayName: string,
+    readonly inventoryItemId: string,
+    readonly branchId: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `Insufficient stock of "${inventoryItemDisplayName}" at branch ${branchId}: a manager override is required to sell into shortage`,
+      options,
+    );
+  }
+}
+
+/**
  * Loyalty points are a DELIBERATELY DEFERRED Phase-8 item. The
  * order_discounts mechanism vocabulary reserves 'points' and the stacking
  * sequence reserves the points stage, but no points balance/redemption
@@ -272,6 +331,23 @@ export class DiscountAuthorityMissingError extends ForbiddenError {
 export class CouponUnavailableError extends ValidationError {
   constructor(readonly couponCode: string, readonly reason: string) {
     super(`Coupon ${couponCode} cannot be applied: ${reason}`);
+  }
+}
+
+/**
+ * The coupon was VALID at check time but the write re-validation failed: a
+ * genuine concurrency race (e.g. the expiry boundary crossed between the
+ * engine's JS-clock check and the trigger's DB-clock insert — the coupon row
+ * carries no lock). Semantic split from CouponUnavailableError (400 = "the
+ * input was never valid": unknown code, originally inactive, below minimum):
+ * a check-then-changed conflict is a 409 (ShiftNotOpenError /
+ * WorkflowStateInUseError discipline), safe to retry once the state is
+ * re-read. Raised ONLY from the store's trigger mapping, with the coupon
+ * code in-hand (never parsed from pg text).
+ */
+export class CouponAvailabilityRaceError extends ConflictError {
+  constructor(readonly couponCode: string) {
+    super(`Coupon ${couponCode} cannot be applied: expired between check and write (concurrency race)`);
   }
 }
 
@@ -350,8 +426,43 @@ export class ServiceUnavailableError extends DomainError {
   readonly code = 'service.unavailable' as const;
 }
 
+const PG_CONCURRENCY_MESSAGE = {
+  '40001': 'Transaction serialization conflict — safe to retry',
+  '40P01': 'Transaction deadlock — safe to retry',
+  '55P03': 'Transaction lock wait timed out — safe to retry',
+} as const;
+
+/**
+ * B3: a transaction killed by a PostgreSQL concurrency control — 40001
+ * (serialization failure), 40P01 (deadlock), or 55P03 (lock timeout / NOWAIT).
+ * The transaction was FULLY rolled back and changed nothing, so the client
+ * MUST treat this as "retry the same request" (see
+ * docs/concurrency-and-locking.md for ceilings and backoff guidance).
+ * `pgCode` preserves the SQLSTATE for operators; the message is constructed
+ * (never pg text) so the 503 transport mapping can echo it safely.
+ */
+export class ConcurrencyRetryableError extends DomainError {
+  readonly code = 'concurrency.retryable_conflict' as const;
+
+  constructor(
+    readonly pgCode: '40001' | '40P01' | '55P03',
+    options?: ErrorOptions,
+  ) {
+    super(PG_CONCURRENCY_MESSAGE[pgCode], options);
+  }
+}
+
 export function isDomainError(value: unknown): value is DomainError {
   return value instanceof DomainError;
+}
+
+/**
+ * B3: the client retry predicate. Retry loops MUST branch on this (or the
+ * stable `concurrency.retryable_conflict` code) — never on the pgCode, the
+ * message text, or the HTTP status alone.
+ */
+export function isConcurrencyRetryableError(value: unknown): value is ConcurrencyRetryableError {
+  return value instanceof ConcurrencyRetryableError;
 }
 
 export interface ErrorResponse {
@@ -408,8 +519,12 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // 401 INVALID_CREDENTIALS (see InvalidCredentialsError).
     case 'INVALID_CREDENTIALS':
       return { status: 401, code: error.code, message: 'Invalid credentials' };
+    // B5: suspended (or otherwise non-active) tenant — distinct from both
+    // the unauthenticated 401 and the per-user 403. Never raised by
+    // login/refresh (those fold it into the uniform 401).
     case 'forbidden':
     case 'tenant_isolation.violation':
+    case 'tenant.suspended':
       return { status: 403, code: error.code, message: error.message };
     case 'not_found':
       return { status: 404, code: error.code, message: error.message };
@@ -425,6 +540,17 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     // Phase 8: loyalty points are a deliberately deferred phase — explicit,
     // never a silent zero.
     case 'payments.loyalty_points_deferred':
+      return { status: 409, code: error.code, message: error.message };
+    // Phase 9: the stock gate — a sale into shortage needs a live manager
+    // override (retryable with one); the client-safe message names the
+    // component and branch.
+    case 'inventory.insufficient_stock':
+      return { status: 409, code: error.code, message: error.message };
+    // R2: missing tax configuration — the tenant's setup is incomplete and
+    // needs an admin/accountant (never an implicit zero rate, never a
+    // silent retry-now). Distinct from every other 409 by code.
+    case 'tax.no_applicable_rate':
+    case 'tax.no_applicable_liability_rule':
       return { status: 409, code: error.code, message: error.message };
     case 'rate_limit.exceeded':
       return { status: 429, code: error.code, message: error.message };
@@ -443,11 +569,23 @@ export function toErrorResponse(error: unknown, logSink: ErrorLogSink = defaultE
     case 'service.unavailable':
       logSink(error);
       return { status: 503, code: error.code, message: 'Service temporarily unavailable' };
+    // B3: concurrency-control deaths (40001/40P01/55P03) — the transaction
+    // rolled back cleanly, so the client retries the same request. The
+    // message is constructed (never pg text): safe to echo, and the code is
+    // the machine-readable retry signal. Not log-sinked: an expected
+    // control-flow outcome under contention, like the 409s above.
+    case 'concurrency.retryable_conflict':
+      return { status: 503, code: error.code, message: error.message };
     case 'config.invalid':
       // 500-class: never echo the detailed message; log it server-side only.
       logSink(error);
       return { status: 500, code: error.code, message: INTERNAL_ERROR_MESSAGE };
     default:
+      // تم التحقق يدويًا (2026-09-09) من عدم وجود أي مسار في المشروع يسرّب
+      // رمز PostgreSQL الخام (مثل 23514) كاستجابة HTTP بلا تصنيف — كل خطأ
+      // غير مصنَّف يسقط هنا بأمان. الاختبار في
+      // test/unit/shared/errors.test.ts ('pins the default contract') يقفل
+      // هذا العقد ضد أي انحراف مستقبلي في هذا الـchoke point الحساس.
       // Exhaustive over the current hierarchy: new codes must be added here,
       // and every unknown code is treated as 500-class (no detail leakage).
       logSink(error);

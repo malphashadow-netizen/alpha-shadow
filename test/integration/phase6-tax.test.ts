@@ -21,7 +21,7 @@ import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/
 import { PostgresTaxSnapshotReader } from '../../src/infrastructure/db/repositories/postgres-tax-snapshot-reader.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
-import { ExciseConfirmationRequiredError, ForbiddenError, InvoiceTaxBatchRequiredError, NoApplicableTaxLiabilityRuleError, NoApplicableTaxRateError } from '../../src/shared/errors.ts';
+import { ExciseConfirmationRequiredError, ForbiddenError, InvoiceTaxBatchRequiredError, NoApplicableTaxLiabilityRuleError, NoApplicableTaxRateError, toErrorResponse } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
 
@@ -59,8 +59,8 @@ describe('Phase 6 live acceptance', () => {
     platform = new PlatformTaxAdminEngine(new PostgresPlatformTaxAdminRepository(createWithPlatformTaxContext(platformPool)));
     tenantRepo = new PostgresTenantTaxAdminRepository(withApp);
     catalogRepo = new PostgresCatalogRepository({ withTenantContext: withApp });
-    catalog = new CatalogEngine({ catalog: catalogRepo, taxAssignments: tenantRepo });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
+    catalog = new CatalogEngine({ catalog: catalogRepo, taxAssignments: tenantRepo, authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     admin = new TenantTaxAdminEngine({ repository: tenantRepo, authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     reader = new PostgresTaxSnapshotReader(withApp);
 
@@ -97,12 +97,12 @@ describe('Phase 6 live acceptance', () => {
       await q.query("INSERT INTO branches(id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1,$2,'tax-a','SAR','Asia/Riyadh','SA')", [branchA, A]);
       await q.query("INSERT INTO users(id, tenant_id, email, password_hash) VALUES ($1,$2,$3,'test-only-hash')", [userId, A, `${userId}@example.test`]);
       await q.query("INSERT INTO roles(id, tenant_id, name) VALUES ($1,$2,'tax-admin-fixture')", [roleId, A]);
-      for (const key of TAX_PERMISSION_KEYS) await q.query('INSERT INTO role_permissions(tenant_id, role_id, permission_key) VALUES ($1,$2,$3)', [A, roleId, key]);
+      for (const key of [...TAX_PERMISSION_KEYS, 'catalog:write']) await q.query('INSERT INTO role_permissions(tenant_id, role_id, permission_key) VALUES ($1,$2,$3)', [A, roleId, key]);
       await q.query("INSERT INTO user_roles(tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1,$2,$3,'tenant',NULL)", [A, userId, roleId]);
     });
     await withApp(B, async (q) => { await q.query("INSERT INTO branches(id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1,$2,'tax-b','SAR','Asia/Riyadh','SA')", [branchB, B]); });
     actor = { tenantId: A, userId, tokenSecV: deriveSecV(await permissionRead.listActiveUserRoles(A, userId), await permissionRead.getSecurityVersion(A, userId), sha256Hex) };
-    menuCategoryId = (await catalog.createCategory(A, { name: { ar: 'اختبار الضرائب' } })).id;
+    menuCategoryId = (await catalog.createCategory(A, actor.userId, { name: { ar: 'اختبار الضرائب' } })).id;
   });
   afterAll(async () => {
     if (owner !== undefined) {
@@ -120,7 +120,7 @@ describe('Phase 6 live acceptance', () => {
       cascadePriority: priority, name: { en: 'Fixture tax' }, isActive: true });
   }
   async function item(taxId: string | null, currency = 'SAR'): Promise<string> {
-    return (await catalog.createItem(A, { categoryId: menuCategoryId, name: { ar: 'منتج' }, basePrice: money(1000n, currencyCode(currency)), taxRuleId: taxId })).id;
+    return (await catalog.createItem(A, actor.userId, { categoryId: menuCategoryId, name: { ar: 'منتج' }, basePrice: money(1000n, currencyCode(currency)), taxRuleId: taxId })).id;
   }
   function input(menuItemId: string, overrides: Partial<NewTaxableOrderLine> = {}): NewTaxableOrderLine {
     return { branchId: branchA, menuItemId, customerAmountMinor: 1000n, currencyCode: 'SAR', at: AT,
@@ -137,21 +137,42 @@ describe('Phase 6 live acceptance', () => {
     return platform.createTaxRate(PLATFORM_ACTOR, { taxCategoryId: cat.id, rateBps: bps, isPriceInclusiveDefault: inclusive, effectiveFrom: '2020-01-01', effectiveTo: null });
   }
 
+  /** 'YYYY-MM-DD' in the branch timezone, N days before server-now (Riyadh has no DST — exact day arithmetic). */
+  function riyadhDateDaysAgo(days: number): string {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date(Date.now() - days * 86_400_000));
+  }
+
   it('#1 historical rate changes do not alter earlier immutable snapshots; both changes audited', async () => {
     const cat = await category(); const oldRate = await rate(cat, 500); const product = await item(cat.id);
+    // Audit F-B: lines resolve at server-now, so the superseding rate starts
+    // 7 Riyadh-days ago — the second line MUST pick it up while the first
+    // snapshot stays on the old rate (windows relative to now keep this test
+    // deterministic on any run date).
     const first = await orders.createLine(A, input(product));
     const next = await platform.closeAndSupersedeTaxRate(PLATFORM_ACTOR, { taxRateId: oldRate.id, rateBps: 1500,
-      isPriceInclusiveDefault: false, effectiveFrom: '2027-01-01' });
-    const second = await orders.createLine(A, input(product, { at: new Date('2027-01-01T10:00:00Z') }));
+      isPriceInclusiveDefault: false, effectiveFrom: riyadhDateDaysAgo(7) });
+    const second = await orders.createLine(A, input(product));
     expect(await reader.readSnapshots(A, first.orderLineId)).toMatchObject([{ taxRateId: oldRate.id, rateBps: 500, taxAmountMinor: 50n }]);
     expect(await reader.readSnapshots(A, second.orderLineId)).toMatchObject([{ taxRateId: next.id, rateBps: 1500, taxAmountMinor: 150n }]);
     const old = row((await owner.query<{ effective_to: string; superseded_by: string }>('SELECT effective_to::text, superseded_by FROM tax_rates WHERE id = $1', [oldRate.id])).rows);
-    expect(old).toEqual({ effective_to: '2026-12-31', superseded_by: next.id });
+    expect(old).toEqual({ effective_to: riyadhDateDaysAgo(8), superseded_by: next.id });
     const audit = await platformPool.query<{ tenant_id: string | null; scope: string; user_id: string }>("SELECT tenant_id, scope, user_id FROM audit_log WHERE resource = ANY($1::text[])", [[`tax_rates:${oldRate.id}`, `tax_rates:${next.id}`]]);
     expect(audit.rows).toHaveLength(3);
     expect(audit.rows.every((r) => r.scope === 'platform_tax' && r.tenant_id === null && r.user_id === PLATFORM_ACTOR)).toBe(true);
     await expect(withApp(A, async (q) => q.query('UPDATE order_line_tax_snapshots SET tax_amount_minor = 0 WHERE order_line_id = $1', [first.orderLineId]))).rejects.toMatchObject({ code: '42501' });
     await expect(owner.query('UPDATE order_line_tax_snapshots SET tax_amount_minor = 0 WHERE order_line_id = $1', [first.orderLineId])).rejects.toMatchObject({ code: '55006' });
+  });
+
+  it('F-B/a caller-supplied line date is ignored: the server clock selects the rate (no 2020 pricing on a present sale)', async () => {
+    const cat = await category(); const oldRate = await rate(cat, 500); const product = await item(cat.id);
+    const next = await platform.closeAndSupersedeTaxRate(PLATFORM_ACTOR, { taxRateId: oldRate.id, rateBps: 1500,
+      isPriceInclusiveDefault: false, effectiveFrom: riyadhDateDaysAgo(7) });
+    // A caller claiming "this sale happened in 2021" (when only the 500bps
+    // rate existed) must STILL be priced at the current 1500bps rate.
+    const line = await orders.createLine(A, input(product, { at: new Date('2021-06-15T10:00:00Z') }));
+    expect(await reader.readSnapshots(A, line.orderLineId)).toMatchObject([{ taxRateId: next.id, rateBps: 1500, taxAmountMinor: 150n }]);
+    expect(next.id).not.toBe(oldRate.id);
   });
 
   it('#2 PostgreSQL EXCLUDE GIST rejects overlapping and touching closed intervals', async () => {
@@ -204,6 +225,24 @@ describe('Phase 6 live acceptance', () => {
     await expect(orders.createLine(A, input(product))).rejects.toBeInstanceOf(NoApplicableTaxRateError);
     expect((await owner.query('SELECT 1 FROM phase6_test_order_lines WHERE id = $1', [lastWrittenId])).rowCount).toBe(0);
     expect(await reader.readContext(A, lastWrittenId)).toBeNull();
+  });
+
+  // ── R2: missing tax configuration → 409 with a dedicated tax.* code ─────
+
+  it('R2/ a live missing-rate rejection maps to 409 tax.no_applicable_rate (needs admin, not retry-now)', async () => {
+    const product = await item((await category()).id);
+    const failure = await orders.createLine(A, input(product)).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(NoApplicableTaxRateError);
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'tax.no_applicable_rate' });
+  });
+
+  it('R2/ a live missing-liability-rule rejection maps to 409 tax.no_applicable_liability_rule', async () => {
+    const failure = await orders.createLine(A, input(await item(await seedCategory()), { salesChannel: 'delivery_app', deliveryPlatformId: await marketplace() })).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(NoApplicableTaxLiabilityRuleError);
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'tax.no_applicable_liability_rule' });
   });
 
   it('#7 RLS isolates overrides, additional assignments, confirmations, contexts and snapshots', async () => {
@@ -276,7 +315,7 @@ describe('Phase 6 live acceptance', () => {
   });
 
   it('#12 VAT-only, including a product named energy drink, has exactly one VAT row', async () => {
-    const product = await item(await seedCategory()); await catalog.updateItem(A, product, { name: { en: 'Energy drink', ar: 'مشروب غازي' } });
+    const product = await item(await seedCategory()); await catalog.updateItem(A, actor.userId, product, { name: { en: 'Energy drink', ar: 'مشروب غازي' } });
     const result = await orders.createLine(A, input(product));
     const snapshots = await reader.readSnapshots(A, result.orderLineId);
     expect(snapshots).toHaveLength(1); expect(snapshots[0]?.taxFamily).toBe('vat'); expect(result.amountPayableMinor).toBe(1150n);
@@ -285,7 +324,7 @@ describe('Phase 6 live acceptance', () => {
   it('#13 every ordinary catalog/additional/SQL path rejects excise; only explicit admin confirmation can attach it', async () => {
     const product = await item(await seedCategory()); const excise = await seedCategory('SA', 'excise_100');
     await expect(item(excise)).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
-    await expect(catalog.updateItem(A, product, { taxRuleId: excise })).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
+    await expect(catalog.updateItem(A, actor.userId, product, { taxRuleId: excise })).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
     await expect(admin.assignAdditionalCategory(actor, product, excise)).rejects.toBeInstanceOf(ExciseConfirmationRequiredError);
     await expect(withApp(A, async (q) => q.query('UPDATE menu_items SET tax_rule_id = $1 WHERE id = $2', [excise, product]))).rejects.toMatchObject({ code: '42501' });
     await expect(withApp(A, async (q) => q.query('INSERT INTO menu_item_additional_tax_categories VALUES ($1,$2)', [product, excise]))).rejects.toMatchObject({ code: '42501' });
@@ -397,7 +436,7 @@ describe('Phase 6 live acceptance', () => {
   it('confirmed primary excise works; ordinary catalog name edits preserve it without new consent', async () => {
     const vat = await seedCategory(); const excise = await seedCategory('SA', 'excise_100'); const product = await item(vat);
     await admin.confirmExciseAssignment(actor, { menuItemId: product, taxCategoryId: excise, slot: 'primary', confirmation: EXCISE_CONFIRMATION_TEXT });
-    await catalog.updateItem(A, product, { name: { ar: 'اسم جديد' } });
+    await catalog.updateItem(A, actor.userId, product, { name: { ar: 'اسم جديد' } });
     await admin.assignAdditionalCategory(actor, product, vat);
     const result = await orders.createLine(A, input(product));
     expect(result.amountPayableMinor).toBe(2300n);

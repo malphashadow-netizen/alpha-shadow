@@ -28,6 +28,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
 import { VoidModificationEngine } from '../../src/application/engines/orders/void-modification-engine.ts';
 import { WorkflowAdminEngine } from '../../src/application/engines/orders/workflow-admin-engine.ts';
+import { WorkflowTransitionEngine } from '../../src/application/engines/orders/workflow-transition-engine.ts';
 import { DiscountEngine } from '../../src/application/engines/payments/discount-engine.ts';
 import { PaymentMethodsEngine } from '../../src/application/engines/payments/payment-methods-engine.ts';
 import { PaymentsEngine } from '../../src/application/engines/payments/payments-engine.ts';
@@ -50,10 +51,13 @@ import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import {
   CashierShiftRequiredError,
+  CouponAvailabilityRaceError,
   DiscountOverrideRequiredError,
   LoyaltyPointsDeferredError,
   PaymentExceedsBalanceError,
   PaymentReversalRequiredError,
+  ValidationError,
+  toErrorResponse,
 } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -93,6 +97,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   let ordersStore: PostgresOrdersStore;
   let creation: OrderCreationEngine;
   let workflowAdmin: WorkflowAdminEngine;
+  let transitions: WorkflowTransitionEngine;
   let shifts: ShiftEngine;
   let payments: PaymentsEngine;
   let discounts: DiscountEngine;
@@ -121,7 +126,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -138,17 +143,18 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     app = new pg.Pool({ connectionString: appUrl.toString(), max: 5 });
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
     authorization = new AuthorizationEngine({ read: permissionRead, hash: sha256Hex });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
-    creation = new OrderCreationEngine({ store: ordersStore });
-    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
+    transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
-    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }) });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -167,21 +173,24 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       { kindCode: 'ready', position: 30, label: { ar: 'جاهز' } },
       { kindCode: 'delivered', position: 40, label: { ar: 'تم التسليم' } },
     ]);
-    menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة الفحص' } })).id;
-    itemA = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'طبق رئيسي' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-    itemB = (await catalog.createItem(T, {
-      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
-    })).id;
-
-    // People: plain shift identities + tiered permission holders.
-    opener = await createPlainUser('1111');
+    // People: plain shift identities + tiered permission holders. (B7: the
+    // opener carries the shift/catalog/methods keys; every collecting cashier
+    // — the till cashier, cashierUser, noShiftCashier — carries
+    // payments:collect so the gateway assertions below stay meaningful.)
+    opener = await createTieredUser(['shift:open', 'shift:close', 'catalog:write', 'payments:methods_admin'], '1111', null);
     verifier = await createPlainUser('2222');
-    cashierUser = await createPlainUser('3333');
+    cashierUser = await createTieredUser(['payments:collect'], '3333', null);
     discountUser = await createTieredUser(['order:discount:apply'], '4444', { pct: '15.00', fixed: '20.00' });
     overrideManager = await createTieredUser(['order:discount:apply'], '5555', null);
     voidServerUser = await createTieredUser(['order:void'], '9999', null);
+
+    menuCategoryId = (await catalog.createCategory(T, opener.userId, { name: { ar: 'قائمة الفحص' } })).id;
+    itemA = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'طبق رئيسي' }, basePrice: money(2500n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
+    itemB = (await catalog.createItem(T, opener.userId, {
+      categoryId: menuCategoryId, name: { ar: 'مشروب' }, basePrice: money(1500n, currencyCode('SAR')), taxRuleId: saCategory.id,
+    })).id;
     reasonServer = randomUUID();
     await withApp(T, (q) => q.query(
       'INSERT INTO tenant_void_reasons (id, tenant_id, void_reason_kind_code, label, required_permission_tier) VALUES ($1, $2, $3, $4, $5)',
@@ -189,9 +198,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     ));
 
     // Payment methods: domestic cash, card, and USD cash at a fixed 3.75.
-    methodCashId = (await methods.create(T, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodCardId = (await methods.create(T, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodUsdId = (await methods.create(T, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -248,7 +257,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // Fresh cashier per till (one open shift per cashier, ever), holding the
     // reversal permissions: refunds/voids are performed by the till's own
     // senior cashier, standing in their open shift at the order's branch.
-    const tillCashier = await createTieredUser(['payments:refund', 'payments:void'], '3333', null);
+    const tillCashier = await createTieredUser(['payments:refund', 'payments:void', 'payments:collect', 'order:item:transition'], '3333', null);
     await withApp(T, async (q) => {
       await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T, `فرع ${tillCounter}`]);
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
@@ -296,13 +305,13 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
   it('payment methods: foreign currency is cash-only and fully configured (engine + DB CHECKs)', async () => {
     // The engine validates the fx shape up front (fail-closed, no write)…
-    await expect(methods.create(T, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
     // …and the database re-verifies the same shape structurally (fx_shape CHECK),
     // whatever the code path.
@@ -322,10 +331,10 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const before = await owner.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM exchange_rates WHERE tenant_id = $1 AND from_currency = 'EUR'", [T],
     );
-    const method = await methods.create(T, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
-    await methods.update(T, method.id, { fixedExchangeRate: '4.15000000' });
-    await methods.update(T, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
-    await methods.update(T, method.id, { fixedExchangeRate: '4.20000000' });
+    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' });
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
+    await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.20000000' });
     const after = await owner.query<{ rate: string; to_currency: string }>(
       "SELECT e.rate::text AS rate, e.to_currency AS to_currency FROM exchange_rates e WHERE e.tenant_id = $1 AND e.from_currency = 'EUR' ORDER BY e.effective_at, e.rate",
       [T],
@@ -381,9 +390,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // 5×10.00 + 3×50.00 = 200.00 SAR.
     const till = await setupTill([{ denominationValue: '10.00', quantity: 5 }, { denominationValue: '50.00', quantity: 3 }]);
     const shift = await shifts.xReport(T, till.shiftId);
-    expect(shift.shift.startingFloat).toBe('200.00');
+    expect(shift.shift.startingFloat).toBe('200.0000');
     expect(shift.counts.filter((c) => c.countType === 'open')).toHaveLength(2);
-    expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.00', '50.00']);
+    expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.0000', '50.0000']);
 
     // A post-hoc count row that breaks the sum is rejected AT COMMIT (the
     // deferred constraint trigger), whatever the code path.
@@ -421,9 +430,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       closedAt: new Date(), closeCounts: [{ denominationValue: '250.00', quantity: 1 }], notes: 'جرد صحي',
     });
     expect(closed.status).toBe('closed');
-    expect(closed.countedCash).toBe('250.00');
-    expect(closed.recordedCashSales).toBe('46.00');
-    expect(closed.variance).toBe('4.00');
+    expect(closed.countedCash).toBe('250.0000');
+    expect(closed.recordedCashSales).toBe('46.0000');
+    expect(closed.variance).toBe('4.0000');
     expect(closed.varianceType).toBe('overage');
 
     // #5: after the close, the row is immutable — UPDATE and DELETE are rejected.
@@ -437,6 +446,36 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
        VALUES ($1, $2, $3, 'close', 50.00, 1)`,
       [randomUUID(), T, till.shiftId],
     )).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('F-B/caller-supplied shift openedAt/closedAt (past/future) are ignored: the server clock stamps open + close', async () => {
+    const branchId = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query("INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, 'f-b-shift', 'SAR', 'Asia/Riyadh', 'SA')", [branchId, T]);
+    });
+    const cashier = await createTieredUser([], '3333', null);
+    const past = new Date('2020-01-01T00:00:00.000Z');
+    const future = new Date('2031-01-01T00:00:00.000Z');
+    const before = Date.now();
+    const shift = await shifts.openShift(T, {
+      branchId,
+      cashierUserId: cashier.userId,
+      openedByUserId: opener.userId,
+      openVerifiedByUserId: verifier.userId,
+      openedAt: past,
+      openCounts: [],
+    });
+    const closed = await shifts.closeShift(T, {
+      shiftId: shift.id, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
+      closedAt: future, closeCounts: [], notes: null,
+    });
+    const after = Date.now();
+    if (closed.closedAt === null) throw new Error('Expected the shift to be closed');
+    for (const [stamped, supplied] of [[shift.openedAt, past], [closed.closedAt, future]] as const) {
+      expect(stamped.getTime()).toBeGreaterThanOrEqual(before - 1_000);
+      expect(stamped.getTime()).toBeLessThanOrEqual(after + 1_000);
+      expect(Math.abs(stamped.getTime() - supplied.getTime())).toBeGreaterThan(365 * 24 * 3_600_000);
+    }
   });
 
   it('shortage variance and the X-Report read-only contract', async () => {
@@ -453,7 +492,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(x1.shift.status).toBe('open');
     expect(x1.shift.countedCash).toBeNull();
     expect(x1.shift.recordedCashSales).toBeNull();
-    expect(x1.recordedCashSales).toBe('46.00'); // live figure, nothing stored
+    expect(x1.recordedCashSales).toBe('46.0000'); // live figure, nothing stored
     expect(x1.computedVariance).toBe('-146.00'); // live: counted 0 − float 100 − sales 46
     expect(x1.computedVarianceType).toBe('shortage');
     const after = await owner.query<{ sig: string }>(signatureSql, [till.shiftId, T]);
@@ -464,7 +503,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       shiftId: till.shiftId, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
       closedAt: new Date(), closeCounts: [{ denominationValue: '145.00', quantity: 1 }], notes: null,
     });
-    expect(closed.variance).toBe('-1.00');
+    expect(closed.variance).toBe('-1.0000');
     expect(closed.varianceType).toBe('shortage');
   });
 
@@ -478,7 +517,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       await q.query('INSERT INTO stations (id, tenant_id, branch_id, name) VALUES ($1, $2, $3, $4)', [stationId, T, branchId, 'main']);
       await q.query('INSERT INTO station_routing_rules (id, tenant_id, branch_id, station_id, menu_item_id) VALUES ($1, $2, $3, $4, $5)', [randomUUID(), T, branchId, stationId, itemA]);
     });
-    const noShiftCashier = await createPlainUser('8888');
+    const noShiftCashier = await createTieredUser(['payments:collect'], '8888', null);
 
     // No open shift at all ⇒ no new order (fail-closed).
     await expect(creation.create(T, {
@@ -541,9 +580,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '50.00',
     });
     expect(recorded.changeGivenMinor).toBe(400n);
-    expect(recorded.payment.amount).toBe('50.00');
-    expect(recorded.payment.amountInBaseCurrency).toBe('46.00');
-    expect(recorded.payment.changeGivenAmount).toBe('4.00');
+    expect(recorded.payment.amount).toBe('50.0000');
+    expect(recorded.payment.amountInBaseCurrency).toBe('46.0000');
+    expect(recorded.payment.changeGivenAmount).toBe('4.0000');
     expect(recorded.payment.exchangeRateSnapshot).toBeNull();
     expect(recorded.payment.status).toBe('completed');
     expect(recorded.remainingBalanceMinor).toBe(0n);
@@ -564,17 +603,17 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const recorded = await payments.recordPayment(T, {
       orderId: order.order.id, paymentMethodId: methodUsdId, cashierUserId: till.cashierId, amountText: '20.00',
     });
-    expect(recorded.payment.amount).toBe('20.00');
+    expect(recorded.payment.amount).toBe('20.0000');
     expect(recorded.payment.exchangeRateSnapshot).toBe('3.75000000');
-    expect(recorded.payment.amountInBaseCurrency).toBe('46.00');
-    expect(recorded.payment.changeGivenAmount).toBe('29.00');
+    expect(recorded.payment.amountInBaseCurrency).toBe('46.0000');
+    expect(recorded.payment.changeGivenAmount).toBe('29.0000');
     expect(recorded.changeGivenMinor).toBe(2900n);
     expect(recorded.remainingBalanceMinor).toBe(0n);
 
     // #6: the snapshot is frozen forever — even a later rate change on the
     // method never re-values the recorded payment, and any UPDATE of the
     // snapshot (or the amounts) is rejected.
-    await methods.update(T, methodUsdId, { fixedExchangeRate: '3.80000000' });
+    await methods.update(T, opener.userId, methodUsdId, { fixedExchangeRate: '3.80000000' });
     const stored = await owner.query<{ exchange_rate_snapshot: string }>('SELECT exchange_rate_snapshot::text FROM payments WHERE id = $1 AND tenant_id = $2', [recorded.payment.id, T]);
     expect(row(stored.rows).exchange_rate_snapshot).toBe('3.75000000');
 
@@ -774,7 +813,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       managerOverride: { managerUserId: overrideManager.userId, managerOverridePin: overrideManager.pin },
     });
     expect(zeroed.requiredManagerOverride).toBe(true);
-    expect(zeroed.discountAmountApplied).toBe('40.00');
+    expect(zeroed.discountAmountApplied).toBe('40.0000');
     expect(zeroed.managerOverrideAttemptId).not.toBeNull();
     const attempt = await owner.query<{ outcome: string; initiating_actor_user_id: string; order_id: string; context_type: string }>(
       'SELECT outcome, initiating_actor_user_id, order_id, context_type FROM manager_override_attempts WHERE id = $1 AND tenant_id = $2',
@@ -851,7 +890,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order.order.id, mechanism: 'manual', discountKind: 'percentage', discountValueText: '10.0000',
     });
     expect(applied.requiredManagerOverride).toBe(false);
-    expect(applied.discountAmountApplied).toBe('4.00');
+    expect(applied.discountAmountApplied).toBe('4.0000');
     expect(applied.managerOverrideAttemptId).toBeNull();
 
     // The DB re-verifies the caps: a non-escalated row above the cap is refused.
@@ -900,7 +939,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       managerOverride: { managerUserId: overrideManager.userId, managerOverridePin: overrideManager.pin },
     });
     expect(escalated.requiredManagerOverride).toBe(true);
-    expect(escalated.discountAmountApplied).toBe('18.00');
+    expect(escalated.discountAmountApplied).toBe('18.0000');
     expect(escalated.managerOverrideAttemptId).not.toBeNull();
 
     // A fixed 5.00 (12.5% of the basis, inside BOTH caps) never escalates.
@@ -909,7 +948,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       orderId: order2.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '5.0000',
     });
     expect(plain.requiredManagerOverride).toBe(false);
-    expect(plain.discountAmountApplied).toBe('5.00');
+    expect(plain.discountAmountApplied).toBe('5.0000');
   });
 
   it('#3 stacking: rejected while disabled, coupon → manual while enabled, tax on the discounted base', async () => {
@@ -921,7 +960,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const couponApplied = await discounts.applyDiscount(T, actor(discountUser), {
       orderId: order.order.id, mechanism: 'coupon', discountKind: 'percentage', discountValueText: '10.0000', couponCode: coupon.code,
     });
-    expect(couponApplied.discountAmountApplied).toBe('4.00');
+    expect(couponApplied.discountAmountApplied).toBe('4.0000');
     expect(couponApplied.mechanism).toBe('coupon');
     // …and the SECOND is rejected outright (the DB stacking gate).
     await expect(discounts.applyDiscount(T, actor(discountUser), {
@@ -939,7 +978,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       const manual = await discounts.applyDiscount(T, actor(discountUser), {
         orderId: order2.order.id, mechanism: 'manual', discountKind: 'fixed_amount', discountValueText: '5.0000',
       }); // −5.00 of the REMAINING 36.00 ⇒ 31.00
-      expect(manual.discountAmountApplied).toBe('5.00');
+      expect(manual.discountAmountApplied).toBe('5.0000');
 
       // Tax is recomputed on the DISCOUNTED bases: the 9.00 total discount is
       // allocated proportionally across the lines (A 25.00→19.37/19.38,
@@ -976,7 +1015,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const applied = await discounts.applyDiscount(T, actor(discountUser), {
       orderId: order.order.id, mechanism: 'coupon', discountKind: 'fixed_amount', discountValueText: '5.0000', couponCode: single.code,
     });
-    expect(applied.discountAmountApplied).toBe('5.00');
+    expect(applied.discountAmountApplied).toBe('5.0000');
     const uses = await owner.query<{ uses_count: number }>('SELECT uses_count FROM coupons WHERE id = $1 AND tenant_id = $2', [single.id, T]);
     expect(row(uses.rows).uses_count).toBe(1);
     // …the second use is refused (engine coupon check; the DB re-verifies).
@@ -1026,12 +1065,184 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const sar = await owner.query<{ value: string; label: string }>(
       "SELECT value::text AS value, label FROM currency_denominations cd WHERE cd.currency_code = 'SAR' ORDER BY cd.value",
     );
-    expect(sar.rows.map((r) => r.value)).toContain('100.00');
+    expect(sar.rows.map((r) => r.value)).toContain('100.0000');
     expect(sar.rows.length).toBeGreaterThanOrEqual(10);
     const kwd = await owner.query<{ value: string }>(
       "SELECT value::text AS value FROM currency_denominations cd WHERE cd.currency_code = 'KWD' ORDER BY cd.value",
     );
-    // Only 2-decimal-representable KWD denominations exist (spec: NUMERIC(18,2)).
-    expect(kwd.rows.map((r) => r.value)).toEqual(['0.05', '0.10', '0.25', '0.50', '1.00', '5.00', '10.00', '20.00']);
+    // B1 (migration 0044): the registry holds 4-decimal scale and the KWD
+    // sub-cent circulation coins (5/10/20 fils) the NUMERIC(18,2) era excluded.
+    expect(kwd.rows.map((r) => r.value)).toEqual([
+      '0.0050', '0.0100', '0.0200', '0.0500', '0.1000', '0.2500', '0.5000', '1.0000', '5.0000', '10.0000', '20.0000',
+    ]);
+  });
+
+  // ── B11: terminal 'voided' payment status ────────────────────────────────
+
+  it('B11b/ voiding a payment on a voided order keeps voided (residual lifecycle changes never reopen)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    // Partial payment: the order stays 'open' ⇒ order-level void is allowed.
+    await payments.recordPayment(T, { orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '10.00' });
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer });
+    const statusOf = async (): Promise<string> => row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status;
+    expect(await statusOf()).toBe('voided');
+    // Voiding the residual partial payment must NOT flip the order back to 'open'.
+    const payment = await owner.query<{ id: string }>('SELECT id FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id]);
+    await payments.voidPayment(T, actor(till.cashier), { paymentId: row(payment.rows).id, reason: 'إلغاء الطلب' });
+    expect(await statusOf()).toBe('voided');
+  });
+
+  // ── B9-b: no collection on a voided order ────────────────────────────────
+
+  it('B9b/ recording a payment on a fully-voided order is rejected and writes no payment', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer });
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('voided');
+
+    const failure = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '10.00',
+    }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ValidationError);
+    expect((failure as ValidationError).message).toMatch(/voided order cannot take a new payment/);
+    const paymentsCount = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id],
+    );
+    expect(Number(row(paymentsCount.rows).count)).toBe(0);
+  });
+
+  // ── B9-c: terminal workflow states never block money ─────────────────────
+  // (Permissive BY APPROVED SPEC: pay-after-service and complaint-voids are
+  // legitimate on terminal states. These tests PIN that semantic — no prod
+  // change. Deliberately NOT pinned: collecting on a 'cancelled'-state order
+  // (T's workflow has no such state; needs its own strict-vs-permissive call).)
+
+  async function deliverAll(itemIds: readonly string[], user: TieredUser): Promise<void> {
+    const delivered = (await workflowAdmin.listStates(T, true)).find((s) => s.kindCode === 'delivered');
+    if (delivered === undefined) throw new Error('Expected delivered state');
+    for (const orderItemId of itemIds) {
+      const moved = await transitions.transitionItem(T, { orderItemId, toWorkflowStateId: delivered.id, actorUserId: user.userId, tokenSecV: user.tokenSecV });
+      expect(moved.toWorkflowStateId).toBe(delivered.id);
+    }
+  }
+
+  it('B9c/ collecting on a terminal (delivered) order succeeds — pay-after-service is never blocked', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    await deliverAll(order.items.map((i) => i.item.id), till.cashier);
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    expect(recorded.payment.status).toBe('completed');
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('paid');
+  });
+
+  it('B9c/ refunding a terminal (delivered) order succeeds — money-back is never blocked', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    await deliverAll(order.items.map((i) => i.item.id), till.cashier);
+    const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id });
+    expect(refunded.status).toBe('refunded');
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [order.order.id, T],
+    )).rows).payment_status).toBe('refunded');
+  });
+
+  // ── Void-after-refund: a fully-refunded order can never be voided ─────────
+  // (The paid-status sibling is pinned by the 'Phase-7 void flow' test above;
+  // voidOrder AND voidOrderItem share the voidWithinTenant payment gate, so
+  // one order-level assertion locks the gate for both paths.)
+
+  it('Void-after-refund/ voiding a fully-refunded order is rejected at engine AND trigger level (nothing written)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // 25.00 + 15.00 + 15% VAT = 46.00
+    const recorded = await payments.recordPayment(T, {
+      orderId: order.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashierId, amountText: '46.00',
+    });
+    const refunded = await payments.refundPayment(T, actor(till.cashier), { paymentId: recorded.payment.id });
+    expect(refunded.status).toBe('refunded');
+    const statusOf = async (orderId: string): Promise<string> => row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2', [orderId, T],
+    )).rows).payment_status;
+    expect(await statusOf(order.order.id)).toBe('refunded');
+
+    // Engine level: the void engine refuses BEFORE writing any audit row.
+    const failure = await voids.voidOrder(T, actor(voidServerUser), { orderId: order.order.id, voidReasonId: reasonServer })
+      .then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(PaymentReversalRequiredError);
+    expect((failure as PaymentReversalRequiredError).paymentStatus).toBe('refunded');
+
+    // Nothing written: no audit row, no voided event, status unchanged.
+    const auditRows = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM order_voids WHERE tenant_id = $1 AND order_id = $2', [T, order.order.id],
+    );
+    expect(Number(row(auditRows.rows).count)).toBe(0);
+    const voidedEvents = await owner.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM order_events_outbox
+        WHERE tenant_id = $1 AND event_type = 'order.voided' AND payload ->> 'order_id' = $2`,
+      [T, order.order.id],
+    );
+    expect(Number(row(voidedEvents.rows).count)).toBe(0);
+    expect(await statusOf(order.order.id)).toBe('refunded');
+
+    // Trigger level: a forged audit row with a TRUTHFUL 'refunded' snapshot
+    // (so the snapshot-integrity check passes and the policy block is what
+    // fires) is refused structurally.
+    const forged = await withApp(T, (q) => q.query(
+      `INSERT INTO order_voids (tenant_id, order_id, order_item_id, actor_user_id, actor_permission_tier, void_reason_id,
+        required_manager_override, manager_user_id, override_authenticated_at, order_payment_status_at_void_time)
+       VALUES ($1, $2, NULL, $3, 'server', $4, false, NULL, NULL, 'refunded')`,
+      [T, order.order.id, voidServerUser.userId, reasonServer],
+    )).then(() => null, (error: unknown) => error) as { code?: string; message?: string } | null;
+    expect(forged?.code).toBe('23514');
+    expect(forged?.message ?? '').toMatch(/PaymentReversalRequiredError: void on a refunded order/);
+
+    // Control: the SAME void on an OPEN order succeeds — the rejection is
+    // payment-state, not fixture.
+    const openOrder = await newOrder(till);
+    await voids.voidOrder(T, actor(voidServerUser), { orderId: openOrder.order.id, voidReasonId: reasonServer });
+    expect(await statusOf(openOrder.order.id)).toBe('voided');
+  });
+
+  it('P2/ a coupon expiring between check and write surfaces the 409 race error with the full code (not raw 23514)', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till); // subtotal 40.00
+    // Deterministic race simulation: the coupon is created LIVE (this IS the
+    // passed engine check), then time-travelled to expired (the boundary
+    // crossing mid-transaction: JS Date.now() at check vs DB now() at
+    // insert, no coupon lock), then written at store level (the write).
+    // Through the engine the window is microseconds — inherently
+    // un-hittable on demand — so the test drives the write directly.
+    const coupon = await createCoupon({ code: 'P2-RACE-01', kind: 'percentage', value: '10.0000', expiresAt: new Date(Date.now() + 60_000) });
+    await withApp(T, (q) => q.query('UPDATE coupons SET expires_at = now() - interval \'1 second\' WHERE tenant_id = $1 AND id = $2', [T, coupon.id]));
+
+    const store = new PostgresPaymentsStore({ withTenantContext: withApp });
+    const failure = await store.run(T, (scope) => scope.insertOrderDiscount(T, {
+      id: randomUUID(),
+      orderId: order.order.id,
+      mechanism: 'coupon',
+      couponId: coupon.id,
+      couponCode: coupon.code,
+      discountKind: 'percentage',
+      discountValue: '10.0000',
+      discountAmountApplied: '4.0000',
+      requiredManagerOverride: false,
+      managerOverrideAttemptId: null,
+      appliedBy: discountUser.userId,
+    })).then(() => null, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(CouponAvailabilityRaceError);
+    expect((failure as CouponAvailabilityRaceError).message).toContain('P2-RACE-01');
+    expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'conflict' });
   });
 });

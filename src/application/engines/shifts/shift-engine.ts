@@ -31,8 +31,10 @@ import type {
   ShiftsStore,
   VarianceType,
 } from '../../../domain/contracts/payments.ts';
-import { nonNegativeDecimalTextToMinor, decimalTextToMinor, minorToDecimalText } from '../../../shared/decimal-text.ts';
+import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
+import { nonNegativeDecimalTextToMinor, decimalTextToMinor, minorToDecimalText, storageMinorUnitDigits } from '../../../shared/decimal-text.ts';
 import { ConflictError, NotFoundError, ShiftNotOpenError, ValidationError } from '../../../shared/errors.ts';
+import { currencyCode } from '../../../shared/money.ts';
 
 export interface XReport {
   readonly shift: ShiftRecord;
@@ -48,37 +50,69 @@ export interface XReport {
   readonly computedVarianceType: VarianceType | null;
 }
 
-function validateCounts(lines: readonly CashCountLineInput[]): bigint {
+/**
+ * B1: cash counts are denominated in the branch base currency at `digits (its
+ * ISO minor-unit scale). Denominations are discrete physical values stored
+ * VERBATIM, so a fraction longer than the native scale is rejected outright —
+ * never silently rounded (rounding a stored-verbatim value would desync the
+ * deferred SUM trigger that re-verifies the float at commit).
+ */
+function assertNativeDenominationScale(text: string, digits: number): void {
+  const dot = text.indexOf('.');
+  const fractionDigits = dot === -1 ? 0 : text.length - dot - 1;
+  if (fractionDigits > digits) {
+    throw new ValidationError(
+      `Cash denomination "${text}" carries more fraction digits than the branch currency's minor-unit scale (${String(digits)})`,
+      'denominationValue',
+    );
+  }
+}
+
+function validateCounts(lines: readonly CashCountLineInput[], digits: number): bigint {
   let totalMinor = 0n;
   for (const line of lines) {
     if (!Number.isInteger(line.quantity) || line.quantity < 0) {
       throw new ValidationError('Cash count quantity must be a non-negative integer', 'quantity');
     }
-    const valueMinor = nonNegativeDecimalTextToMinor(line.denominationValue, 2, 'denominationValue');
+    assertNativeDenominationScale(line.denominationValue, digits);
+    const valueMinor = nonNegativeDecimalTextToMinor(line.denominationValue, digits, 'denominationValue');
     if (valueMinor <= 0n) throw new ValidationError('Denomination value must be greater than zero', 'denominationValue');
     totalMinor += valueMinor * BigInt(line.quantity);
   }
   return totalMinor;
 }
 
-export class ShiftEngine {
-  private readonly dependencies: { readonly store: ShiftsStore };
+const SHIFT_OPEN_PERMISSION_KEY = 'shift:open';
+const SHIFT_CLOSE_PERMISSION_KEY = 'shift:close';
 
-  constructor(dependencies: { readonly store: ShiftsStore }) {
+export class ShiftEngine {
+  private readonly dependencies: { readonly store: ShiftsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> };
+
+  constructor(dependencies: { readonly store: ShiftsStore; readonly authorization: Pick<AuthorizationEngine, 'check'> }) {
     this.dependencies = dependencies;
   }
 
   async openShift(tenantId: string, input: OpenShiftInput): Promise<ShiftRecord> {
+    // B7: the opener must hold shift:open (sensitive — financial control
+    // point). Checked first: an unauthorized caller never reaches the store.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.openedByUserId,
+      permissionKey: SHIFT_OPEN_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     if (input.openedByUserId === input.openVerifiedByUserId) {
       throw new ValidationError('The shift opener and the open verifier must be two DIFFERENT people (dual verification)');
     }
-    const floatMinor = validateCounts(input.openCounts);
 
     return this.dependencies.store.run(tenantId, async (scope) => {
       const branch = await scope.loadBranchForShift(tenantId, input.branchId);
       if (!branch?.isActive) {
         throw new NotFoundError(`Branch ${input.branchId} is not an active branch of tenant ${tenantId}`);
       }
+      // B1: the count scale is the branch base currency's own ISO scale.
+      const digits = storageMinorUnitDigits(currencyCode(branch.baseCurrencyCode));
+      const floatMinor = validateCounts(input.openCounts, digits);
       for (const userId of [input.cashierUserId, input.openedByUserId, input.openVerifiedByUserId]) {
         if (!(await scope.userIsActiveMember(tenantId, userId))) {
           throw new ValidationError(`Shift participant ${userId} is not an active member of the tenant`);
@@ -94,8 +128,9 @@ export class ShiftEngine {
         cashierId: input.cashierUserId,
         openedById: input.openedByUserId,
         openVerifiedById: input.openVerifiedByUserId,
-        openedAt: input.openedAt,
-        startingFloat: minorToDecimalText(floatMinor, 2),
+        // Audit F-B: input.openedAt is ignored (kept required for signature stability) — the server clock stamps the opening.
+        openedAt: new Date(),
+        startingFloat: minorToDecimalText(floatMinor, digits),
       });
       await scope.insertCashCountDetails(tenantId, shift.id, 'open', input.openCounts);
       return shift;
@@ -104,15 +139,35 @@ export class ShiftEngine {
 
   /** The Z Report — the ONLY official close. */
   async closeShift(tenantId: string, input: CloseShiftInput): Promise<ShiftRecord> {
+    // B7: the closer must hold shift:close (sensitive — the Z Report is the
+    // official till close). Checked first, before the shift lock is taken.
+    await this.dependencies.authorization.check({
+      tenantId,
+      userId: input.closedByUserId,
+      permissionKey: SHIFT_CLOSE_PERMISSION_KEY,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    });
     if (input.closedByUserId === input.closeVerifiedByUserId) {
       throw new ValidationError('The shift closer and the close verifier must be two DIFFERENT people (dual verification)');
     }
-    const countedMinor = validateCounts(input.closeCounts);
 
     return this.dependencies.store.run(tenantId, async (scope) => {
-      const shift = await scope.loadShift(tenantId, input.shiftId);
+      // B2: lock FIRST, then decide. The shift lock + revision bump serialize
+      // close-vs-close and close-vs-collect (uniform order: orders → shifts;
+      // collect takes the order lock first, so no cycle is possible): exactly
+      // one wins, the loser gets a 40001 serialization failure (retryable as
+      // ConcurrencyRetryableError → 503), and the Z-Report SUM below can never
+      // miss a concurrent payment.
+      const shift = await scope.lockShift(tenantId, input.shiftId);
       if (shift === null) throw new NotFoundError(`Shift ${input.shiftId} not found`);
+      await scope.bumpShiftRevision(tenantId, input.shiftId);
       if (shift.status !== 'open') throw new ShiftNotOpenError(input.shiftId);
+      const branch = await scope.loadBranchForShift(tenantId, shift.branchId);
+      if (branch === null) throw new NotFoundError(`Branch ${shift.branchId} is not a branch of tenant ${tenantId}`);
+      // Digits only: a branch deactivated mid-shift still closes its open
+      // shift (B1 preserves the close path; only the scale is derived here).
+      const digits = storageMinorUnitDigits(currencyCode(branch.baseCurrencyCode));
+      const countedMinor = validateCounts(input.closeCounts, digits);
       for (const userId of [input.closedByUserId, input.closeVerifiedByUserId]) {
         if (!(await scope.userIsActiveMember(tenantId, userId))) {
           throw new ValidationError(`Shift close participant ${userId} is not an active member of the tenant`);
@@ -120,15 +175,16 @@ export class ShiftEngine {
       }
       const recordedCashSales = await scope.sumCompletedCashPaymentsText(tenantId, input.shiftId);
       const varianceMinor =
-        countedMinor - nonNegativeDecimalTextToMinor(shift.startingFloat, 2, 'startingFloat') - decimalTextToMinor(recordedCashSales, 2, 'recordedCashSales');
+        countedMinor - nonNegativeDecimalTextToMinor(shift.startingFloat, digits, 'startingFloat') - decimalTextToMinor(recordedCashSales, digits, 'recordedCashSales');
       const varianceType: VarianceType = varianceMinor > 0n ? 'overage' : varianceMinor < 0n ? 'shortage' : 'exact';
 
       await scope.insertCashCountDetails(tenantId, input.shiftId, 'close', input.closeCounts);
       return scope.closeShiftRow(tenantId, input.shiftId, {
         closedById: input.closedByUserId,
         closeVerifiedById: input.closeVerifiedByUserId,
-        closedAt: input.closedAt,
-        countedCash: minorToDecimalText(countedMinor, 2),
+        // Audit F-B: input.closedAt is ignored (kept required for signature stability) — the server clock stamps the close.
+        closedAt: new Date(),
+        countedCash: minorToDecimalText(countedMinor, digits),
         recordedCashSales,
         varianceType,
         notes: input.notes,
@@ -141,14 +197,17 @@ export class ShiftEngine {
     return this.dependencies.store.run(tenantId, async (scope) => {
       const shift = await scope.loadShift(tenantId, shiftId);
       if (shift === null) throw new NotFoundError(`Shift ${shiftId} not found`);
+      const branch = await scope.loadBranchForShift(tenantId, shift.branchId);
+      if (branch === null) throw new NotFoundError(`Branch ${shift.branchId} is not a branch of tenant ${tenantId}`);
+      const digits = storageMinorUnitDigits(currencyCode(branch.baseCurrencyCode));
       const counts = await scope.loadCashCounts(tenantId, shiftId);
       const recordedCashSales = await scope.sumCompletedCashPaymentsText(tenantId, shiftId);
-      const recordedMinor = decimalTextToMinor(recordedCashSales, 2, 'recordedCashSales');
-      const floatMinor = nonNegativeDecimalTextToMinor(shift.startingFloat, 2, 'startingFloat');
+      const recordedMinor = decimalTextToMinor(recordedCashSales, digits, 'recordedCashSales');
+      const floatMinor = nonNegativeDecimalTextToMinor(shift.startingFloat, digits, 'startingFloat');
       const countedMinor =
         shift.countedCash === null
-          ? counts.filter((c) => c.countType === 'close').reduce((sum, c) => sum + decimalTextToMinor(c.subtotal, 2, 'subtotal'), 0n)
-          : nonNegativeDecimalTextToMinor(shift.countedCash, 2, 'countedCash');
+          ? counts.filter((c) => c.countType === 'close').reduce((sum, c) => sum + decimalTextToMinor(c.subtotal, digits, 'subtotal'), 0n)
+          : nonNegativeDecimalTextToMinor(shift.countedCash, digits, 'countedCash');
       const varianceMinor = countedMinor - floatMinor - recordedMinor;
       return {
         shift,
@@ -159,7 +218,7 @@ export class ShiftEngine {
           subtotal: c.subtotal,
         })),
         recordedCashSales,
-        computedVariance: minorToDecimalText(varianceMinor, 2),
+        computedVariance: minorToDecimalText(varianceMinor, digits),
         computedVarianceType: varianceMinor > 0n ? 'overage' : varianceMinor < 0n ? 'shortage' : 'exact',
       };
     });

@@ -1,0 +1,38 @@
+-- Migration 0045 — Phase 8b fix (B2): order/shift mutation serialization.
+--
+-- Every order-mutating transaction runs at REPEATABLE READ with no row locks:
+-- two concurrent collects both snapshot the same remaining balance and both
+-- insert (double charge); the same race family covers discount double-apply,
+-- payment double-void (the status check lives in a separate transaction while
+-- the store UPDATE is blind), duplicate transition events, and a Z-Report
+-- close whose live SUM misses a concurrent collect's payment.
+--
+-- The fix is lock-first + conflict generation. Under REPEATABLE READ a row
+-- lock ALONE is not enough: the waiter's snapshot stays stale after the lock
+-- wait, so a loser that only locked would proceed on pre-race data. Every
+-- mutating transaction therefore (1) takes SELECT … FOR UPDATE on the orders
+-- row FIRST (the shift_reconciliations row for close/collect, second), and
+-- (2) bumps the revision column added here. Any concurrent mutation of the
+-- same order/shift then ends in exactly one winner; the loser fails with a
+-- 40001 serialization error (mapped to a retryable error by B3).
+--
+-- Uniform lock order (deadlock-free by construction — audited in B3):
+--   orders → shift_reconciliations
+-- Item/payment/discount rows are only ever written AFTER the caller holds the
+-- order lock, and inserts take no conflicting locks, so no cycle is possible.
+--
+-- revision is a plain optimistic-concurrency counter (never reset, never
+-- read for business logic): its only job is forcing write-write conflicts
+-- between concurrent mutating transactions. Existing rows start at 0.
+--
+-- Trigger safety: the orders UPDATE guards only constrain
+-- current_status_kind_id (a revision bump leaves it untouched), and the shift
+-- UPDATE guard only rejects writes to CLOSED shifts (the bump always runs on
+-- the still-open locked row — any interleaving close 40001s at the lock).
+-- No RLS block: no new table carries tenant_id (existing tables keep their
+-- policies); the bump UPDATEs are tenant-scoped by the caller's context.
+--
+-- Style notes: idempotent (ADD COLUMN IF NOT EXISTS), no DROP / CASCADE.
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+ALTER TABLE shift_reconciliations ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;

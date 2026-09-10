@@ -28,8 +28,15 @@
  * Conversion to/from BigInt minor units happens once, inside the application
  * engines, with the currency scale stated explicitly at each call site.
  */
+import type { OrderPaymentStatus } from './orders.ts';
 
 import type { ManagerOverrideContextType } from './orders.ts';
+import type {
+  InsertStockMovementInput,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+  WasteRefundKey,
+} from './inventory.ts';
 
 // ── Vocabularies (fixed by the Phase-8 spec) ───────────────────────────────
 
@@ -69,6 +76,8 @@ export interface PaymentRecord {
   readonly status: PaymentStatus;
   readonly shiftId: string;
   readonly createdBy: string;
+  /** B8: the client idempotency key the payment was collected with (null = legacy/key-less collect). */
+  readonly idempotencyKey: string | null;
   readonly voidedById: string | null;
   readonly voidedAt: Date | null;
   readonly voidReason: string | null;
@@ -182,7 +191,7 @@ export interface OrderFinancialSnapshot {
   readonly orderId: string;
   readonly branchId: string;
   readonly baseCurrencyCode: string;
-  readonly paymentStatus: 'open' | 'paid' | 'refund_pending' | 'refunded';
+  readonly paymentStatus: OrderPaymentStatus;
   readonly roundingStrategy: OrderRoundingStrategy | null;
   readonly lines: readonly OrderLineForTotals[];
   readonly discounts: readonly OrderDiscountRecord[];
@@ -225,6 +234,7 @@ export interface InsertPaymentInput {
   readonly changeGivenAmount: string | null;
   readonly shiftId: string;
   readonly createdBy: string;
+  readonly idempotencyKey: string | null;
 }
 
 export interface InsertOrderDiscountInput {
@@ -232,6 +242,13 @@ export interface InsertOrderDiscountInput {
   readonly orderId: string;
   readonly mechanism: DiscountMechanism;
   readonly couponId: string | null;
+  /**
+   * P2: the coupon CODE in-hand (canonical row spelling, passed by the
+   * engine) — context for the race-error message only, never written. D9
+   * mirror (inventoryItemDisplayName): the store mapping must never parse
+   * pg text to name the entity. Optional so existing callers keep working.
+   */
+  readonly couponCode?: string;
   readonly discountKind: DiscountKind;
   readonly discountValue: string;
   readonly discountAmountApplied: string;
@@ -251,9 +268,30 @@ export interface AuditEvidenceInput {
 export interface PaymentsTxScope {
   // Reads for the totals/gateway engine.
   loadOrderFinancialSnapshot(tenantId: string, orderId: string): Promise<OrderFinancialSnapshot | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on the orders row — the FIRST statement of every
+   * order-mutating payments transaction (uniform lock order: orders →
+   * shift_reconciliations; see OrdersTxScope.lockOrder). Returns the locked
+   * id, or null when the order does not exist. Always followed by
+   * bumpOrderRevision before any decision read.
+   */
+  lockOrder(tenantId: string, orderId: string): Promise<{ id: string } | null>;
+  /** B2: UPDATE orders SET revision = revision + 1 (see OrdersTxScope.bumpOrderRevision). */
+  bumpOrderRevision(tenantId: string, orderId: string): Promise<void>;
+  /**
+   * B2: SELECT … FOR UPDATE on a shift_reconciliations row — taken (after
+   * the order lock) by collect, and FIRST by close. Always followed by
+   * bumpShiftRevision; serializes close-vs-collect so the Z-Report SUM can
+   * never miss a concurrent payment (the loser gets ConcurrencyRetryableError → 503).
+   */
+  lockShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /** B2: UPDATE shift_reconciliations SET revision = revision + 1. */
+  bumpShiftRevision(tenantId: string, shiftId: string): Promise<void>;
   loadPaymentMethod(tenantId: string, paymentMethodId: string): Promise<PaymentMethodRecord | null>;
   findOpenShiftForCashier(tenantId: string, cashierUserId: string, branchId: string): Promise<ShiftRecord | null>;
   loadPayment(tenantId: string, paymentId: string): Promise<PaymentRecord | null>;
+  /** B8: the idempotency probe — the recorded payment for a client key, if the key was already collected. */
+  loadPaymentByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<PaymentRecord | null>;
   loadUserDiscountCaps(tenantId: string, userId: string): Promise<UserDiscountCaps | null>;
   loadCouponByCode(tenantId: string, code: string): Promise<CouponRecord | null>;
 
@@ -261,7 +299,9 @@ export interface PaymentsTxScope {
   insertPayment(tenantId: string, payment: InsertPaymentInput): Promise<PaymentRecord>;
   voidPayment(tenantId: string, paymentId: string, evidence: { voidedById: string; voidedAt: Date; voidReason: string }): Promise<PaymentRecord>;
   refundPayment(tenantId: string, paymentId: string): Promise<PaymentRecord>;
-  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: 'open' | 'paid' | 'refund_pending' | 'refunded'): Promise<void>;
+  setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;
+  /** B11: the preserve-voided probe — true when the order still has non-voided lines. */
+  hasActiveOrderItems(tenantId: string, orderId: string): Promise<boolean>;
   appendAuditEvidence(tenantId: string, evidence: AuditEvidenceInput): Promise<void>;
 
   // Discount writes.
@@ -275,6 +315,16 @@ export interface PaymentsTxScope {
   // Payment-method administration.
   insertPaymentMethod(tenantId: string, input: NewPaymentMethodInput): Promise<PaymentMethodRecord>;
   updatePaymentMethod(tenantId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord>;
+
+  // Stock ledger (Phase 9: the refund path mirrors the void path — a
+  // never-fired line restores, a fired line wastes; the refund-written keys
+  // of BOTH types dedup repeat refunds of one order).
+  loadNonVoidedOrderItemIds(tenantId: string, orderId: string): Promise<readonly string[]>;
+  loadSaleDeductionsForOrderItems(tenantId: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]>;
+  loadWasteRefundKeys(tenantId: string, orderId: string): Promise<readonly WasteRefundKey[]>;
+  /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
+  loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
+  insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
 }
 
 export interface PaymentsStore {
@@ -289,6 +339,11 @@ export interface OpenShiftInput {
   readonly cashierUserId: string;
   readonly openedByUserId: string;
   readonly openVerifiedByUserId: string;
+  /**
+   * @deprecated Audit F-B: IGNORED (kept REQUIRED only for signature
+   * stability). The server clock stamps the opening; any caller-supplied
+   * value, past or future, has no effect.
+   */
   readonly openedAt: Date;
   readonly openCounts: readonly CashCountLineInput[];
 }
@@ -297,6 +352,11 @@ export interface CloseShiftInput {
   readonly shiftId: string;
   readonly closedByUserId: string;
   readonly closeVerifiedByUserId: string;
+  /**
+   * @deprecated Audit F-B: IGNORED (kept REQUIRED only for signature
+   * stability). The server clock stamps the close; any caller-supplied
+   * value, past or future, has no effect.
+   */
   readonly closedAt: Date;
   readonly closeCounts: readonly CashCountLineInput[];
   readonly notes: string | null;
@@ -309,6 +369,14 @@ export interface ShiftsTxScope {
   /** Tenant-wide probe (any branch) — backs the no-parallel-shifts rule. */
   findAnyOpenShiftForCashier(tenantId: string, cashierUserId: string): Promise<ShiftRecord | null>;
   loadShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /**
+   * B2: SELECT … FOR UPDATE on a shift_reconciliations row — the FIRST
+   * statement of closeShift (see PaymentsTxScope.lockShift for the
+   * close-vs-collect race). Always followed by bumpShiftRevision.
+   */
+  lockShift(tenantId: string, shiftId: string): Promise<ShiftRecord | null>;
+  /** B2: UPDATE shift_reconciliations SET revision = revision + 1. */
+  bumpShiftRevision(tenantId: string, shiftId: string): Promise<void>;
   loadCashCounts(tenantId: string, shiftId: string): Promise<readonly CashCountDetailRecord[]>;
   insertShift(tenantId: string, input: { id: string; branchId: string; cashierId: string; openedById: string; openVerifiedById: string; openedAt: Date; startingFloat: string }): Promise<ShiftRecord>;
   insertCashCountDetails(tenantId: string, shiftId: string, countType: CashCountType, lines: readonly CashCountLineInput[]): Promise<void>;

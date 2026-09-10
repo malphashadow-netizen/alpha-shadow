@@ -30,9 +30,27 @@ import type {
 } from '../../../domain/contracts/orders.ts';
 import { parseOrderBehaviorFlags } from '../../../domain/contracts/orders.ts';
 import type { LocalizedText } from '../../../domain/contracts/catalog.ts';
+import type {
+  ClaimStockOverrideInput,
+  InsertStockMovementInput,
+  InventoryItemRecord,
+  RecipeOwnerRef,
+  RecipeOwnerType,
+  RecipeRequirementLine,
+  RestorationKey,
+  SaleDeductionAggregate,
+  StockMovementRecord,
+} from '../../../domain/contracts/inventory.ts';
 import type { TaxResolution } from '../../../domain/contracts/tax.ts';
-import { NotFoundError, OrderWorkflowNotConfiguredError, WorkflowStateInUseError } from '../../../shared/errors.ts';
-import { TaxResolutionEngine } from '../../../application/engines/tax/tax-resolution-engine.ts';
+import {
+  InsufficientStockError,
+  NotFoundError,
+  OrderWorkflowNotConfiguredError,
+  ValidationError,
+  WorkflowStateInUseError,
+} from '../../../shared/errors.ts';
+import { insertStockMovementRow, mapInventoryItem, type InventoryItemRow } from './stock-ledger-rows.ts';
+import { resolveInvoiceAndSnapshot } from '../../../application/engines/tax/tax-resolution-engine.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
 
@@ -158,8 +176,28 @@ function mapOutboxEvent(r: OutboxRow): OrderOutboxEvent {
   };
 }
 
+/**
+ * Stable prefix of the 0040 negative-balance rejection
+ * ('stock: insufficient quantity …'). Pinned here AND in the migration AND in
+ * the unit test — never reword one without the other two.
+ */
+export const STOCK_SHORTAGE_MESSAGE_PREFIX = 'stock: insufficient quantity';
+
+/**
+ * True only for the trigger's shortage rejection: code 23514 AND the stable
+ * prefix. Every other database error (including any other 23514) propagates
+ * untouched — fail-closed, never mislabelled.
+ */
+export function isStockShortageTriggerError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if (!('code' in error) || !('message' in error)) return false;
+  return error.code === '23514' && typeof error.message === 'string' && error.message.startsWith(STOCK_SHORTAGE_MESSAGE_PREFIX);
+}
+
 export interface PostgresOrdersStoreDependencies {
   readonly withTenantContext: WithTenantContext;
+  /** B3: per-transaction lock_timeout override (ms). undefined = inherit the context default. */
+  readonly lockTimeoutMs?: number | undefined;
 }
 
 export class PostgresOrdersStore implements OrdersStore {
@@ -182,7 +220,13 @@ export class PostgresOrdersStore implements OrdersStore {
           tax.close();
         }
       },
-      { isolationLevel: 'repeatable read', verifyTenantExists: true },
+      {
+        isolationLevel: 'repeatable read',
+        verifyTenantExists: true,
+        // B3: spread ONLY when set — an explicit undefined would wipe the
+        // production lock_timeout default during option merging.
+        ...(this.dependencies.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: this.dependencies.lockTimeoutMs }),
+      },
     );
   }
 }
@@ -220,6 +264,16 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       return result.rows[0] === undefined ? null : mapOrder(result.rows[0]);
     },
 
+    // B2: the uniform serialization point — lock FIRST, bump, then decide.
+    async lockOrder(tid: string, orderId: string): Promise<OrderRecord | null> {
+      const result = await q.query<OrderRow>('SELECT * FROM orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tid, orderId]);
+      return result.rows[0] === undefined ? null : mapOrder(result.rows[0]);
+    },
+
+    async bumpOrderRevision(tid: string, orderId: string): Promise<void> {
+      await q.query('UPDATE orders SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2', [tid, orderId]);
+    },
+
     async loadOrderItem(tid: string, orderItemId: string): Promise<OrderItemRecord | null> {
       const result = await q.query<OrderItemRow>('SELECT * FROM order_items WHERE tenant_id = $1 AND id = $2', [tid, orderItemId]);
       return result.rows[0] === undefined ? null : mapOrderItem(result.rows[0]);
@@ -234,14 +288,14 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
     },
 
     async loadMenuItem(tid: string, menuItemId: string) {
-      const result = await q.query<{ id: string; name: unknown; base_price_amount_minor: string; is_active: boolean }>(
-        'SELECT id, name, base_price_amount_minor, is_active FROM menu_items WHERE tenant_id = $1 AND id = $2',
+      const result = await q.query<{ id: string; name: unknown; base_price_amount_minor: string; base_price_currency_code: string; is_active: boolean }>(
+        'SELECT id, name, base_price_amount_minor, base_price_currency_code, is_active FROM menu_items WHERE tenant_id = $1 AND id = $2',
         [tid, menuItemId],
       );
       const r = result.rows[0];
       return r === undefined
         ? null
-        : { id: r.id, name: localized(r.name), basePriceMinor: BigInt(r.base_price_amount_minor), isActive: r.is_active };
+        : { id: r.id, name: localized(r.name), basePriceMinor: BigInt(r.base_price_amount_minor), basePriceCurrencyCode: r.base_price_currency_code, isActive: r.is_active };
     },
 
     async loadOrderStatusKindFlags(kindCode: string): Promise<OrderBehaviorFlags> {
@@ -377,7 +431,9 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
           JSON.stringify(item.itemNameSnapshot),
           item.unitPriceMinor.toString(),
           item.quantity,
-          JSON.stringify(item.modifiersSnapshot),
+          // The snapshot carries bigint minor amounts, which JSON.stringify rejects;
+          // serialize them as exact decimal strings (pass-through evidence, never math input).
+          JSON.stringify(item.modifiersSnapshot, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value),
           item.initialStatusKindId,
           item.stationId,
           item.splitGroupId,
@@ -405,18 +461,20 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       );
     },
 
-    async resolveLineTax(tid: string, input: { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }): Promise<TaxResolution> {
-      const engine = new TaxResolutionEngine({ transaction: tax, orderLineId: input.orderLineId });
-      return engine.resolveAndSnapshot(
-        tid,
-        input.branchId,
-        input.menuItemId,
-        input.customerAmountMinor,
-        input.currencyCode,
-        input.at,
-        input.salesChannel,
-        input.deliveryPlatformId,
-      );
+    async resolveInvoiceTax(tid: string, inputs: readonly { orderLineId: string; branchId: string; menuItemId: string; customerAmountMinor: bigint; currencyCode: string; at: Date; salesChannel: string; deliveryPlatformId: string | null }[]): Promise<ReadonlyMap<string, TaxResolution>> {
+      // B4: the whole invoice resolves in ONE call on this transaction —
+      // allocations are made before ANY snapshot write (invoice_total), and
+      // the per_line result is mathematically identical to isolated lines.
+      return resolveInvoiceAndSnapshot(tax, tid, inputs.map((input) => ({
+        orderLineId: input.orderLineId,
+        branchId: input.branchId,
+        menuItemId: input.menuItemId,
+        grossOrNetAmountMinor: input.customerAmountMinor,
+        currencyCode: input.currencyCode,
+        at: input.at,
+        salesChannel: input.salesChannel,
+        deliveryPlatformId: input.deliveryPlatformId,
+      })));
     },
 
     async insertStatusEvent(tid: string, input: { orderItemId: string; orderId: string; fromWorkflowStateId: string | null; toWorkflowStateId: string; actorUserId: string | null; occurredAt: Date }): Promise<void> {
@@ -548,7 +606,15 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       return result.rows[0]?.void_time_limit_minutes ?? null;
     },
 
-    async resolveVoidPermissionTier(tid: string, userId: string): Promise<VoidPermissionTier | null> {
+    async resolveVoidPermissionTier(tid: string, userId: string, branchId: string): Promise<VoidPermissionTier | null> {
+      // Audit F-A: the tier must come ONLY from grants that cover the order's
+      // branch (tenant-wide grants, or branch-scoped grants for exactly this
+      // branch). A branch-scoped supervisor/manager key for any other branch
+      // must never inflate the tier. The scope predicate mirrors
+      // assert_tenant_order_permission's covering rule (branch-to-branch).
+      if (typeof branchId !== 'string' || branchId.trim() === '') {
+        throw new ValidationError('branchId is required to resolve the branch-covering void tier', 'branchId');
+      }
       const result = await q.query<{ permission_key: string }>(
         `SELECT DISTINCT rp.permission_key
            FROM users u
@@ -557,8 +623,10 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
            JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
            JOIN role_permissions rp ON rp.role_id = r.id AND rp.tenant_id = r.tenant_id
           WHERE u.id = $2 AND u.tenant_id = $1 AND u.is_active AND t.status = 'active' AND ur.is_active
-            AND rp.permission_key = ANY($3::text[])`,
-        [tid, userId, ['order:void', 'order:void:shift_supervisor', 'order:void:manager']],
+            AND rp.permission_key = ANY($3::text[])
+            AND (ur.scope_type = 'tenant' AND ur.scope_id IS NULL
+                 OR ur.scope_type = 'branch' AND ur.scope_id IS NOT DISTINCT FROM $4)`,
+        [tid, userId, ['order:void', 'order:void:shift_supervisor', 'order:void:manager'], branchId],
       );
       let tier: VoidPermissionTier | null = null;
       for (const r of result.rows) {
@@ -592,6 +660,10 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         'UPDATE order_items SET is_voided = true, voided_at = now() WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
         [tid, orderItemIds],
       );
+    },
+
+    async setOrderPaymentStatus(tid: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void> {
+      await q.query('UPDATE orders SET payment_status = $3 WHERE tenant_id = $1 AND id = $2', [tid, orderId, paymentStatus]);
     },
 
     async recomputeOrderStatus(tid: string, orderId: string): Promise<string | null> {
@@ -655,6 +727,120 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         notes: r.notes,
         occurredAt: r.occurred_at,
       };
+    },
+
+    async loadRecipeRequirements(tid: string, owners: readonly RecipeOwnerRef[]): Promise<readonly RecipeRequirementLine[]> {
+      if (owners.length === 0) return [];
+      // One statement over the recipe_ingredients view (the single read
+      // source for products + modifiers); tuple-IN, one round trip.
+      const values: string[] = [tid];
+      const tuples = owners.map((owner) => {
+        values.push(owner.ownerType, owner.ownerId);
+        return `($${values.length - 1}, $${values.length})`;
+      });
+      const result = await q.query<{
+        owner_type: RecipeOwnerType;
+        owner_id: string;
+        inventory_item_id: string;
+        quantity_required: string;
+      }>(
+        `SELECT owner_type, owner_id, inventory_item_id, quantity_required
+           FROM recipe_ingredients WHERE tenant_id = $1 AND (owner_type, owner_id) IN (${tuples.join(', ')})`,
+        values,
+      );
+      return result.rows.map((r) => ({
+        ownerType: r.owner_type,
+        ownerId: r.owner_id,
+        inventoryItemId: r.inventory_item_id,
+        quantityRequired: r.quantity_required,
+      }));
+    },
+
+    async loadInventoryItems(tid: string, branchId: string, inventoryItemIds: readonly string[]): Promise<readonly InventoryItemRecord[]> {
+      if (inventoryItemIds.length === 0) return [];
+      const result = await q.query<InventoryItemRow>(
+        `SELECT id, tenant_id, branch_id, name, base_unit, current_quantity, low_stock_threshold, is_active
+           FROM inventory_items WHERE tenant_id = $1 AND branch_id = $2 AND id = ANY($3::uuid[])`,
+        [tid, branchId, inventoryItemIds],
+      );
+      return result.rows.map(mapInventoryItem);
+    },
+
+    async insertStockMovement(tid: string, movement: InsertStockMovementInput): Promise<StockMovementRecord> {
+      try {
+        return await insertStockMovementRow(q, tid, movement);
+      } catch (error: unknown) {
+        // The shortage gate lives in the trigger (the backstop for races);
+        // map it to the cashier-facing error (same discipline as
+        // rethrowCatalogWriteError — code + stable message prefix, nothing
+        // else; every other error propagates untouched).
+        if (isStockShortageTriggerError(error)) {
+          throw new InsufficientStockError(
+            movement.inventoryItemDisplayName ?? movement.inventoryItemId,
+            movement.inventoryItemId,
+            movement.branchId,
+            { cause: error instanceof Error ? error : undefined },
+          );
+        }
+        throw error;
+      }
+    },
+
+    async insertStockOverrideClaim(tid: string, claim: ClaimStockOverrideInput): Promise<void> {
+      // Single-use claim (0040): the PRIMARY KEY rejects any second claim of
+      // the same attempt (23505, fail-closed) — the engine only ever claims
+      // the attempt id its own verifyLiveChallengeWithId call just returned.
+      await q.query('INSERT INTO stock_override_claims (manager_override_id, tenant_id, order_id) VALUES ($1, $2, $3)', [
+        claim.managerOverrideId,
+        tid,
+        claim.orderId,
+      ]);
+    },
+
+    async loadSaleDeductionsForOrderItems(tid: string, orderItemIds: readonly string[]): Promise<readonly SaleDeductionAggregate[]> {
+      if (orderItemIds.length === 0) return [];
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string; total_deducted: string }>(
+        `SELECT order_item_id, inventory_item_id, SUM(quantity_delta) AS total_deducted
+           FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'sale_deduction'
+          GROUP BY order_item_id, inventory_item_id`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({
+        orderItemId: r.order_item_id,
+        inventoryItemId: r.inventory_item_id,
+        totalDeducted: r.total_deducted,
+      }));
+    },
+
+    async loadItemsWithKitchenTicketFired(tid: string, orderItemIds: readonly string[]): Promise<readonly string[]> {
+      if (orderItemIds.length === 0) return [];
+      // "Has this item EVER been in a ticket-firing state" — across the FULL
+      // immutable event history (initial event included), resolved through
+      // the tenant's workflow states to the platform kind flags.
+      const result = await q.query<{ order_item_id: string }>(
+        `SELECT DISTINCT e.order_item_id
+           FROM order_item_status_events e
+           JOIN tenant_order_workflow_states s ON s.id = e.to_status_kind_id AND s.tenant_id = e.tenant_id
+           JOIN order_status_kinds k ON k.code = s.kind_code
+          WHERE e.tenant_id = $1 AND e.order_item_id = ANY($2::uuid[])
+            AND (k.behavior_flags ->> 'fires_kitchen_ticket')::boolean IS TRUE`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => r.order_item_id);
+    },
+
+    async loadVoidRestorationKeys(tid: string, orderItemIds: readonly string[]): Promise<readonly RestorationKey[]> {
+      if (orderItemIds.length === 0) return [];
+      // ANY restoration row for the pair — void-written or written by a
+      // prior partial refund: the stock is already home, so the void path
+      // must not restore it a second time.
+      const result = await q.query<{ order_item_id: string; inventory_item_id: string }>(
+        `SELECT DISTINCT order_item_id, inventory_item_id FROM stock_movements
+          WHERE tenant_id = $1 AND order_item_id = ANY($2::uuid[]) AND movement_type = 'void_restoration'`,
+        [tid, orderItemIds],
+      );
+      return result.rows.map((r) => ({ orderItemId: r.order_item_id, inventoryItemId: r.inventory_item_id }));
     },
   };
 }

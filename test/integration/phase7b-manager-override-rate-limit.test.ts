@@ -42,7 +42,7 @@ import { PostgresManagerOverrideAuthenticator } from '../../src/infrastructure/d
 import { PostgresOrdersStore } from '../../src/infrastructure/db/repositories/postgres-orders-store.ts';
 import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/postgres-shifts-store.ts';
 import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
-import { PostgresPermissionReadRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { PostgresPlatformTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-platform-tax-admin-repository.ts';
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { hashPin } from '../../src/shared/auth/pin.ts';
@@ -54,6 +54,7 @@ import {
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
+import { grantKeys } from '../support/grant-keys.ts';
 
 // T: a DEDICATED tenant created in beforeAll. The integration project shares
 // one database between test files and vitest's file order is not guaranteed,
@@ -132,7 +133,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -149,11 +150,15 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     app = new pg.Pool({ connectionString: appUrl.toString(), max: 5 });
     platformPool = new pg.Pool({ connectionString: platformUrl.toString(), max: 5 });
     withApp = createWithTenantContext(app, { verifyTenantExists: true });
-    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp) });
     permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
+    catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     store = new PostgresOrdersStore({ withTenantContext: withApp });
-    creation = new OrderCreationEngine({ store });
-    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }) });
+    creation = new OrderCreationEngine({
+      store,
+      authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }),
+      managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
+    });
+    shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     voids = new VoidModificationEngine({
       store,
@@ -174,7 +179,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     // T minimal workflow is all order creation needs (initial state). The
     // integration project shares one database between files, so tenant T may
     // already have its workflow from phase7-orders.test.ts — reuse it.
-    const workflowAdmin = new WorkflowAdminEngine({ store });
+    const workflowAdmin = new WorkflowAdminEngine({ store, authorization: new AuthorizationEngine({ read: permissionRead, hash: sha256Hex }) });
     if ((await workflowAdmin.listStates(T, false)).length === 0) {
       await workflowAdmin.ensureWorkflow(T, [
         { kindCode: 'received', position: 10, label: { ar: 'مستلم' } },
@@ -185,10 +190,13 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
         { kindCode: 'cancelled', position: 60, label: { ar: 'ملغي' } },
       ]);
     }
-    menuCategoryId = (await catalog.createCategory(T, { name: { ar: 'قائمة الرقعة الأمنية' } })).id;
     // Phase-8 gateway identities: two DISTINCT people for the dual verification.
+    // (B7: the opener carries shift:open + catalog:write.)
     shiftOpenerId = await createUserWithPin('1111');
     shiftVerifierId = await createUserWithPin('2222');
+    const permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
+    await grantKeys(permWrite, T, shiftOpenerId, ['shift:open', 'catalog:write']);
+    menuCategoryId = (await catalog.createCategory(T, shiftOpenerId, { name: { ar: 'قائمة الرقعة الأمنية' } })).id;
   });
 
   beforeEach(async () => {
@@ -196,7 +204,7 @@ describe('Phase 7 security patch: manager-override challenge rate limiting', () 
     // fresh user ids, so counters always start at zero.
     branchId = randomUUID();
     const stationId = randomUUID();
-    itemId = (await catalog.createItem(T, {
+    itemId = (await catalog.createItem(T, shiftOpenerId, {
       categoryId: menuCategoryId, name: { ar: 'طبق فحص القفل' }, basePrice: money(1800n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
     await withApp(T, async (q) => {

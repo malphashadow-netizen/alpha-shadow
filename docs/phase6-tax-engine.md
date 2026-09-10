@@ -118,8 +118,10 @@ tax engine. All decisions come from stored data:
    rejected, not silently reordered by a country-specific rule.
 6. Resolve every applicable rate for the local date. Missing rates raise
    `NoApplicableTaxRateError`, never an implicit zero.
-7. Each category's working amount is the original amount plus tax from
-   **strictly lower** priorities. Equal-priority taxes do not compound each
+7. Each category's working amount is the original amount plus **exclusive**
+   tax from **strictly lower** priorities (B6: an inclusive lower-priority
+   tax is already embedded in the original amount — cascading it again
+   would double-count it). Equal-priority taxes do not compound each
    other. Apply this category's inclusive/exclusive formula to its working
    amount; record sequence, rate, inclusivity, base, tax and currency.
 
@@ -150,6 +152,18 @@ substitute a different interpretation of a bundled gross price.
 | VAT, priority 50 | **1000 + 1000 = 2000** | 15% | **300** |
 | Customer total | | | **1000 + 1000 + 300 = 2300 (SAR 23.00)** |
 
+### Required Saudi mixed-direction example (B6)
+
+The Saudi tobacco case: 100% excise **included** in the shelf price, 15% VAT
+**added on top**. The embedded excise NEVER cascades; an exclusive lower tax
+always would (previous table).
+
+| Stage | Base (halala) | Rate | Tax (halala) |
+| --- | ---: | ---: | ---: |
+| Excise, priority 10, inclusive | 1000 (gross, excise embedded) | 100% incl | **500** (taxable 500) |
+| VAT, priority 50, exclusive | **1000** (no cascade of the embedded 500) | 15% excl | **150** (taxable 1000) |
+| Customer total | | | **1000 + 150 = 1150 (SAR 11.50)** |
+
 ### `per_line` versus `invoice_total`
 
 * `per_line`: round each category's tax at each line/stage.
@@ -157,7 +171,8 @@ substitute a different interpretation of a bundled gross price.
   `resolveInvoiceAndSnapshot`. Group by rate identity, bps, inclusivity and
   currency at each priority; round the exact aggregate once. Allocate the
   remaining minor units by largest remainder, ties by stable line UUID. The
-  allocated lower-priority taxes enter each line's next-stage base.
+  allocated lower-priority **exclusive** taxes enter each line's next-stage
+  base (B6: allocated inclusive amounts stay embedded, never added).
 * Two lines of 10 minor units at 5% produce **2** units with per-line rounding,
   **1** unit with invoice-total rounding. Tests assert this difference.
 * Isolated `resolveAndSnapshot`/`createLine` calls for an invoice-total

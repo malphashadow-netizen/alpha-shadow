@@ -8,6 +8,17 @@
  * Physical DELETE of a referenced row is not offered. Archive sets
  * `is_active = false`. Category parent cycles are rejected here (unlimited
  * depth, no SQL-only crutch).
+ *
+ * B7: every MUTATION (the 8 creates/updates, the 4 archives, attach and
+ * setBranchOverride) requires its key — `catalog:write` for creates/updates,
+ * `catalog:archive` for archives — checked as the first statement. The actor
+ * is AUTH-ONLY (no actor column on catalog rows), so it travels as a
+ * positional `actorUserId` parameter. The 4 archives delegate to the same
+ * private doUpdate* bodies as the public updates (one key per operation —
+ * an archive needs `catalog:archive` ONLY, never `catalog:write` too).
+ * READS (list/get/getBranchMenu) stay unchecked: catalog:read exists in the
+ * registry but no engine enforces it yet (out of B7 scope).
+ * isSensitivePermission:false matches the 0008 seed (non-sensitive keys).
  */
 import type {
   BranchMenuItemOverride,
@@ -27,6 +38,7 @@ import {
   parentChainContains,
 } from '../../../domain/contracts/catalog-rules.ts';
 import type { CatalogTaxAssignmentPolicy } from '../../../domain/contracts/tenant-tax-admin.ts';
+import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 import { NotFoundError, TaxConfigurationError, ValidationError } from '../../../shared/errors.ts';
 import { add, CurrencyMismatchError, money, type Money } from '../../../shared/money.ts';
 import { isWithinAvailabilitySchedule, parseAvailabilitySchedule } from './availability.ts';
@@ -34,6 +46,7 @@ import { isWithinAvailabilitySchedule, parseAvailabilitySchedule } from './avail
 export interface CatalogEngineDependencies {
   readonly catalog: CatalogRepository;
   readonly taxAssignments?: CatalogTaxAssignmentPolicy;
+  readonly authorization: Pick<AuthorizationEngine, 'check'>;
 }
 
 export interface CreateCategoryInput {
@@ -160,13 +173,33 @@ function requireFound<T>(value: T | null, what: string): T {
 export class CatalogEngine {
   private readonly catalog: CatalogRepository;
   private readonly taxAssignments: CatalogTaxAssignmentPolicy | undefined;
+  private readonly authorization: Pick<AuthorizationEngine, 'check'>;
 
   constructor(dependencies: CatalogEngineDependencies) {
     this.catalog = dependencies.catalog;
     this.taxAssignments = dependencies.taxAssignments;
+    this.authorization = dependencies.authorization;
   }
 
-  async createCategory(tenantId: string, input: CreateCategoryInput): Promise<MenuCategory> {
+  /**
+   * B7 gate: one line per mutating method (14 call sites share this helper so
+   * the key/flag pairing cannot drift between methods).
+   */
+  private async requireCatalogKey(
+    tenantId: string,
+    actorUserId: string,
+    permissionKey: 'catalog:write' | 'catalog:archive',
+  ): Promise<void> {
+    await this.authorization.check({
+      tenantId,
+      userId: actorUserId,
+      permissionKey,
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+    });
+  }
+
+  async createCategory(tenantId: string, actorUserId: string, input: CreateCategoryInput): Promise<MenuCategory> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     const name = parseLocalizedText(input.name, 'name', { allowEmpty: false });
     const parentCategoryId = input.parentCategoryId ?? null;
     if (parentCategoryId !== null) {
@@ -179,7 +212,12 @@ export class CatalogEngine {
     });
   }
 
-  async updateCategory(tenantId: string, categoryId: string, input: UpdateCategoryInput): Promise<MenuCategory> {
+  async updateCategory(tenantId: string, actorUserId: string, categoryId: string, input: UpdateCategoryInput): Promise<MenuCategory> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
+    return this.doUpdateCategory(tenantId, categoryId, input);
+  }
+
+  private async doUpdateCategory(tenantId: string, categoryId: string, input: UpdateCategoryInput): Promise<MenuCategory> {
     const current = requireFound(await this.catalog.getCategory(tenantId, categoryId), `category ${categoryId} not found`);
     const name: LocalizedText =
       input.name === undefined ? current.name : parseLocalizedText(input.name, 'name', { allowEmpty: false });
@@ -198,8 +236,9 @@ export class CatalogEngine {
     });
   }
 
-  async archiveCategory(tenantId: string, categoryId: string): Promise<MenuCategory> {
-    return this.updateCategory(tenantId, categoryId, { isActive: false });
+  async archiveCategory(tenantId: string, actorUserId: string, categoryId: string): Promise<MenuCategory> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:archive');
+    return this.doUpdateCategory(tenantId, categoryId, { isActive: false });
   }
 
   async listCategories(tenantId: string): Promise<readonly MenuCategory[]> {
@@ -212,7 +251,8 @@ export class CatalogEngine {
     await this.taxAssignments.assertOrdinaryAssignment(tenantId, taxCategoryId);
   }
 
-  async createItem(tenantId: string, input: CreateItemInput): Promise<MenuItem> {
+  async createItem(tenantId: string, actorUserId: string, input: CreateItemInput): Promise<MenuItem> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     await this.assertOrdinaryTaxAssignment(tenantId, input.taxRuleId ?? null);
     requireFound(await this.catalog.getCategory(tenantId, input.categoryId), `category ${input.categoryId} not found`);
     return this.catalog.insertItem(tenantId, {
@@ -227,7 +267,12 @@ export class CatalogEngine {
     });
   }
 
-  async updateItem(tenantId: string, itemId: string, input: UpdateItemInput): Promise<MenuItem> {
+  async updateItem(tenantId: string, actorUserId: string, itemId: string, input: UpdateItemInput): Promise<MenuItem> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
+    return this.doUpdateItem(tenantId, itemId, input);
+  }
+
+  private async doUpdateItem(tenantId: string, itemId: string, input: UpdateItemInput): Promise<MenuItem> {
     const current = requireFound(await this.catalog.getItem(tenantId, itemId), `item ${itemId} not found`);
     if (input.taxRuleId !== undefined && input.taxRuleId !== current.taxRuleId) {
       await this.assertOrdinaryTaxAssignment(tenantId, input.taxRuleId);
@@ -254,15 +299,17 @@ export class CatalogEngine {
     });
   }
 
-  async archiveItem(tenantId: string, itemId: string): Promise<MenuItem> {
-    return this.updateItem(tenantId, itemId, { isActive: false });
+  async archiveItem(tenantId: string, actorUserId: string, itemId: string): Promise<MenuItem> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:archive');
+    return this.doUpdateItem(tenantId, itemId, { isActive: false });
   }
 
   async getItem(tenantId: string, itemId: string): Promise<MenuItem> {
     return requireFound(await this.catalog.getItem(tenantId, itemId), `item ${itemId} not found`);
   }
 
-  async createModifierGroup(tenantId: string, input: CreateModifierGroupInput): Promise<ModifierGroup> {
+  async createModifierGroup(tenantId: string, actorUserId: string, input: CreateModifierGroupInput): Promise<ModifierGroup> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     assertMinMaxSelections(input.minSelections, input.maxSelections);
     this.assertSelectionType(input.selectionType);
     assertSelectionTypeConsistency(input.selectionType, input.maxSelections);
@@ -276,7 +323,12 @@ export class CatalogEngine {
     });
   }
 
-  async updateModifierGroup(tenantId: string, groupId: string, input: UpdateModifierGroupInput): Promise<ModifierGroup> {
+  async updateModifierGroup(tenantId: string, actorUserId: string, groupId: string, input: UpdateModifierGroupInput): Promise<ModifierGroup> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
+    return this.doUpdateModifierGroup(tenantId, groupId, input);
+  }
+
+  private async doUpdateModifierGroup(tenantId: string, groupId: string, input: UpdateModifierGroupInput): Promise<ModifierGroup> {
     const current = requireFound(
       await this.catalog.getModifierGroup(tenantId, groupId),
       `modifier group ${groupId} not found`,
@@ -299,11 +351,13 @@ export class CatalogEngine {
     });
   }
 
-  async archiveModifierGroup(tenantId: string, groupId: string): Promise<ModifierGroup> {
-    return this.updateModifierGroup(tenantId, groupId, { isActive: false });
+  async archiveModifierGroup(tenantId: string, actorUserId: string, groupId: string): Promise<ModifierGroup> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:archive');
+    return this.doUpdateModifierGroup(tenantId, groupId, { isActive: false });
   }
 
-  async createModifier(tenantId: string, input: CreateModifierInput): Promise<Modifier> {
+  async createModifier(tenantId: string, actorUserId: string, input: CreateModifierInput): Promise<Modifier> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     requireFound(
       await this.catalog.getModifierGroup(tenantId, input.modifierGroupId),
       `modifier group ${input.modifierGroupId} not found`,
@@ -316,7 +370,12 @@ export class CatalogEngine {
     });
   }
 
-  async updateModifier(tenantId: string, modifierId: string, input: UpdateModifierInput): Promise<Modifier> {
+  async updateModifier(tenantId: string, actorUserId: string, modifierId: string, input: UpdateModifierInput): Promise<Modifier> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
+    return this.doUpdateModifier(tenantId, modifierId, input);
+  }
+
+  private async doUpdateModifier(tenantId: string, modifierId: string, input: UpdateModifierInput): Promise<Modifier> {
     const current = requireFound(await this.catalog.getModifier(tenantId, modifierId), `modifier ${modifierId} not found`);
     const priceDeltaAmountMinor = input.priceDeltaAmountMinor ?? current.priceDeltaAmountMinor;
     return this.catalog.updateModifier(tenantId, {
@@ -328,22 +387,26 @@ export class CatalogEngine {
     });
   }
 
-  async archiveModifier(tenantId: string, modifierId: string): Promise<Modifier> {
-    return this.updateModifier(tenantId, modifierId, { isActive: false });
+  async archiveModifier(tenantId: string, actorUserId: string, modifierId: string): Promise<Modifier> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:archive');
+    return this.doUpdateModifier(tenantId, modifierId, { isActive: false });
   }
 
   async attachModifierGroupToItem(
     tenantId: string,
+    actorUserId: string,
     menuItemId: string,
     modifierGroupId: string,
     sortOrder = 0,
   ): Promise<MenuItemModifierGroupLink> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     requireFound(await this.catalog.getItem(tenantId, menuItemId), `item ${menuItemId} not found`);
     requireFound(await this.catalog.getModifierGroup(tenantId, modifierGroupId), `modifier group ${modifierGroupId} not found`);
     return this.catalog.insertItemModifierGroupLink(tenantId, { menuItemId, modifierGroupId, sortOrder });
   }
 
-  async setBranchOverride(tenantId: string, input: SetBranchOverrideInput): Promise<BranchMenuItemOverride> {
+  async setBranchOverride(tenantId: string, actorUserId: string, input: SetBranchOverrideInput): Promise<BranchMenuItemOverride> {
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     const item = requireFound(await this.catalog.getItem(tenantId, input.menuItemId), `item ${input.menuItemId} not found`);
     const current = await this.catalog.getBranchOverride(tenantId, input.branchId, input.menuItemId);
     return this.catalog.upsertBranchOverride(tenantId, {

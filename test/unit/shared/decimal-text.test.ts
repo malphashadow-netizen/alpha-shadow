@@ -5,13 +5,16 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  STORAGE_MAX_FRACTION_DIGITS,
   dbpsToPercentText,
   decimalTextToMinor,
   minorToDecimalText,
   nonNegativeDecimalTextToMinor,
   percentTextToDbps,
+  storageMinorUnitDigits,
 } from '../../../src/shared/decimal-text.ts';
 import { ValidationError } from '../../../src/shared/errors.ts';
+import { currencyCode, type CurrencyCode } from '../../../src/shared/money.ts';
 
 describe('nonNegativeDecimalTextToMinor', () => {
   it('converts canonical 2-digit amounts exactly', () => {
@@ -81,5 +84,26 @@ describe('percentTextToDbps / dbpsToPercentText', () => {
     expect(dbpsToPercentText(123456n)).toBe('12.3456');
     expect(dbpsToPercentText(150000n)).toBe('15.0000');
     expect(dbpsToPercentText(1n)).toBe('0.0001');
+  });
+});
+
+describe('storageMinorUnitDigits (B1: ISO scale is the only storage scale)', () => {
+  it('returns the ISO 4217 minor-unit digits — the historic storage scale 2 is gone', () => {
+    expect(STORAGE_MAX_FRACTION_DIGITS).toBe(4);
+    expect(storageMinorUnitDigits(currencyCode('SAR'))).toBe(2);
+    expect(storageMinorUnitDigits(currencyCode('USD'))).toBe(2);
+    expect(storageMinorUnitDigits(currencyCode('KWD'))).toBe(3);
+    expect(storageMinorUnitDigits(currencyCode('BHD'))).toBe(3);
+    expect(storageMinorUnitDigits(currencyCode('JPY'))).toBe(0);
+    expect(storageMinorUnitDigits(currencyCode('KRW'))).toBe(0);
+  });
+
+  it('accepts the widest ISO scales exactly (CLF/UYW at 4 fit NUMERIC(18,4) edge-to-edge)', () => {
+    expect(storageMinorUnitDigits(currencyCode('CLF'))).toBe(4);
+    expect(storageMinorUnitDigits(currencyCode('UYW'))).toBe(4);
+  });
+
+  it('fails closed on unknown codes — never a silent default scale', () => {
+    expect(() => storageMinorUnitDigits('ZZZ' as CurrencyCode)).toThrow(ValidationError);
   });
 });

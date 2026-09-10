@@ -5,6 +5,11 @@ export interface NewTaxableOrderLine {
   readonly menuItemId: string;
   readonly customerAmountMinor: bigint;
   readonly currencyCode: string;
+  /**
+   * @deprecated Audit F-B: IGNORED (kept REQUIRED only for signature
+   * stability). The server clock prices every line; any caller-supplied
+   * date has no effect on rate or liability-rule selection.
+   */
   readonly at: Date;
   readonly salesChannel: string;
   readonly deliveryPlatformId: string | null;
