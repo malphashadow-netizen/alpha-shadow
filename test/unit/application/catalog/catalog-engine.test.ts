@@ -19,7 +19,7 @@ import {
   parentChainContains,
   parseLocalizedText,
 } from '../../../../src/domain/contracts/catalog-rules.ts';
-import { InMemoryCatalogRepository } from '../../../../src/infrastructure/db/repositories/in-memory-catalog-repository.ts';
+import { InMemoryCatalogRepository, InMemoryCatalogStore } from '../../../../src/infrastructure/db/repositories/in-memory-catalog-repository.ts';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../../../src/shared/errors.ts';
 import { currencyCode, CurrencyMismatchError, money } from '../../../../src/shared/money.ts';
 
@@ -421,5 +421,34 @@ describe('CatalogEngine B7 authorization wiring (recording stub)', () => {
     const engine = new CatalogEngine({ catalog: new InMemoryCatalogRepository(), authorization: deny });
     await expect(engine.createCategory(TENANT, ACTOR, { name: { ar: 'مرفوض' } })).rejects.toBeInstanceOf(ForbiddenError);
     expect(await engine.listCategories(TENANT)).toHaveLength(0);
+  });
+});
+
+describe('InMemoryCatalogRepository — branchBelongsToTenant', () => {
+  it('returns true when no branches are seeded (permissive-by-default for pure unit tests only)', async () => {
+    const store = new InMemoryCatalogStore();
+    expect(store.branches.size).toBe(0);
+    const repo = new InMemoryCatalogRepository(store);
+    // Permissive behavior is intended ONLY for pure unit tests to avoid boilerplate; production uses PostgreSQL RLS.
+    const result = await repo.branchBelongsToTenant(TENANT, BRANCH_1);
+    expect(result).toBe(true);
+  });
+
+  it('returns true when a seeded branch belongs to the requested tenant', async () => {
+    const store = new InMemoryCatalogStore();
+    store.branches.set(BRANCH_1, { id: BRANCH_1, tenantId: TENANT });
+    const repo = new InMemoryCatalogRepository(store);
+    const result = await repo.branchBelongsToTenant(TENANT, BRANCH_1);
+    expect(result).toBe(true);
+  });
+
+  it('returns false when a seeded branch belongs to another tenant (strict check once seeded)', async () => {
+    const store = new InMemoryCatalogStore();
+    // Seed branch belonging to OTHER tenant
+    store.branches.set(BRANCH_2, { id: BRANCH_2, tenantId: OTHER });
+    const repo = new InMemoryCatalogRepository(store);
+    // Calling with TENANT against BRANCH_2 (which belongs to OTHER) must return false
+    const result = await repo.branchBelongsToTenant(TENANT, BRANCH_2);
+    expect(result).toBe(false);
   });
 });

@@ -638,4 +638,14 @@ export class PostgresCatalogRepository implements CatalogRepository {
       return result.rows.map(mapOverride);
     });
   }
+
+  async branchBelongsToTenant(tenantId: string, branchId: string): Promise<boolean> {
+    return this.withTenantContext(tenantId, async (q) => {
+      const result = await q.query<{ one: number }>(
+        'SELECT 1 AS one FROM branches WHERE tenant_id = $1 AND id = $2',
+        [tenantId, branchId],
+      );
+      return result.rows.length > 0;
+    });
+  }
 }

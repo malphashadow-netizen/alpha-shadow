@@ -47,6 +47,7 @@ export class InMemoryCatalogStore {
   readonly modifiers = new Map<string, Modifier>();
   readonly links = new Map<string, MenuItemModifierGroupLink>();
   readonly overrides = new Map<string, BranchMenuItemOverride>();
+  readonly branches = new Map<string, { readonly id: string; readonly tenantId: string }>();
 }
 
 function overrideKey(tenantId: string, branchId: string, menuItemId: string): string {
@@ -262,6 +263,14 @@ export class InMemoryCatalogRepository implements CatalogRepository {
 
   async listBranchOverrides(tenantId: string, branchId: string): Promise<readonly BranchMenuItemOverride[]> {
     return [...this.store.overrides.values()].filter((row) => row.tenantId === tenantId && row.branchId === branchId);
+  }
+
+  async branchBelongsToTenant(tenantId: string, branchId: string): Promise<boolean> {
+    const branch = this.store.branches.get(branchId);
+    if (branch !== undefined) {
+      return branch.tenantId === tenantId;
+    }
+    return this.store.branches.size === 0;
   }
 
   private owned<T extends { readonly tenantId: string }>(row: T | undefined, tenantId: string, message: string): T {

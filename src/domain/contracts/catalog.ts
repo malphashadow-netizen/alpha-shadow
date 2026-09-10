@@ -164,4 +164,5 @@ export interface CatalogRepository {
     menuItemId: string,
   ): Promise<BranchMenuItemOverride | null>;
   listBranchOverrides(tenantId: string, branchId: string): Promise<readonly BranchMenuItemOverride[]>;
+  branchBelongsToTenant(tenantId: string, branchId: string): Promise<boolean>;
 }

@@ -15,7 +15,7 @@ import { PostgresCatalogRepository } from '../../src/infrastructure/db/repositor
 import { PostgresPermissionReadRepository, PostgresPermissionWriteRepository } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
-import { ValidationError } from '../../src/shared/errors.ts';
+import { NotFoundError, ValidationError } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
 import { grantKeys } from '../support/grant-keys.ts';
@@ -419,5 +419,54 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       return result.rowCount;
     });
     expect(otherOverride).toBe(0);
+  });
+
+  it('refuses setBranchOverride when the branch belongs to a different tenant (tenant isolation)', async () => {
+    const category = await engine.createCategory(TENANT_A, actorA, { name: { ar: 'حلويات' } });
+    const item = await engine.createItem(TENANT_A, actorA, {
+      categoryId: category.id,
+      name: { ar: 'كيك', en: 'Cake' },
+      basePrice: money(3000n, SAR),
+    });
+
+    // Negative case: calling setBranchOverride for TENANT_A with BRANCH_B1 (which belongs to TENANT_B)
+    await expect(
+      engine.setBranchOverride(TENANT_A, actorA, {
+        branchId: BRANCH_B1,
+        menuItemId: item.id,
+        priceOverride: money(3500n, SAR),
+        isAvailable: true,
+      }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+
+    // Verify in DB that no override was written under TENANT_A for BRANCH_B1
+    const crossBranchCheck = await withAppContext(TENANT_A, async (q) => {
+      const result = await q.query(
+        'SELECT 1 FROM branch_menu_item_overrides WHERE tenant_id = $1 AND branch_id = $2 AND menu_item_id = $3',
+        [TENANT_A, BRANCH_B1, item.id],
+      );
+      return result.rowCount;
+    });
+    expect(crossBranchCheck).toBe(0);
+
+    // Parallel positive case: calling setBranchOverride for TENANT_A with its own BRANCH_A1 succeeds
+    const allowedOverride = await engine.setBranchOverride(TENANT_A, actorA, {
+      branchId: BRANCH_A1,
+      menuItemId: item.id,
+      priceOverride: money(3500n, SAR),
+      isAvailable: true,
+    });
+    expect(allowedOverride.branchId).toBe(BRANCH_A1);
+    expect(allowedOverride.priceOverrideAmountMinor).toBe(3500n);
+  });
+
+  it('refuses getBranchMenu when the branch belongs to a different tenant', async () => {
+    // Negative case: getBranchMenu for TENANT_A with BRANCH_B1 (belongs to TENANT_B) fails
+    await expect(engine.getBranchMenu(TENANT_A, BRANCH_B1)).rejects.toBeInstanceOf(NotFoundError);
+
+    // Parallel positive case: getBranchMenu for TENANT_A with its own BRANCH_A1 succeeds
+    const menuA1 = await engine.getBranchMenu(TENANT_A, BRANCH_A1);
+    expect(menuA1).toBeDefined();
+    expect(Array.isArray(menuA1.categories)).toBe(true);
   });
 });
