@@ -99,6 +99,27 @@ Use real engines and repositories to verify:
 5. a branch grant cannot administer a tenant-wide method;
 6. cross-branch denial does not disclose resource existence.
 
+### Implementation status
+
+Implemented by AUTH-BR-19/20 (commits f20f9ab, 689e926):
+
+- `create()` now authorizes against the branch supplied on the input (or
+  tenant-wide when `branchId` is null) via `administrationContext(branchId)`,
+  before validating the rest of the payload. The composite foreign key on
+  `payment_methods (branch_id, tenant_id)` guarantees the branch belongs to
+  the active tenant at the database layer.
+- `update()` loads the existing record first (scoped to the tenant), then
+  authorizes against the *authoritative* `existing.branchId` before applying
+  the update. A branch-scoped grant that does not cover the record's branch
+  is rejected with the same `forbidden` error used for a genuinely missing
+  id, so no cross-branch or cross-tenant existence is disclosed.
+- Live coverage added in `test/integration/permission-denials.test.ts`:
+  `AUTH-BR-19` (create: branch-scoped success/denial + tenant-wide grant
+  success across branches) and `AUTH-BR-20` (update: branch-scoped
+  success/denial, tenant-wide record denial, non-existent id denial with
+  identical error shape, tenant-wide grant success across all scopes).
+
+
 ## DD-002 — Deployment-level ownership policy for catalog price modification
 
 ### Status and isolation
