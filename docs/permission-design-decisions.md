@@ -294,6 +294,65 @@ Use real engines and repositories to verify:
 5. a tenant-scoped grant succeeds on items in both branch A and branch B.
 
 
+## DD-004 — Branch-scoped per-branch menu overrides
+
+### Related authorization points
+
+- `AUTH-BR-15`: `CatalogEngine.setBranchOverride`
+
+### Decision
+
+`catalog:write` continues to require a tenant-scoped grant for every base
+menu-authoring operation (categories, items, modifier groups, modifiers, and
+their links) — none of those 13 operations change.
+
+Only `CatalogEngine.setBranchOverride` (per-branch price / availability /
+availability-schedule override) becomes branch-aware:
+
+- a tenant-scoped grant may set a branch override for any branch belonging
+  to the tenant;
+- a branch-A-scoped grant may set a branch override only for branch A;
+- a branch-A-scoped grant must be denied — with the identical error shape —
+  when the requested branch is branch B, with no disclosure of whether a
+  branch-B override or item state exists.
+
+### Trusted resource branch
+
+The trusted resource branch is `input.branchId` itself, verified as
+belonging to the active tenant (via the existing `branchBelongsToTenant`
+check) before authorization runs. This mirrors the `create` path of DD-001,
+not its `update` path: `setBranchOverride` is an upsert against an explicit
+caller-supplied branch, not a mutation of a pre-existing record whose branch
+must be loaded from storage first.
+
+### Non-existent branch
+
+If `input.branchId` does not belong to the tenant at all, the method returns
+`NotFoundError` directly, independent of the authorization outcome. This is
+not a disclosure risk — it confirms only that the supplied branch id itself
+is invalid for this tenant, not that some other tenant's or branch's
+resource exists.
+
+### Authorization matrix
+
+| Grant | Override in branch A | Override in branch B |
+|---|---:|---:|
+| Tenant-scoped `catalog:write` | Allow | Allow |
+| Branch-A-scoped `catalog:write` | Allow | Deny |
+| Branch-B-scoped `catalog:write` | Deny | Allow |
+| No grant | Deny | Deny |
+
+### Required future tests
+
+1. a user holds only a branch-A grant;
+2. setting the override in branch A succeeds;
+3. the same user is denied, with the identical error shape, when the
+   requested branch is branch B;
+4. a tenant-scoped grant succeeds for overrides in both branch A and
+   branch B;
+5. a request naming a branch id that does not belong to the tenant returns
+   `NotFoundError`, regardless of grant scope.
+
 ## Deferred item — AUTH-BR-22
 
 `AUTH-BR-22` is the base `order:void` authorization gate.
