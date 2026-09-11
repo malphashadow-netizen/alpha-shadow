@@ -1869,4 +1869,29 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(adjustB).toBeInstanceOf(ForbiddenError);
     expect((adjustB as ForbiddenError).message).toContain('inventory:adjust');
   });
+
+  it('[AUTH-BR-03/04] a branch-only inventory:adjust grant authorizes mute/unmute on branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const subject = await createBranchTieredUser(['inventory:adjust'], '', tillA.branchId);
+    const subjectActor = { userId: subject.userId, tokenSecV: subject.tokenSecV };
+
+    await inventory.muteLowStockAlerts(T, subjectActor, tillA.branchId);
+    console.log('[AUTH-BR-03] branch A actual= muted ok');
+
+    const muteB = await inventory.muteLowStockAlerts(T, subjectActor, tillB.branchId)
+      .then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-03] branch B actual= ForbiddenError');
+    expect(muteB).toBeInstanceOf(ForbiddenError);
+    expect((muteB as ForbiddenError).message).toContain('inventory:adjust');
+
+    await inventory.unmuteLowStockAlerts(T, subjectActor, tillA.branchId);
+    console.log('[AUTH-BR-04] branch A actual= unmuted ok');
+
+    const unmuteB = await inventory.unmuteLowStockAlerts(T, subjectActor, tillB.branchId)
+      .then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-04] branch B actual= ForbiddenError');
+    expect(unmuteB).toBeInstanceOf(ForbiddenError);
+    expect((unmuteB as ForbiddenError).message).toContain('inventory:adjust');
+  });
 });

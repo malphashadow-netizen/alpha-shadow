@@ -219,7 +219,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: ADJUST_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: branchId,
+        resourceBranchId: branchId,
+        isSensitivePermission: true,
+      },
     });
     await this.dependencies.store.run(tenantId, async (scope) => {
       if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {
@@ -236,7 +241,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: ADJUST_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: branchId,
+        resourceBranchId: branchId,
+        isSensitivePermission: true,
+      },
     });
     await this.dependencies.store.run(tenantId, async (scope) => {
       if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {
