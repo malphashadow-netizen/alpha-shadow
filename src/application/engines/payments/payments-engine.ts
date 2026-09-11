@@ -143,14 +143,19 @@ export class PaymentsEngine {
 
   async recordPayment(tenantId: string, input: RecordPaymentInput): Promise<RecordedPayment> {
     // B7: the collecting cashier must hold payments:collect (sensitive —
-    // money-affecting). Checked before any store work: an unauthorized caller
-    // never takes the order lock.
+    // money-affecting), scoped to the order's REAL branch. Checked before
+    // the order lock: an unauthorized caller never takes it.
+    const branchId = await this.dependencies.store.run(tenantId, async (scope) => {
+      const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
+      if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      return snapshot.branchId;
+    });
     await this.dependencies.authorization.check({
       tenantId,
       userId: input.cashierUserId,
       permissionKey: PAYMENTS_COLLECT_PERMISSION_KEY,
       ...(input.tokenSecV === undefined ? {} : { tokenSecV: input.tokenSecV }),
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: branchId, resourceBranchId: branchId, isSensitivePermission: true },
     });
     // B8: null = legacy path (every call a new attempt — returned unwrapped
     // below); otherwise the pre-check inside decides replay-vs-collect, and

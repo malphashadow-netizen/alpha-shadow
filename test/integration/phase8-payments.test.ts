@@ -1302,4 +1302,50 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect.soft({ error: resultA.error, status: resultA.payment?.status }).toEqual({ error: null, status: 'voided' });
     expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('payments:void') });
   });
+
+  it('AUTH-BR-07b/a branch-only payments:collect grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const orderA = await newOrder(tillA);
+    const orderB = await newOrder(tillB);
+    const subject = await createBranchScopedPaymentsUser(T, [
+      { keys: ['payments:collect'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    await shifts.openShift(T, {
+      branchId: tillA.branchId,
+      cashierUserId: subject.userId,
+      openedByUserId: opener.userId,
+      openVerifiedByUserId: verifier.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    });
+
+    const resultA = await payments.recordPayment(T, {
+      orderId: orderA.order.id,
+      paymentMethodId: methodCashId,
+      cashierUserId: subject.userId,
+      tokenSecV: subject.tokenSecV,
+      amountText: '46.00',
+    }).then(
+      (recorded) => ({ recorded, error: null }),
+      (error: unknown) => ({ recorded: null, error }),
+    );
+    const resultB = await payments.recordPayment(T, {
+      orderId: orderB.order.id,
+      paymentMethodId: methodCashId,
+      cashierUserId: subject.userId,
+      tokenSecV: subject.tokenSecV,
+      amountText: '46.00',
+    }).then(
+      (recorded) => ({ recorded, error: null }),
+      (error: unknown) => ({ recorded: null, error }),
+    );
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.recorded?.payment.status;
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.recorded?.payment.status;
+    console.log(`[AUTH-BR-07b] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-07b] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, status: resultA.recorded?.payment.status }).toEqual({ error: null, status: 'completed' });
+    expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('payments:collect') });
+  });
 });
