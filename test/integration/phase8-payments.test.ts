@@ -1348,4 +1348,45 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect.soft({ error: resultA.error, status: resultA.recorded?.payment.status }).toEqual({ error: null, status: 'completed' });
     expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('payments:collect') });
   });
+
+  it('AUTH-BR-05/a branch-only order:discount:apply grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const orderA = await newOrder(tillA);
+    const orderB = await newOrder(tillB);
+    const subject = await createBranchScopedPaymentsUser(T, [
+      { keys: ['order:discount:apply'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    await withApp(T, (q) => q.query(
+      `INSERT INTO user_discount_limits (tenant_id, user_id, permission_key, max_discount_percentage, max_discount_fixed_amount)
+       VALUES ($1, $2, 'order:discount:apply', '15.00', '20.00')`,
+      [T, subject.userId],
+    ));
+
+    const resultA = await discounts.applyDiscount(T, actor(subject), {
+      orderId: orderA.order.id,
+      mechanism: 'manual',
+      discountKind: 'fixed_amount',
+      discountValueText: '1.00',
+    }).then(
+      (discount) => ({ discount, error: null }),
+      (error: unknown) => ({ discount: null, error }),
+    );
+    const resultB = await discounts.applyDiscount(T, actor(subject), {
+      orderId: orderB.order.id,
+      mechanism: 'manual',
+      discountKind: 'fixed_amount',
+      discountValueText: '1.00',
+    }).then(
+      (discount) => ({ discount, error: null }),
+      (error: unknown) => ({ discount: null, error }),
+    );
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.discount?.discountAmountApplied;
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.discount?.discountAmountApplied;
+    console.log(`[AUTH-BR-05] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-05] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, orderId: resultA.discount?.orderId }).toEqual({ error: null, orderId: orderA.order.id });
+    expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('order:discount:apply') });
+  });
 });

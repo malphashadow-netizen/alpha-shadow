@@ -93,12 +93,17 @@ export class DiscountEngine {
     }
 
     // Stage 1 — the atomic permission key (sensitive: never cached).
+    const branchId = await this.dependencies.store.run(tenantId, async (scope) => {
+      const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, input.orderId);
+      if (snapshot === null) throw new NotFoundError(`Order ${input.orderId} not found`);
+      return snapshot.branchId;
+    });
     await this.dependencies.authorization.check({
       tenantId,
       userId: actor.userId,
       permissionKey: DISCOUNT_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: branchId, resourceBranchId: branchId, isSensitivePermission: true },
     });
 
     // Pre-computation read pass: decide whether an override is needed BEFORE
@@ -117,7 +122,7 @@ export class DiscountEngine {
       const stage = computeDiscountStage(remainingSubtotal, request);
       const requirement = discountOverrideRequirement(stage, request, caps);
       const coupon = input.mechanism === 'coupon' ? await scope.loadCouponByCode(tenantId, mustCouponCode(input)) : null;
-      return { baseDigits, caps, requirement, coupon };
+      return { baseDigits, caps, requirement, coupon, branchId: snapshot.branchId };
     });
 
     // Escalation (step 4): the live Phase-7b challenge, when demanded.
@@ -134,7 +139,7 @@ export class DiscountEngine {
           tenantId,
           userId: challenge.managerUserId,
           permissionKey: DISCOUNT_PERMISSION_KEY,
-          context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+          context: { hasResource: true, actorBranchId: pre.branchId, resourceBranchId: pre.branchId, isSensitivePermission: true },
         });
       } catch (error: unknown) {
         throw new ManagerOverrideAuthenticationError(
