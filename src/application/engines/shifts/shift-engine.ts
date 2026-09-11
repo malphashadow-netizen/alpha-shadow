@@ -99,7 +99,7 @@ export class ShiftEngine {
       tenantId,
       userId: input.openedByUserId,
       permissionKey: SHIFT_OPEN_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: input.branchId, resourceBranchId: input.branchId, isSensitivePermission: true },
     });
     if (input.openedByUserId === input.openVerifiedByUserId) {
       throw new ValidationError('The shift opener and the open verifier must be two DIFFERENT people (dual verification)');
@@ -141,11 +141,16 @@ export class ShiftEngine {
   async closeShift(tenantId: string, input: CloseShiftInput): Promise<ShiftRecord> {
     // B7: the closer must hold shift:close (sensitive — the Z Report is the
     // official till close). Checked first, before the shift lock is taken.
+    const shiftBranchId = await this.dependencies.store.run(tenantId, async (scope) => {
+      const shift = await scope.loadShift(tenantId, input.shiftId);
+      if (shift === null) throw new NotFoundError(`Shift ${input.shiftId} not found`);
+      return shift.branchId;
+    });
     await this.dependencies.authorization.check({
       tenantId,
       userId: input.closedByUserId,
       permissionKey: SHIFT_CLOSE_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: shiftBranchId, resourceBranchId: shiftBranchId, isSensitivePermission: true },
     });
     if (input.closedByUserId === input.closeVerifiedByUserId) {
       throw new ValidationError('The shift closer and the close verifier must be two DIFFERENT people (dual verification)');

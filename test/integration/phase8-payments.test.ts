@@ -1389,4 +1389,90 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect.soft({ error: resultA.error, orderId: resultA.discount?.orderId }).toEqual({ error: null, orderId: orderA.order.id });
     expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('order:discount:apply') });
   });
+
+  it('[AUTH-BR-10/11] a branch-only shift:open + shift:close grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const branchIdA = randomUUID();
+    const branchIdB = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query(
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')",
+        [branchIdA, T, `AUTH-BR-10-A-${branchIdA}`],
+      );
+      await q.query(
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')",
+        [branchIdB, T, `AUTH-BR-10-B-${branchIdB}`],
+      );
+    });
+    const subjectOpen = await createBranchScopedPaymentsUser(T, [
+      { keys: ['shift:open'], scopeType: 'branch', scopeId: branchIdA },
+    ]);
+    const cashierA = await createPlainUser('6111');
+    const verifierA = await createPlainUser('6222');
+    const cashierB = await createPlainUser('6333');
+    const verifierB = await createPlainUser('6444');
+
+    const openA = await shifts.openShift(T, {
+      branchId: branchIdA,
+      cashierUserId: cashierA.userId,
+      openedByUserId: subjectOpen.userId,
+      openVerifiedByUserId: verifierA.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    const openB = await shifts.openShift(T, {
+      branchId: branchIdB,
+      cashierUserId: cashierB.userId,
+      openedByUserId: subjectOpen.userId,
+      openVerifiedByUserId: verifierB.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    console.log(`[AUTH-BR-10] branch A actual=${openA.shift?.status ?? (openA.error as Error).name}`);
+    console.log(`[AUTH-BR-10] branch B actual=${openB.shift?.status ?? (openB.error as Error).name}`);
+
+    expect.soft({ error: openA.error, status: openA.shift?.status }).toEqual({ error: null, status: 'open' });
+    expect(openB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('shift:open') });
+
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const subjectClose = await createBranchScopedPaymentsUser(T, [
+      { keys: ['shift:close'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    const closeVerifierA = await createPlainUser('6555');
+    const closeVerifierB = await createPlainUser('6666');
+
+    const closeA = await shifts.closeShift(T, {
+      shiftId: tillA.shiftId,
+      closedByUserId: subjectClose.userId,
+      closeVerifiedByUserId: closeVerifierA.userId,
+      closedAt: new Date(),
+      closeCounts: [],
+      notes: null,
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    const closeB = await shifts.closeShift(T, {
+      shiftId: tillB.shiftId,
+      closedByUserId: subjectClose.userId,
+      closeVerifiedByUserId: closeVerifierB.userId,
+      closedAt: new Date(),
+      closeCounts: [],
+      notes: null,
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    console.log(`[AUTH-BR-11] branch A actual=${closeA.shift?.status ?? (closeA.error as Error).name}`);
+    console.log(`[AUTH-BR-11] branch B actual=${closeB.shift?.status ?? (closeB.error as Error).name}`);
+
+    expect.soft({ error: closeA.error, status: closeA.shift?.status }).toEqual({ error: null, status: 'closed' });
+    expect(closeB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('shift:close') });
+  });
 });
