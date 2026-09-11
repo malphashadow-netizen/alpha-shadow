@@ -43,6 +43,20 @@ interface TillUser {
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 const PIN_PEPPER = Buffer.from(randomBytes(48));
 
+async function grantBranchKeys(
+  write: PostgresPermissionWriteRepository,
+  tenantId: string,
+  userId: string,
+  branchId: string,
+  keys: readonly string[],
+): Promise<void> {
+  const roleId = await write.createRole(tenantId, `b7-branch-grant-${randomUUID()}`);
+  for (const key of keys) {
+    await write.assignRolePermission(tenantId, roleId, key, null);
+  }
+  await write.assignUserRole(tenantId, userId, roleId, 'branch', branchId);
+}
+
 describe('B7 permission denials (live)', () => {
   let owner: pg.Pool;
   let app: pg.Pool;
@@ -248,5 +262,78 @@ describe('B7 permission denials (live)', () => {
     await grantKeys(permWrite, T, editor.userId, ['catalog:archive']);
     const archived = await catalog.archiveCategory(T, editor.userId, created.id);
     expect(archived.isActive).toBe(false);
+  });
+
+  it('AUTH-BR-19 payments:methods_admin create: a branch-A-only grant is scoped to branch A', async () => {
+    const branchOnly = await createUser();
+    await grantBranchKeys(permWrite, T, branchOnly.userId, branchId, ['payments:methods_admin']);
+
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      'INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)',
+      [branchB, T, 'B7 branch B', 'SAR', 'Asia/Riyadh', 'SA'],
+    ));
+
+    const allowedInA = await methods.create(T, branchOnly.userId, {
+      name: 'فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+    });
+    expect(allowedInA.branchId).toBe(branchId);
+
+    await expect(methods.create(T, branchOnly.userId, {
+      name: 'فرع B مرفوض', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, isActive: true,
+    })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    await expect(methods.create(T, branchOnly.userId, {
+      name: 'كل الفروع مرفوض', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true,
+    })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    const tenantAdmin = await createUser();
+    await grantKeys(permWrite, T, tenantAdmin.userId, ['payments:methods_admin']);
+    for (const scopedBranchId of [branchId, branchB, null]) {
+      const created = await methods.create(T, tenantAdmin.userId, {
+        name: 'منحة tenant', type: 'card', branchId: scopedBranchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      });
+      expect(created.branchId).toBe(scopedBranchId);
+    }
+  });
+
+  it('AUTH-BR-20 payments:methods_admin update: a branch-A-only grant cannot administer branch-B or tenant-wide methods, and does not disclose their existence', async () => {
+    const tenantAdmin = await createUser();
+    await grantKeys(permWrite, T, tenantAdmin.userId, ['payments:methods_admin']);
+
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      'INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)',
+      [branchB, T, 'B7 branch B (update)', 'SAR', 'Asia/Riyadh', 'SA'],
+    ));
+
+    const methodInA = await methods.create(T, tenantAdmin.userId, {
+      name: 'وسيلة فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+    });
+    const methodInB = await methods.create(T, tenantAdmin.userId, {
+      name: 'وسيلة فرع B', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, isActive: true,
+    });
+
+    const branchOnly = await createUser();
+    await grantBranchKeys(permWrite, T, branchOnly.userId, branchId, ['payments:methods_admin']);
+
+    const updatedInA = await methods.update(T, branchOnly.userId, methodInA.id, { name: 'محدّث فرع A' });
+    expect(updatedInA.name).toBe('محدّث فرع A');
+
+    await expect(methods.update(T, branchOnly.userId, methodInB.id, { name: 'مرفوض' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    await expect(methods.update(T, branchOnly.userId, methodCashId, { name: 'مرفوض tenant-wide' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    // عدم الإفشاء: معرّف غير موجود تحت نفس المنحة المقيّدة بفرع يجب أن يفشل
+    // بنفس شكل الرفض الخاص بفرع B، وليس بـ NotFoundError.
+    await expect(methods.update(T, branchOnly.userId, randomUUID(), { name: 'غير موجود' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    for (const target of [methodInA.id, methodInB.id, methodCashId]) {
+      const updated = await methods.update(T, tenantAdmin.userId, target, { name: 'منحة tenant محدثة' });
+      expect(updated.name).toBe('منحة tenant محدثة');
+    }
   });
 });
