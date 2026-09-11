@@ -65,6 +65,20 @@ async function waitFor(predicate: () => boolean, timeoutMs = 8_000): Promise<voi
   expect(predicate()).toBe(true);
 }
 
+async function grantBranchKeys(
+  write: PostgresPermissionWriteRepository,
+  tenantId: string,
+  userId: string,
+  branchId: string,
+  keys: readonly string[],
+): Promise<void> {
+  const roleId = await write.createRole(tenantId, `r1-branch-grant-${randomUUID()}`);
+  for (const key of keys) {
+    await write.assignRolePermission(tenantId, roleId, key, null);
+  }
+  await write.assignUserRole(tenantId, userId, roleId, 'branch', branchId);
+}
+
 describe('R1 live acceptance (KDS device tokens)', () => {
   let owner: pg.Pool;
   let app: pg.Pool;
@@ -164,6 +178,21 @@ describe('R1 live acceptance (KDS device tokens)', () => {
     await expect(kdsDevices.revokeDeviceToken(A, issuerId, randomUUID())).rejects.toThrow(NotFoundError);
     const issued = await kdsDevices.issueDeviceToken(A, issuerId, { branchId: branchA1, label: 'not-yours' });
     await expect(kdsDevices.revokeDeviceToken(A, plainUserId, issued.record.id)).rejects.toThrow(ForbiddenError);
+  });
+
+  it('[AUTH-BR-12/13] issue and revoke honor branch-scoped payments:methods_admin grants', async () => {
+    const subjectId = randomUUID();
+    await withApp(A, async (q) => {
+      await q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)', [subjectId, A, `${subjectId}@example.test`, hashPin(PIN_PEPPER, A, subjectId, '0000')]);
+    });
+    await grantBranchKeys(permWrite, A, subjectId, branchA1, ['payments:methods_admin']);
+
+    const issuedA1 = await kdsDevices.issueDeviceToken(A, subjectId, { branchId: branchA1, label: 'branch-a1' });
+    await expect(kdsDevices.issueDeviceToken(A, subjectId, { branchId: branchA2, label: 'branch-a2-denied' })).rejects.toThrow(ForbiddenError);
+
+    const issuedA2 = await kdsDevices.issueDeviceToken(A, issuerId, { branchId: branchA2, label: 'branch-a2' });
+    await expect(kdsDevices.revokeDeviceToken(A, subjectId, issuedA1.record.id)).resolves.toMatchObject({ status: 'revoked' });
+    await expect(kdsDevices.revokeDeviceToken(A, subjectId, issuedA2.record.id)).rejects.toThrow(ForbiddenError);
   });
 
   // ── engine: verify ────────────────────────────────────────────────────
