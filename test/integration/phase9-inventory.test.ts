@@ -1817,4 +1817,56 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ));
     expect(collision.rows[0]).toEqual({ codes: 8, lowers: 8 });
   });
+
+  it('[AUTH-BR-01/02] a branch-only inventory:receive + inventory:adjust grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const itemA = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const itemB = await createComponent(tillB.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reasonId = await createAdjustmentReason();
+    const subject = await createBranchTieredUser(
+      ['inventory:receive', 'inventory:adjust'],
+      '',
+      tillA.branchId,
+    );
+    const actor = { userId: subject.userId, tokenSecV: subject.tokenSecV };
+
+    const receiveA = await inventory.receiveStock(T, actor, {
+      branchId: tillA.branchId,
+      inventoryItemId: itemA,
+      purchaseUnit: 'kg',
+      quantityText: '5.00000000',
+    });
+    console.log('[AUTH-BR-01] branch A actual=', receiveA.movementType);
+    expect(receiveA.movementType).toBe('manual_receiving');
+
+    const receiveB = await inventory.receiveStock(T, actor, {
+      branchId: tillB.branchId,
+      inventoryItemId: itemB,
+      purchaseUnit: 'kg',
+      quantityText: '5.00000000',
+    }).then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-01] branch B actual=', `${(receiveB as Error).name}: ${(receiveB as Error).message}`);
+    expect(receiveB).toBeInstanceOf(ForbiddenError);
+    expect((receiveB as ForbiddenError).message).toContain('inventory:receive');
+
+    const adjustA = await inventory.adjustStock(T, actor, {
+      branchId: tillA.branchId,
+      inventoryItemId: itemA,
+      quantityDeltaText: '-1.0000',
+      adjustmentReasonId: reasonId,
+    });
+    console.log('[AUTH-BR-02] branch A actual=', adjustA.movementType);
+    expect(adjustA.movementType).toBe('manual_adjustment');
+
+    const adjustB = await inventory.adjustStock(T, actor, {
+      branchId: tillB.branchId,
+      inventoryItemId: itemB,
+      quantityDeltaText: '-1.0000',
+      adjustmentReasonId: reasonId,
+    }).then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-02] branch B actual=', `${(adjustB as Error).name}: ${(adjustB as Error).message}`);
+    expect(adjustB).toBeInstanceOf(ForbiddenError);
+    expect((adjustB as ForbiddenError).message).toContain('inventory:adjust');
+  });
 });
