@@ -235,6 +235,65 @@ For `hosted_subscription`:
 
 Mode-transition tests must wait for the transition policy.
 
+## DD-003 — Branch-scoped item workflow transitions
+
+### Related authorization points
+
+- `AUTH-BR-14`: `WorkflowTransitionEngine.transitionItem`
+
+### Decision
+
+`order:item:transition` supports tenant-scoped and branch-scoped grants,
+following the same coverage model as DD-001.
+
+A tenant-scoped grant may transition items on orders belonging to every
+branch of the tenant.
+
+A branch-A-scoped grant may transition items on orders belonging to branch A
+only. It must not permit the actor to:
+
+- transition an item on an order belonging to branch B;
+- infer whether an item or order exists in branch B (or does not exist at
+  all) from differing errors.
+
+### Trusted resource branch
+
+The authoritative branch is loaded from the order that owns the target item,
+through tenant context, before authorization. The actor's own `branchId` (if
+any) is not the resource branch — the order's branch is. Authorization must
+not rely on a branch value supplied by the caller.
+
+### Non-existent item / order
+
+When the target item cannot be found, the engine performs a tenant-wide probe
+check first (`actorBranchId: null`):
+
+- if the actor lacks even a tenant-wide grant, the rejection is identical in
+  shape to a cross-branch denial — no existence is disclosed;
+- only when the actor holds a tenant-wide grant does the engine surface
+  `NotFoundError`.
+
+### Authorization matrix
+
+| Grant | Order in branch A | Order in branch B | Non-existent item |
+|---|---:|---:|---:|
+| Tenant-scoped `order:item:transition` | Allow | Allow | NotFoundError |
+| Branch-A-scoped `order:item:transition` | Allow | Deny | Deny (same shape as branch-B) |
+| Branch-B-scoped `order:item:transition` | Deny | Allow | Deny (same shape as branch-A) |
+| No grant | Deny | Deny | Deny |
+
+### Required future tests
+
+Use real engines and repositories to verify:
+
+1. one user has only a branch-A grant;
+2. a transition on an item whose order is in branch A succeeds;
+3. the same user is denied on an item whose order is in branch B;
+4. the same user is denied, with the identical error shape, on a
+   non-existent item id;
+5. a tenant-scoped grant succeeds on items in both branch A and branch B.
+
+
 ## Deferred item — AUTH-BR-22
 
 `AUTH-BR-22` is the base `order:void` authorization gate.
