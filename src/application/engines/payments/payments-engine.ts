@@ -378,23 +378,37 @@ export class PaymentsEngine {
   }
 
   async voidPayment(tenantId: string, actor: PaymentActor, input: { paymentId: string; reason: string }): Promise<PaymentRecord> {
+    const branchId = await this.dependencies.store.run(tenantId, async (scope) => {
+      const payment = await scope.loadPayment(tenantId, input.paymentId);
+      if (payment === null) throw new NotFoundError(`Payment ${input.paymentId} not found`);
+      const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, payment.orderId);
+      if (snapshot === null) throw new NotFoundError(`Order ${payment.orderId} not found`);
+      return snapshot.branchId;
+    });
     await this.dependencies.authorization.check({
       tenantId,
       userId: actor.userId,
       permissionKey: PAYMENTS_VOID_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: branchId, resourceBranchId: branchId, isSensitivePermission: true },
     });
     return this.lifecycleChange(tenantId, actor.userId, input.paymentId, 'voided', input.reason);
   }
 
   async refundPayment(tenantId: string, actor: PaymentActor, input: { paymentId: string }): Promise<PaymentRecord> {
+    const branchId = await this.dependencies.store.run(tenantId, async (scope) => {
+      const payment = await scope.loadPayment(tenantId, input.paymentId);
+      if (payment === null) throw new NotFoundError(`Payment ${input.paymentId} not found`);
+      const snapshot = await scope.loadOrderFinancialSnapshot(tenantId, payment.orderId);
+      if (snapshot === null) throw new NotFoundError(`Order ${payment.orderId} not found`);
+      return snapshot.branchId;
+    });
     await this.dependencies.authorization.check({
       tenantId,
       userId: actor.userId,
       permissionKey: PAYMENTS_REFUND_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: { hasResource: true, actorBranchId: branchId, resourceBranchId: branchId, isSensitivePermission: true },
     });
     return this.lifecycleChange(tenantId, actor.userId, input.paymentId, 'refunded', null);
   }
