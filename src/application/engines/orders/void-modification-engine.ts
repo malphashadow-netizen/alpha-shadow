@@ -112,19 +112,19 @@ export class VoidModificationEngine {
       notes?: string | undefined;
     },
   ): Promise<OrderVoidAuditRecord> {
-    // Stage 1: the ACTOR must hold the base void permission through the full
-    // three-stage engine (tenant guard, sec_v freshness, sensitive = no L1
-    // cache). An override can raise the TIER, never replace the permission.
-    await this.dependencies.authorization.check({
-      tenantId,
-      userId: actor.userId,
-      permissionKey: ORDER_VOID_PERMISSION_KEYS.server,
-      tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
-    });
-
     return this.dependencies.store.run(tenantId, async (scope) => {
       const { order, orderItemId, itemCreatedAt } = await target.resolveTarget(scope);
+
+      // Stage 1: the ACTOR must hold the base void permission through the full
+      // three-stage engine (tenant guard, sec_v freshness, sensitive = no L1
+      // cache). An override can raise the TIER, never replace the permission.
+      await this.dependencies.authorization.check({
+        tenantId,
+        userId: actor.userId,
+        permissionKey: ORDER_VOID_PERMISSION_KEYS.server,
+        tokenSecV: actor.tokenSecV,
+        context: { hasResource: true, actorBranchId: order.branchId, resourceBranchId: order.branchId, isSensitivePermission: true },
+      });
 
       // CRITICAL BRANCH — fail-closed payments placeholder: any void on a
       // non-open order is refused with the explicit PaymentReversalRequiredError

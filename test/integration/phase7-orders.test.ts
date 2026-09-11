@@ -1560,4 +1560,42 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     console.log(`[branch-scoped void tier] branch B actual=${voidB.actorPermissionTier}`);
     expect(voidB.actorPermissionTier).toBe('server');
   });
+
+  it('AUTH-BR-22/a branch-only order:void grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchOnlyServer = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const serverReason = await createVoidReason(A, 'customer_request', 'server');
+    const orderA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const orderB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    const resultA = await voids.voidOrder(A, actor(branchOnlyServer), {
+      orderId: orderA.order.id,
+      voidReasonId: serverReason,
+    }).then(
+      (record) => ({ record, error: null }),
+      (error: unknown) => ({ record: null, error }),
+    );
+    const resultB = await voids.voidOrder(A, actor(branchOnlyServer), {
+      orderId: orderB.order.id,
+      voidReasonId: serverReason,
+    }).then(
+      (record) => ({ record, error: null }),
+      (error: unknown) => ({ record: null, error }),
+    );
+
+    const actualA = resultA.error instanceof Error
+      ? `${resultA.error.name}: ${resultA.error.message}`
+      : resultA.record?.actorPermissionTier;
+    const actualB = resultB.error instanceof Error
+      ? `${resultB.error.name}: ${resultB.error.message}`
+      : resultB.record?.actorPermissionTier;
+    console.log(`[AUTH-BR-22] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-22] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, tier: resultA.record?.actorPermissionTier }).toEqual({ error: null, tier: 'server' });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+  });
 });
