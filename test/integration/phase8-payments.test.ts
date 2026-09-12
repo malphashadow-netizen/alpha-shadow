@@ -1117,6 +1117,60 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(Number(row(paymentsCount.rows).count)).toBe(0);
   });
 
+  it('B9b-db/ validate_payment rejects a direct payment insert for a voided order', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+
+    // Match B9b exactly: voidOrder itself marks every active order item voided.
+    await voids.voidOrder(T, actor(voidServerUser), {
+      orderId: order.order.id,
+      voidReasonId: reasonServer,
+    });
+
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2',
+      [order.order.id, T],
+    )).rows).payment_status).toBe('voided');
+
+    let rejected: unknown = null;
+    try {
+      await withApp(T, (q) => q.query(
+        `INSERT INTO payments (
+           id,
+           tenant_id,
+           order_id,
+           payment_method_id,
+           amount,
+           amount_in_base_currency,
+           shift_id,
+           created_by
+         )
+         VALUES ($1, $2, $3, $4, 10.00, 10.00, $5, $6)`,
+        [
+          randomUUID(),
+          T,
+          order.order.id,
+          methodCashId,
+          till.shiftId,
+          till.cashierId,
+        ],
+      ));
+    } catch (error: unknown) {
+      rejected = error;
+    }
+
+    expect(rejected).toMatchObject({
+      code: '23514',
+      message: expect.stringContaining('voided order cannot take a new payment') as string,
+    });
+
+    const paymentsCount = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2',
+      [T, order.order.id],
+    );
+    expect(Number(row(paymentsCount.rows).count)).toBe(0);
+  });
+
   // ── B9-c: terminal workflow states never block money ─────────────────────
   // (Permissive BY APPROVED SPEC: pay-after-service and complaint-voids are
   // legitimate on terminal states. These tests PIN that semantic — no prod
