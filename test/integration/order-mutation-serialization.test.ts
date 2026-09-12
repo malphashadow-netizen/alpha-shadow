@@ -230,9 +230,49 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     const created = await newOrder(till.branchId, till.cashier.userId);
     const orderId = created.order.id;
 
+    // Explicit test-only barrier at the production lock boundary: both real
+    // REPEATABLE READ transactions must exist before either executes the real
+    // SELECT ... FOR UPDATE. This avoids relying on Promise scheduling across
+    // the branch-resolution and authorization preflight transactions.
+    const originalDependencies = (payments as unknown as {
+      readonly dependencies: ConstructorParameters<typeof PaymentsEngine>[0];
+    }).dependencies;
+    let lockArrivals = 0;
+    let releaseLockBarrier!: () => void;
+    const lockBarrier = new Promise<void>((resolve) => { releaseLockBarrier = resolve; });
+    const synchronizedStore: typeof originalDependencies.store = {
+      run<TResult>(tenantId, fn): Promise<TResult> {
+        return originalDependencies.store.run(tenantId, async (scope) => {
+          const synchronizedScope = new Proxy(scope, {
+            get(target, property, receiver) {
+              if (property !== 'lockOrder') return Reflect.get(target, property, receiver);
+              return async (...args: Parameters<typeof scope.lockOrder>) => {
+                lockArrivals += 1;
+                if (lockArrivals === 2) releaseLockBarrier();
+                let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  await Promise.race([
+                    lockBarrier,
+                    new Promise<never>((_resolve, reject) => {
+                      timeoutHandle = setTimeout(() => reject(new Error('Timed out waiting for both collects to reach lockOrder')), 2_000);
+                    }),
+                  ]);
+                } finally {
+                  if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                }
+                return scope.lockOrder(...args);
+              };
+            },
+          });
+          return fn(synchronizedScope);
+        });
+      },
+    };
+    const synchronizedPayments = new PaymentsEngine({ ...originalDependencies, store: synchronizedStore });
+
     // Two PARTIAL collects (30.00 each on a 46.00 balance): pre-fix both are
     // INSERT-only, so both commit and the till over-collects 60.00.
-    const collect = () => payments.recordPayment(T, {
+    const collect = () => synchronizedPayments.recordPayment(T, {
       orderId, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '30.00',
     });
     const [first, second] = await Promise.allSettled([collect(), collect()]);
