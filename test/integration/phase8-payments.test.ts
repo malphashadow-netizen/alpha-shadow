@@ -53,6 +53,7 @@ import {
   CashierShiftRequiredError,
   CouponAvailabilityRaceError,
   DiscountOverrideRequiredError,
+  ForbiddenError,
   LoyaltyPointsDeferredError,
   PaymentExceedsBalanceError,
   PaymentReversalRequiredError,
@@ -1294,13 +1295,15 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       (payment) => ({ payment, error: null }),
       (error: unknown) => ({ payment: null, error }),
     );
-    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.payment?.status;
-    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.payment?.status;
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.payment?.status ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.payment?.status ?? 'unknown';
     console.log(`[AUTH-BR-07] branch A actual=${actualA}`);
     console.log(`[AUTH-BR-07] branch B actual=${actualB}`);
 
     expect.soft({ error: resultA.error, status: resultA.payment?.status }).toEqual({ error: null, status: 'voided' });
-    expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('payments:void') });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('payments:void');
   });
 
   it('AUTH-BR-07b/a branch-only payments:collect grant authorizes branch A and rejects branch B at the base permission gate', async () => {
@@ -1340,13 +1343,15 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       (recorded) => ({ recorded, error: null }),
       (error: unknown) => ({ recorded: null, error }),
     );
-    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.recorded?.payment.status;
-    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.recorded?.payment.status;
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.recorded?.payment.status ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.recorded?.payment.status ?? 'unknown';
     console.log(`[AUTH-BR-07b] branch A actual=${actualA}`);
     console.log(`[AUTH-BR-07b] branch B actual=${actualB}`);
 
     expect.soft({ error: resultA.error, status: resultA.recorded?.payment.status }).toEqual({ error: null, status: 'completed' });
-    expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('payments:collect') });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('payments:collect');
   });
 
   it('AUTH-BR-05/a branch-only order:discount:apply grant authorizes branch A and rejects branch B at the base permission gate', async () => {
@@ -1381,13 +1386,15 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
       (discount) => ({ discount, error: null }),
       (error: unknown) => ({ discount: null, error }),
     );
-    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.discount?.discountAmountApplied;
-    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.discount?.discountAmountApplied;
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.discount?.discountAmountApplied ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.discount?.discountAmountApplied ?? 'unknown';
     console.log(`[AUTH-BR-05] branch A actual=${actualA}`);
     console.log(`[AUTH-BR-05] branch B actual=${actualB}`);
 
     expect.soft({ error: resultA.error, orderId: resultA.discount?.orderId }).toEqual({ error: null, orderId: orderA.order.id });
-    expect(resultB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('order:discount:apply') });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('order:discount:apply');
   });
 
   it('[AUTH-BR-10/11] a branch-only shift:open + shift:close grant authorizes branch A and rejects branch B at the base permission gate', async () => {
@@ -1437,7 +1444,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     console.log(`[AUTH-BR-10] branch B actual=${openB.shift?.status ?? (openB.error as Error).name}`);
 
     expect.soft({ error: openA.error, status: openA.shift?.status }).toEqual({ error: null, status: 'open' });
-    expect(openB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('shift:open') });
+    expect(openB.error).toBeInstanceOf(ForbiddenError);
+    expect((openB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((openB.error as ForbiddenError).message).toContain('shift:open');
 
     const tillA = await setupTill();
     const tillB = await setupTill();
@@ -1473,6 +1482,8 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     console.log(`[AUTH-BR-11] branch B actual=${closeB.shift?.status ?? (closeB.error as Error).name}`);
 
     expect.soft({ error: closeA.error, status: closeA.shift?.status }).toEqual({ error: null, status: 'closed' });
-    expect(closeB.error).toMatchObject({ name: 'ForbiddenError', message: expect.stringContaining('shift:close') });
+    expect(closeB.error).toBeInstanceOf(ForbiddenError);
+    expect((closeB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((closeB.error as ForbiddenError).message).toContain('shift:close');
   });
 });

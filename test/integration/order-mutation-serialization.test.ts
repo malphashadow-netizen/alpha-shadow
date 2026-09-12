@@ -241,10 +241,10 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     let releaseLockBarrier!: () => void;
     const lockBarrier = new Promise<void>((resolve) => { releaseLockBarrier = resolve; });
     const synchronizedStore: typeof originalDependencies.store = {
-      run<TResult>(tenantId, fn): Promise<TResult> {
+      run<TResult>(tenantId: string, fn: Parameters<typeof originalDependencies.store.run<TResult>>[1]): Promise<TResult> {
         return originalDependencies.store.run(tenantId, async (scope) => {
           const synchronizedScope = new Proxy(scope, {
-            get(target, property, receiver) {
+            get(target, property, receiver): unknown {
               if (property !== 'lockOrder') return Reflect.get(target, property, receiver);
               return async (...args: Parameters<typeof scope.lockOrder>) => {
                 lockArrivals += 1;
@@ -254,7 +254,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
                   await Promise.race([
                     lockBarrier,
                     new Promise<never>((_resolve, reject) => {
-                      timeoutHandle = setTimeout(() => reject(new Error('Timed out waiting for both collects to reach lockOrder')), 2_000);
+                      timeoutHandle = setTimeout(() => { reject(new Error('Timed out waiting for both collects to reach lockOrder')); }, 2_000);
                     }),
                   ]);
                 } finally {

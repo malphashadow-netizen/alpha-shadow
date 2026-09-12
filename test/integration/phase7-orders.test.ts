@@ -1588,10 +1588,10 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
 
     const actualA = resultA.error instanceof Error
       ? `${resultA.error.name}: ${resultA.error.message}`
-      : resultA.record?.actorPermissionTier;
+      : resultA.record?.actorPermissionTier ?? 'unknown';
     const actualB = resultB.error instanceof Error
       ? `${resultB.error.name}: ${resultB.error.message}`
-      : resultB.record?.actorPermissionTier;
+      : resultB.record?.actorPermissionTier ?? 'unknown';
     console.log(`[AUTH-BR-22] branch A actual=${actualA}`);
     console.log(`[AUTH-BR-22] branch B actual=${actualB}`);
 
