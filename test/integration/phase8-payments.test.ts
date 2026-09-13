@@ -127,7 +127,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -199,9 +199,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     ));
 
     // Payment methods: domestic cash, card, and USD cash at a fixed 3.75.
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
+    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true })).id;
+    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -306,13 +306,13 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
   it('payment methods: foreign currency is cash-only and fully configured (engine + DB CHECKs)', async () => {
     // The engine validates the fx shape up front (fail-closed, no write)…
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', clearingAccountSystemPurpose: 'card_clearing', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
     // …and the database re-verifies the same shape structurally (fx_shape CHECK),
     // whatever the code path.
@@ -332,7 +332,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const before = await owner.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM exchange_rates WHERE tenant_id = $1 AND from_currency = 'EUR'", [T],
     );
-    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
+    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true });
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' });
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.20000000' });

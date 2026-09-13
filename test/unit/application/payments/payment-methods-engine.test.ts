@@ -32,6 +32,7 @@ function makeFullScope(overrides: Partial<PaymentsTxScope>): PaymentsTxScope {
     loadUserDiscountCaps: async () => unexpectedCall('loadUserDiscountCaps'),
     loadCouponByCode: async () => unexpectedCall('loadCouponByCode'),
     insertPayment: async () => unexpectedCall('insertPayment'),
+    postPaymentJournalEntry: async () => unexpectedCall('postPaymentJournalEntry'),
     voidPayment: async () => unexpectedCall('voidPayment'),
     refundPayment: async () => unexpectedCall('refundPayment'),
     setOrderPaymentStatus: async () => unexpectedCall('setOrderPaymentStatus'),
@@ -75,6 +76,7 @@ describe('PaymentMethodsEngine — B7 authorization wiring (payments:methods_adm
       branchId: null,
       currencyCode: null,
       fixedExchangeRate: null,
+      clearingAccountSystemPurpose: 'cash_on_hand',
       isActive: true,
     };
     await expect(engine.create(TENANT, ACTOR, input)).rejects.toThrow();
@@ -107,6 +109,7 @@ describe('PaymentMethodsEngine — B7 authorization wiring (payments:methods_adm
       branchId: BRANCH,
       currencyCode: null,
       fixedExchangeRate: null,
+      clearingAccountSystemPurpose: 'cash_on_hand',
       isActive: true,
     };
     await expect(engine.create(TENANT, ACTOR, input)).rejects.toThrow();
@@ -129,6 +132,7 @@ describe('PaymentMethodsEngine — B7 authorization wiring (payments:methods_adm
       branchId: null,
       currencyCode: null,
       fixedExchangeRate: null,
+      clearingAccountSystemPurpose: 'cash_on_hand',
       isActive: true,
     };
     await expect(engine.create(TENANT, ACTOR, input)).rejects.toBeInstanceOf(ForbiddenError);

@@ -138,7 +138,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '014_backlog_r1_kds_device_tokens.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '014_backlog_r1_kds_device_tokens.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');

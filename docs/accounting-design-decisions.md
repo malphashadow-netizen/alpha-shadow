@@ -76,17 +76,30 @@ Any tenant-scoped accounting tables must retain tenant isolation and forced
 RLS, and all application money arithmetic must remain in integer minor units
 using `BigInt` through the existing money boundary.
 
+### Decision
+
+**محسوم.** Revenue is recognized when collection completes and the persisted
+payment has `payments.status = 'completed'`; it is not recognized merely when
+the order is created or when the cashier shift closes. Each successfully
+inserted completed payment is the immutable source event for one idempotent,
+balanced journal entry.
+
+Payment-method clearing-account selection is fully data-driven through
+`payment_methods.clearing_account_system_purpose`. Adding a method or a
+country-specific clearing purpose therefore requires account and
+payment-method data, not another payment-posting code branch.
+
+DD-004 and DD-005 remain **مؤجل** exactly as documented below; this decision
+does not define Void/Refund reversals or inventory valuation/COGS.
+
 ### Status
 
-**مؤجل.** No recognition point or hybrid policy has been approved.
+**محسوم.** Recognition occurs at completed payment.
 
 ### What future implementation must not assume
 
-- It must not assume that order creation, payment, order close, or shift close
-  is the revenue-recognition event merely because that timestamp already
-  exists.
-- It must not treat a completed payment as proof that revenue has been earned,
-  or an unpaid order as proof that no revenue has been earned.
+- It must not recognize revenue at order creation, order close, or shift close.
+- It must not post for a payment whose persisted status is not `completed`.
 - It must not infer accounting completion from a workflow state's display name
   or from a user's role name.
 - It must not reconstruct a historical recognized amount from mutable current

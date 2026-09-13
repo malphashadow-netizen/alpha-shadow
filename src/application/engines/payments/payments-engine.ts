@@ -282,6 +282,16 @@ export class PaymentsEngine {
         idempotencyKey,
       });
 
+      await scope.postPaymentJournalEntry(tenantId, {
+        paymentId: payment.id,
+        branchId: snapshot.branchId,
+        currencyCode: snapshot.baseCurrencyCode,
+        amountMinor: netBaseMinor,
+        debitSystemPurpose: method.clearingAccountSystemPurpose,
+        postedByUserId: input.cashierUserId,
+        occurredAt: payment.createdAt,
+      });
+
       const remainingAfter = totals.remainingBalanceMinor - netBaseMinor;
       if (remainingAfter === 0n) {
         await scope.setOrderPaymentStatus(tenantId, input.orderId, 'paid');

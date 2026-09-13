@@ -71,7 +71,7 @@ describe('B8 payment idempotency (live)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -125,7 +125,7 @@ describe('B8 payment idempotency (live)', () => {
     itemId = (await catalog.createItem(T, opener.userId, {
       categoryId: menuCategoryId, name: { ar: 'طبق B8' }, basePrice: money(4000n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B8', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B8', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {

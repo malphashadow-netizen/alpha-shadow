@@ -82,7 +82,7 @@ describe('B7 permission denials (live)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -136,7 +136,7 @@ describe('B7 permission denials (live)', () => {
     itemId = (await catalog.createItem(T, opener.userId, {
       categoryId: menuCategoryId, name: { ar: 'طبق B7' }, basePrice: money(4000n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B7', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B7', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
 
     branchId = randomUUID();
     const stationId = randomUUID();
@@ -258,7 +258,7 @@ describe('B7 permission denials (live)', () => {
 
   it('D4a payments:methods_admin: create denied without the grant, succeeds once granted', async () => {
     const admin = await createUser();
-    const input = { name: 'بطاقة B7', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true } as const;
+    const input = { name: 'بطاقة B7', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true } as const;
     await expect(methods.create(T, admin.userId, input))
       .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
     await grantKeys(permWrite, T, admin.userId, ['payments:methods_admin']);
@@ -306,23 +306,23 @@ describe('B7 permission denials (live)', () => {
     ));
 
     const allowedInA = await methods.create(T, branchOnly.userId, {
-      name: 'فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      name: 'فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
     });
     expect(allowedInA.branchId).toBe(branchId);
 
     await expect(methods.create(T, branchOnly.userId, {
-      name: 'فرع B مرفوض', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      name: 'فرع B مرفوض', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
     })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
 
     await expect(methods.create(T, branchOnly.userId, {
-      name: 'كل الفروع مرفوض', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      name: 'كل الفروع مرفوض', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
     })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
 
     const tenantAdmin = await createUser();
     await grantKeys(permWrite, T, tenantAdmin.userId, ['payments:methods_admin']);
     for (const scopedBranchId of [branchId, branchB, null]) {
       const created = await methods.create(T, tenantAdmin.userId, {
-        name: 'منحة tenant', type: 'card', branchId: scopedBranchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+        name: 'منحة tenant', type: 'card', branchId: scopedBranchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
       });
       expect(created.branchId).toBe(scopedBranchId);
     }
@@ -339,10 +339,10 @@ describe('B7 permission denials (live)', () => {
     ));
 
     const methodInA = await methods.create(T, tenantAdmin.userId, {
-      name: 'وسيلة فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      name: 'وسيلة فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
     });
     const methodInB = await methods.create(T, tenantAdmin.userId, {
-      name: 'وسيلة فرع B', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, isActive: true,
+      name: 'وسيلة فرع B', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
     });
 
     const branchOnly = await createUser();
