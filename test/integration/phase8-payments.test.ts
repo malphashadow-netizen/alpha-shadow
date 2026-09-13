@@ -178,7 +178,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // opener carries the shift/catalog/methods keys; every collecting cashier
     // — the till cashier, cashierUser, noShiftCashier — carries
     // payments:collect so the gateway assertions below stay meaningful.)
-    opener = await createTieredUser(['shift:open', 'shift:close', 'catalog:write', 'payments:methods_admin'], '1111', null);
+    opener = await createTieredUser(['shift:open', 'shift:close', 'shift:x_report', 'catalog:write', 'payments:methods_admin'], '1111', null);
     verifier = await createPlainUser('2222');
     cashierUser = await createTieredUser(['payments:collect'], '3333', null);
     discountUser = await createTieredUser(['order:discount:apply'], '4444', { pct: '15.00', fixed: '20.00' });
@@ -390,7 +390,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   it('#8a starting_float matches the open cash count (atomic open, deferred verification)', async () => {
     // 5×10.00 + 3×50.00 = 200.00 SAR.
     const till = await setupTill([{ denominationValue: '10.00', quantity: 5 }, { denominationValue: '50.00', quantity: 3 }]);
-    const shift = await shifts.xReport(T, till.shiftId);
+    const shift = await shifts.xReport(T, opener.userId, till.shiftId);
     expect(shift.shift.startingFloat).toBe('200.0000');
     expect(shift.counts.filter((c) => c.countType === 'open')).toHaveLength(2);
     expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.0000', '50.0000']);
@@ -489,7 +489,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // X Report: READ ONLY — live sales, no stored close columns, no resets.
     const signatureSql = "SELECT concat_ws('|', status, coalesce(closed_by_id::text, ''), coalesce(close_verified_by_id::text, ''), coalesce(closed_at::text, ''), coalesce(counted_cash::text, ''), coalesce(recorded_cash_sales::text, ''), coalesce(variance_type, ''), coalesce(notes, '')) AS sig FROM shift_reconciliations WHERE id = $1 AND tenant_id = $2";
     const before = await owner.query<{ sig: string }>(signatureSql, [till.shiftId, T]);
-    const x1 = await shifts.xReport(T, till.shiftId);
+    const x1 = await shifts.xReport(T, opener.userId, till.shiftId);
     expect(x1.shift.status).toBe('open');
     expect(x1.shift.countedCash).toBeNull();
     expect(x1.shift.recordedCashSales).toBeNull();

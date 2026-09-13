@@ -260,6 +260,28 @@ describe('AuthorizationEngine — L1 cache and the sensitive bypass', () => {
     await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
   });
 
+  it('F-10a: non-sensitive shift:x_report permission is served from the L1 cache within TTL', async () => {
+    const scenario = makeScenario();
+    await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');
+    seedActiveBranchUser(scenario);
+    await scenario.write.createPermission(TENANT, 'shift:x_report', 'shift', false);
+    const roleId = await scenario.write.createRole(TENANT, 'shift-reporter');
+    await scenario.write.assignRolePermission(TENANT, roleId, 'shift:x_report', null);
+    const userRoleId = await scenario.write.assignUserRole(TENANT, USER, roleId, 'branch', BRANCH_A);
+
+    const engine = makeEngine(scenario, new L1PermissionCache());
+    const input = {
+      tenantId: TENANT,
+      userId: USER,
+      permissionKey: 'shift:x_report',
+      context: { hasResource: true, actorBranchId: BRANCH_A, resourceBranchId: BRANCH_A, isSensitivePermission: false },
+    } as const;
+
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
+    await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
+  });
+
   it('F-D: order:workflow:admin is never served from the L1 cache — grant AND denial stay live', async () => {
     const scenario = makeScenario();
     await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');

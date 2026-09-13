@@ -3,7 +3,7 @@
  * succeeds with it — on the SAME fixture, so each test proves the denial was
  * the missing key and nothing else (grant → success leg).
  *
- * Keys covered: payments:collect, shift:open, shift:close,
+ * Keys covered: payments:collect, shift:open, shift:close, shift:x_report,
  * payments:methods_admin (create + update), catalog:write, catalog:archive
  * (including write-without-archive and open-without-close separation).
  */
@@ -223,6 +223,37 @@ describe('B7 permission denials (live)', () => {
       closedAt: new Date(), closeCounts: [{ denominationValue: '100.00', quantity: 2 }], notes: null,
     });
     expect(closed.status).toBe('closed');
+  });
+
+  it('F-10a shift:x_report: denied without the grant, succeeds once granted', async () => {
+    const reporter = await createUser();
+    const { shiftId } = await openShiftForFreshCashier(opener.userId, verifier.userId);
+    await expect(shifts.xReport(T, reporter.userId, shiftId))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission shift:x_report' });
+    await grantBranchKeys(permWrite, T, reporter.userId, branchId, ['shift:x_report']);
+    await expect(shifts.xReport(T, reporter.userId, shiftId))
+      .resolves.toMatchObject({ shift: { id: shiftId } });
+  });
+
+  it('F-10a shift:x_report: a branch-A grant cannot read a branch-B shift', async () => {
+    const reporter = await createUser();
+    const { shiftId: branchAShiftId } = await openShiftForFreshCashier(opener.userId, verifier.userId);
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, 'B7 branch B', 'SAR', 'Asia/Riyadh', 'SA')",
+      [branchB, T],
+    ));
+    const cashierB = await createUser();
+    const shiftB = await shifts.openShift(T, {
+      branchId: branchB, cashierUserId: cashierB.userId, openedByUserId: opener.userId, openVerifiedByUserId: verifier.userId,
+      openedAt: new Date(), openCounts: [],
+    });
+    await grantBranchKeys(permWrite, T, reporter.userId, branchId, ['shift:x_report']);
+
+    await expect(shifts.xReport(T, reporter.userId, branchAShiftId))
+      .resolves.toMatchObject({ shift: { id: branchAShiftId } });
+    await expect(shifts.xReport(T, reporter.userId, shiftB.id))
+      .rejects.toMatchObject({ code: 'forbidden' });
   });
 
   it('D4a payments:methods_admin: create denied without the grant, succeeds once granted', async () => {
