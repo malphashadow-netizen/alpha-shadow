@@ -237,8 +237,6 @@ export class VoidModificationEngine {
       if ((await scope.loadActiveOrderItems(tenantId, order.id)).length === 0) {
         await scope.setOrderPaymentStatus(tenantId, order.id, 'voided');
       }
-      // Phase-9 stock: restoration-or-waste per voided line, same transaction.
-      await this.writeVoidStockMovements(scope, tenantId, order, voidedItemIds, actor.userId);
       for (const itemId of voidedItemIds) {
         await scope.appendEvent(tenantId, order.branchId, 'order_item.voided', {
           order_id: order.id,
@@ -254,6 +252,8 @@ export class VoidModificationEngine {
           actor_user_id: actor.userId,
         });
       }
+      // Phase-9 stock: restoration-or-waste per voided line, same transaction.
+      await this.writeVoidStockMovements(scope, tenantId, order, voidedItemIds, actor.userId);
       await scope.recomputeOrderStatus(tenantId, order.id);
 
       return record;

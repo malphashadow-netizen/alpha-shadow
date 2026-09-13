@@ -26,6 +26,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CatalogEngine } from '../../src/application/engines/catalog/catalog-engine.ts';
 import { OrderCreationEngine } from '../../src/application/engines/orders/order-creation-engine.ts';
+import { VoidModificationEngine } from '../../src/application/engines/orders/void-modification-engine.ts';
 import { WorkflowAdminEngine } from '../../src/application/engines/orders/workflow-admin-engine.ts';
 import { PaymentMethodsEngine } from '../../src/application/engines/payments/payment-methods-engine.ts';
 import { PaymentsEngine } from '../../src/application/engines/payments/payments-engine.ts';
@@ -44,6 +45,7 @@ import { PostgresShiftsStore } from '../../src/infrastructure/db/repositories/po
 import { PostgresTenantTaxAdminRepository } from '../../src/infrastructure/db/repositories/postgres-tenant-tax-admin-repository.ts';
 import { hashPin } from '../../src/shared/auth/pin.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
+import { deriveSecV } from '../../src/domain/contracts/sec-v.ts';
 import { isConcurrencyRetryableError } from '../../src/shared/errors.ts';
 import { currencyCode, money } from '../../src/shared/money.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -71,6 +73,7 @@ describe('B3 concurrency recovery (live)', () => {
   let creation: OrderCreationEngine;
   let shifts: ShiftEngine;
   let payments: PaymentsEngine;
+  let voids: VoidModificationEngine;
   let authorization: AuthorizationEngine;
   let itemId: string; // 40.00 SAR; 15% VAT ⇒ total 46.00
   let methodCashId: string;
@@ -110,6 +113,7 @@ describe('B3 concurrency recovery (live)', () => {
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead: new PostgresPermissionReadRepository({ withTenantContext: withApp }), managerAuthenticator: authenticator });
+    voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
     const methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -263,6 +267,62 @@ describe('B3 concurrency recovery (live)', () => {
     expect(isConcurrencyRetryableError(reason)).toBe(true);
     expect(reason).toMatchObject({ code: 'concurrency.retryable_conflict', pgCode: '40P01' });
   }, 20_000);
+
+  it('F-1: creation and void on the same branch/item no longer deadlock via S/X lock-order alignment', async () => {
+    const till = await setupTill();
+    await grantKeys(permWrite, T, till.cashier.userId, ['order:void']);
+    const permissionRead = new PostgresPermissionReadRepository({ withTenantContext: withApp });
+    const tokenSecV = deriveSecV(
+      await permissionRead.listActiveUserRoles(T, till.cashier.userId),
+      await permissionRead.getSecurityVersion(T, till.cashier.userId),
+      sha256Hex,
+    );
+    const voidReasonId = randomUUID();
+    const inventoryItemId = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query(
+        'INSERT INTO tenant_void_reasons (id, tenant_id, void_reason_kind_code, label, required_permission_tier) VALUES ($1, $2, $3, $4, $5)',
+        [voidReasonId, T, 'customer_request', `F-1 ${voidReasonId}`, 'server'],
+      );
+      await q.query(
+        'INSERT INTO inventory_items (id, tenant_id, branch_id, name, base_unit, current_quantity, is_active) VALUES ($1, $2, $3, $4::jsonb, $5, $6, true)',
+        [inventoryItemId, T, till.branchId, JSON.stringify({ en: 'F-1 shared component' }), 'unit', '100.0000'],
+      );
+      await q.query(
+        'INSERT INTO menu_item_recipes (tenant_id, menu_item_id, inventory_item_id, quantity_required) VALUES ($1, $2, $3, $4)',
+        [T, itemId, inventoryItemId, '1.0000'],
+      );
+    });
+
+    try {
+      const existingOrders = [];
+      for (let index = 0; index < 20; index++) {
+        existingOrders.push(await newOrder(till.branchId, till.cashier.userId));
+      }
+      const actor = { userId: till.cashier.userId, tokenSecV };
+      const withoutDeadlock = async <TResult>(operation: () => Promise<TResult>): Promise<TResult> => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await operation();
+          } catch (error) {
+            if (!isConcurrencyRetryableError(error) || error.pgCode === '40P01' || attempt >= 25) throw error;
+          }
+        }
+      };
+      for (const existing of existingOrders) {
+        const results = await Promise.all([
+          withoutDeadlock(() => newOrder(till.branchId, till.cashier.userId)),
+          withoutDeadlock(() => voids.voidOrder(T, actor, { orderId: existing.order.id, voidReasonId })),
+        ]);
+        expect(results).toHaveLength(2);
+      }
+    } finally {
+      await owner.query(
+        'DELETE FROM menu_item_recipes WHERE tenant_id = $1 AND menu_item_id = $2 AND inventory_item_id = $3',
+        [T, itemId, inventoryItemId],
+      );
+    }
+  }, 60_000);
 
   it('T3 per-shift ceiling: twelve concurrent collectors on one shift converge with bounded retries', async () => {
     const till = await setupTill();
