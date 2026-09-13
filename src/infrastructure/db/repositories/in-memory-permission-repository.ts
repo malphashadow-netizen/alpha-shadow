@@ -30,6 +30,22 @@ import { TENANT_SUPER_ADMIN_ROLE_NAME } from '../../../domain/contracts/system-r
 export interface InMemoryTenantRecord {
   readonly id: string;
   readonly name: string;
+  readonly reportingCurrency?: string;
+}
+
+export interface InMemoryTaxJurisdictionRecord {
+  readonly countryCode: string;
+  readonly defaultCurrencyCode: string;
+  readonly isActive: boolean;
+}
+
+export interface InMemoryBranchRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly name: string;
+  readonly baseCurrency: string;
+  readonly timezone: string;
+  readonly countryCode: string;
 }
 
 export interface InMemoryUserRecord {
@@ -98,6 +114,8 @@ export class InMemoryPermissionStore {
   private idCounter = 0;
 
   readonly tenants = new Map<string, InMemoryTenantRecord>();
+  readonly taxJurisdictions = new Map<string, InMemoryTaxJurisdictionRecord>();
+  readonly branches = new Map<string, InMemoryBranchRecord>();
   readonly users = new Map<string, InMemoryUserRecord>();
   readonly roles = new Map<string, InMemoryRoleRecord>();
   readonly permissions = new Map<string, InMemoryPermissionRecord>();
@@ -237,6 +255,58 @@ export class InMemoryPermissionWriteRepository implements IPermissionWriteReposi
       roleVersion: 1,
       isSystem: true,
     });
+  }
+
+  async registerTenantWithCountry(
+    tenantId: string,
+    tenantName: string,
+    countryCode: string,
+    branchId: string,
+    branchName: string,
+    timezone: string,
+  ): Promise<{ readonly reportingCurrency: string }> {
+    if (!/^[A-Z]{2}$/.test(countryCode)) {
+      throw new ValidationError('countryCode must contain exactly two uppercase letters', 'countryCode');
+    }
+    const jurisdiction = this.store.taxJurisdictions.get(countryCode);
+    if (!jurisdiction?.isActive) {
+      throw new ValidationError(`countryCode ${countryCode} is not an active tax jurisdiction`, 'countryCode');
+    }
+    if (this.store.tenants.has(tenantId)) throw new ConflictError(`tenant ${tenantId} already exists`);
+    if (this.store.branches.has(branchId)) throw new ConflictError(`branch ${branchId} already exists`);
+
+    const roleId = this.store.nextId('role');
+    this.store.tenants.set(tenantId, {
+      id: tenantId,
+      name: tenantName,
+      reportingCurrency: jurisdiction.defaultCurrencyCode,
+    });
+    this.store.roles.set(roleId, {
+      id: roleId,
+      tenantId,
+      name: TENANT_SUPER_ADMIN_ROLE_NAME,
+      roleVersion: 1,
+      isSystem: true,
+    });
+    for (const permission of this.store.permissions.values()) {
+      const rolePermissionId = this.store.nextId('role-permission');
+      this.store.rolePermissions.set(rolePermissionId, {
+        id: rolePermissionId,
+        tenantId,
+        roleId,
+        permissionKey: permission.key,
+        maxAmountMinorUnits: null,
+      });
+    }
+    this.store.branches.set(branchId, {
+      id: branchId,
+      tenantId,
+      name: branchName,
+      baseCurrency: jurisdiction.defaultCurrencyCode,
+      timezone,
+      countryCode,
+    });
+    return { reportingCurrency: jurisdiction.defaultCurrencyCode };
   }
 
   async createPermission(tenantId: string, permissionKey: string, category: string, isSensitive: boolean): Promise<void> {

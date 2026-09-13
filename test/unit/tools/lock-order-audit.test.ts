@@ -129,6 +129,7 @@ describe('B3 row-lock audit (static)', () => {
         'migrations/0040_phase9_stock_movements.sql :: WHERE id = NEW.inventory_item_id AND tenant_id = NEW.tenant_id FOR UPDATE;',
         'migrations/0042_phase9_override_message_fix.sql :: WHERE id = NEW.inventory_item_id AND tenant_id = NEW.tenant_id FOR UPDATE;',
         'migrations/0043_phase9_override_actor_wording.sql :: WHERE id = NEW.inventory_item_id AND tenant_id = NEW.tenant_id FOR UPDATE;',
+        'migrations/0061_tenant_tax_categories_and_rates.sql :: WHERE id = p_id AND tenant_id = p_tenant FOR UPDATE;',
       ].sort(),
     );
     // 0013's LOCK TABLE is migrate-time DDL serialization, never runtime SQL.
