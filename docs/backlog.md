@@ -292,6 +292,42 @@ should truncate the decoded bytes (or assert `parsePasswordHash(...) === null`)
 instead of assuming a 4-character cut is always malformed. Fix belongs to the
 auth phase owner — deliberately not touched by the Phase 4b branch.
 
+### KNOWN FLAKE / pre-existing test bug: payments idempotency fake transaction order
+`test/unit/application/payments/payments-idempotency.test.ts` has three
+deterministic failures: U1 (`23505` + probe hit should replay), U3 (`23505` +
+probe hit for a different order should become a conflict), and U6 (invalid
+idempotency keys should perform no store work). The fake assumes that the first
+`PaymentsStore.run` call is the payment-collection transaction. The current
+`PaymentsEngine.recordPayment` path instead opens a read transaction first to
+discover the authoritative order branch for branch-scoped authorization, then
+opens the collection transaction; consequently the fake injects its simulated
+`23505` into the branch-discovery read, and its zero-run assertion counts that
+legitimate read transaction.
+
+This behavior predates commit `f5d68f0` and was confirmed directly by checking
+the two unit tests plus `payments-engine.ts`, the payments contract, and the
+Postgres payments repository out from `2bebb6b`, reproducing the same U1, U3,
+and U6 failures, then restoring `f5d68f0`. Production payment/idempotency code
+must not be changed to satisfy the stale fake ordering assumption. A separate
+test-only task should repair the fixture so it distinguishes the branch lookup
+from the collection transaction and injects/counts behavior at the intended
+transaction boundary; no existing production behavior or assertion should be
+silently weakened.
+
+### PRE-EXISTING TEST/BEHAVIOR MISMATCH: close-vs-collect shift concurrency
+In `test/integration/order-mutation-serialization.test.ts`, the case
+"close-vs-collect: exactly one wins and either outcome is consistent" races a
+shift close against payment collection at the same instant. The rejected side
+actually receives `CashierShiftRequiredError` with code
+`payments.shift_required`, while the test expects
+`concurrency.retryable_conflict`. The same failure was reproduced directly at
+commit `93ad759`, before any self-service tenant-registration change, so it is
+pre-existing and unrelated to commit `929d758`. It is not fixed. A design
+decision remains: should payment collection concurrent with shift closure be
+treated as a retryable conflict (`concurrency.retryable_conflict`), or as a
+final rejection because no open shift remains (`payments.shift_required`)? The
+current code produces the latter and the test expects the former.
+
 ## Tax / order / invoice integration (Phase 6)
 
 The tax resolver, platform and tenant administration, snapshots and all 14

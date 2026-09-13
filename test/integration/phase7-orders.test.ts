@@ -138,7 +138,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '014_backlog_r1_kds_device_tokens.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '014_backlog_r1_kds_device_tokens.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -162,6 +162,7 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     creation = new OrderCreationEngine({
       store,
       authorization,
+      permissionRead,
       managerAuthenticator: new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER }),
     });
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
@@ -1531,5 +1532,70 @@ describe('Phase 7 live acceptance (orders + KDS)', () => {
     await workflowAdmin.deleteState(C, admin.userId, admin.tokenSecV, addedId);
     const after = await states();
     expect(after.map((s) => s.id).sort()).toEqual(before.map((s) => s.id).sort());
+  });
+
+  it('F-A/branch-scoped void permission tier is promoted only for the covered branch (A/B isolation)', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchScopedSupervisor = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'tenant', scopeId: null },
+      { keys: ['order:void:shift_supervisor'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const supervisorReason = await createVoidReason(A, 'order_error', 'shift_supervisor');
+    const serverReason = await createVoidReason(A, 'kitchen_issue', 'server');
+    const orderA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const orderB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    const voidA = await voids.voidOrder(A, actor(branchScopedSupervisor), {
+      orderId: orderA.order.id,
+      voidReasonId: supervisorReason,
+    });
+    console.log(`[branch-scoped void tier] branch A actual=${voidA.actorPermissionTier}`);
+    expect(voidA.actorPermissionTier).toBe('shift_supervisor');
+
+    const voidB = await voids.voidOrder(A, actor(branchScopedSupervisor), {
+      orderId: orderB.order.id,
+      voidReasonId: serverReason,
+    });
+    console.log(`[branch-scoped void tier] branch B actual=${voidB.actorPermissionTier}`);
+    expect(voidB.actorPermissionTier).toBe('server');
+  });
+
+  it('AUTH-BR-22/a branch-only order:void grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const branchA = await setupBranch(A);
+    const branchB = await setupBranch(A);
+    const branchOnlyServer = await createVoidUserWithRoles(A, [
+      { keys: ['order:void'], scopeType: 'branch', scopeId: branchA.branchId },
+    ]);
+    const serverReason = await createVoidReason(A, 'customer_request', 'server');
+    const orderA = await newOrder(A, branchA, [{ menuItemId: branchA.itemGrill }]);
+    const orderB = await newOrder(A, branchB, [{ menuItemId: branchB.itemGrill }]);
+
+    const resultA = await voids.voidOrder(A, actor(branchOnlyServer), {
+      orderId: orderA.order.id,
+      voidReasonId: serverReason,
+    }).then(
+      (record) => ({ record, error: null }),
+      (error: unknown) => ({ record: null, error }),
+    );
+    const resultB = await voids.voidOrder(A, actor(branchOnlyServer), {
+      orderId: orderB.order.id,
+      voidReasonId: serverReason,
+    }).then(
+      (record) => ({ record, error: null }),
+      (error: unknown) => ({ record: null, error }),
+    );
+
+    const actualA = resultA.error instanceof Error
+      ? `${resultA.error.name}: ${resultA.error.message}`
+      : resultA.record?.actorPermissionTier ?? 'unknown';
+    const actualB = resultB.error instanceof Error
+      ? `${resultB.error.name}: ${resultB.error.message}`
+      : resultB.record?.actorPermissionTier ?? 'unknown';
+    console.log(`[AUTH-BR-22] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-22] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, tier: resultA.record?.actorPermissionTier }).toEqual({ error: null, tier: 'server' });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
   });
 });

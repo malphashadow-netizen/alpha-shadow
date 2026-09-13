@@ -144,7 +144,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -167,7 +167,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     catalog = new CatalogEngine({ catalog: new PostgresCatalogRepository({ withTenantContext: withApp }), taxAssignments: new PostgresTenantTaxAdminRepository(withApp), authorization });
     ordersStore = new PostgresOrdersStore({ withTenantContext: withApp });
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead, managerAuthenticator: authenticator });
     workflowAdmin = new WorkflowAdminEngine({ store: ordersStore, authorization });
     transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
@@ -229,7 +229,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       [reasonServer, T, 'customer_request', `سبب فحص ${reasonServer}`, 'server'],
     ));
 
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -272,6 +272,20 @@ describe('Phase 9 inventory-backed selling (live)', () => {
         await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [T, roleId, key]);
       }
       await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'tenant', NULL)", [T, user.userId, roleId]);
+    });
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(T, user.userId), await permissionRead.getSecurityVersion(T, user.userId), sha256Hex);
+    return { userId: user.userId, tokenSecV, pin };
+  }
+
+  async function createBranchTieredUser(keys: readonly string[], pin: string, branchId: string): Promise<TieredUser> {
+    const user = await createPlainUser(pin);
+    const roleId = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, T, `phase9-branch-${roleId}`]);
+      for (const key of keys) {
+        await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [T, roleId, key]);
+      }
+      await q.query("INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, 'branch', $4)", [T, user.userId, roleId, branchId]);
     });
     const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(T, user.userId), await permissionRead.getSecurityVersion(T, user.userId), sha256Hex);
     return { userId: user.userId, tokenSecV, pin };
@@ -520,6 +534,33 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ], { managerOverride: { managerUserId: receiverUser.userId, managerOverridePin: receiverUser.pin } }).then(() => null, (error: unknown) => error);
     expect(failure).toBeInstanceOf(ManagerOverrideAuthenticationError);
     expect(await stockOf(flour)).toBe('1.0000');
+  });
+
+  it('2d/ a manager holding inventory:adjust only on a DIFFERENT branch cannot approve a stock override', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const branchBManager = await createBranchTieredUser(['inventory:adjust'], '8888', tillB.branchId);
+    const flour = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '1.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+
+    const failure = await placeOrder(tillA.cashier.userId, tillA, [
+      { menuItemId: itemMeal, quantity: 5 },
+    ], { managerOverride: { managerUserId: branchBManager.userId, managerOverridePin: branchBManager.pin } }).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ManagerOverrideAuthenticationError);
+    expect(await stockOf(flour)).toBe('1.0000');
+  });
+
+  it('2e/ a manager holding inventory:adjust on the SAME branch can approve a stock override', async () => {
+    const tillA = await setupTill();
+    const branchManager = await createBranchTieredUser(['inventory:adjust'], '8989', tillA.branchId);
+    const flour = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '1.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+
+    const created = await placeOrder(tillA.cashier.userId, tillA, [
+      { menuItemId: itemMeal, quantity: 5 },
+    ], { managerOverride: { managerUserId: branchManager.userId, managerOverridePin: branchManager.pin } });
+    expect(await stockOf(flour)).toBe('-1.5000');
+    expect(row(await movementsFor(created.order.id)).manager_override_id).not.toBeNull();
   });
 
   it('B2/ an override cannot sell a component missing AT THIS BRANCH (409, not a trigger 500)', async () => {
@@ -1775,5 +1816,82 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       'SELECT count(*)::int AS codes, count(DISTINCT LOWER(code))::int AS lowers FROM unit_registry',
     ));
     expect(collision.rows[0]).toEqual({ codes: 8, lowers: 8 });
+  });
+
+  it('[AUTH-BR-01/02] a branch-only inventory:receive + inventory:adjust grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const itemA = await createComponent(tillA.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const itemB = await createComponent(tillB.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reasonId = await createAdjustmentReason();
+    const subject = await createBranchTieredUser(
+      ['inventory:receive', 'inventory:adjust'],
+      '',
+      tillA.branchId,
+    );
+    const actor = { userId: subject.userId, tokenSecV: subject.tokenSecV };
+
+    const receiveA = await inventory.receiveStock(T, actor, {
+      branchId: tillA.branchId,
+      inventoryItemId: itemA,
+      purchaseUnit: 'kg',
+      quantityText: '5.00000000',
+    });
+    console.log('[AUTH-BR-01] branch A actual=', receiveA.movementType);
+    expect(receiveA.movementType).toBe('manual_receiving');
+
+    const receiveB = await inventory.receiveStock(T, actor, {
+      branchId: tillB.branchId,
+      inventoryItemId: itemB,
+      purchaseUnit: 'kg',
+      quantityText: '5.00000000',
+    }).then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-01] branch B actual=', `${(receiveB as Error).name}: ${(receiveB as Error).message}`);
+    expect(receiveB).toBeInstanceOf(ForbiddenError);
+    expect((receiveB as ForbiddenError).message).toContain('inventory:receive');
+
+    const adjustA = await inventory.adjustStock(T, actor, {
+      branchId: tillA.branchId,
+      inventoryItemId: itemA,
+      quantityDeltaText: '-1.0000',
+      adjustmentReasonId: reasonId,
+    });
+    console.log('[AUTH-BR-02] branch A actual=', adjustA.movementType);
+    expect(adjustA.movementType).toBe('manual_adjustment');
+
+    const adjustB = await inventory.adjustStock(T, actor, {
+      branchId: tillB.branchId,
+      inventoryItemId: itemB,
+      quantityDeltaText: '-1.0000',
+      adjustmentReasonId: reasonId,
+    }).then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-02] branch B actual=', `${(adjustB as Error).name}: ${(adjustB as Error).message}`);
+    expect(adjustB).toBeInstanceOf(ForbiddenError);
+    expect((adjustB as ForbiddenError).message).toContain('inventory:adjust');
+  });
+
+  it('[AUTH-BR-03/04] a branch-only inventory:adjust grant authorizes mute/unmute on branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const subject = await createBranchTieredUser(['inventory:adjust'], '', tillA.branchId);
+    const subjectActor = { userId: subject.userId, tokenSecV: subject.tokenSecV };
+
+    await inventory.muteLowStockAlerts(T, subjectActor, tillA.branchId);
+    console.log('[AUTH-BR-03] branch A actual= muted ok');
+
+    const muteB = await inventory.muteLowStockAlerts(T, subjectActor, tillB.branchId)
+      .then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-03] branch B actual= ForbiddenError');
+    expect(muteB).toBeInstanceOf(ForbiddenError);
+    expect((muteB as ForbiddenError).message).toContain('inventory:adjust');
+
+    await inventory.unmuteLowStockAlerts(T, subjectActor, tillA.branchId);
+    console.log('[AUTH-BR-04] branch A actual= unmuted ok');
+
+    const unmuteB = await inventory.unmuteLowStockAlerts(T, subjectActor, tillB.branchId)
+      .then(() => null, (error: unknown) => error);
+    console.log('[AUTH-BR-04] branch B actual= ForbiddenError');
+    expect(unmuteB).toBeInstanceOf(ForbiddenError);
+    expect((unmuteB as ForbiddenError).message).toContain('inventory:adjust');
   });
 });

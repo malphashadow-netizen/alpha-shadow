@@ -88,7 +88,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: RECEIVE_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+      context: {
+        hasResource: true,
+        actorBranchId: input.branchId,
+        resourceBranchId: input.branchId,
+        isSensitivePermission: false,
+      },
     });
     const purchaseMinor = parseStrictPositiveDecimal(input.quantityText, RECEIVING_INPUT_SCALE, 'quantityText');
 
@@ -164,7 +169,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: ADJUST_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: input.branchId,
+        resourceBranchId: input.branchId,
+        isSensitivePermission: true,
+      },
     });
     const deltaMinor = parseStrictNonZeroDecimal(input.quantityDeltaText, STOCK_QUANTITY_SCALE, 'quantityDeltaText');
 
@@ -209,7 +219,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: ADJUST_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: branchId,
+        resourceBranchId: branchId,
+        isSensitivePermission: true,
+      },
     });
     await this.dependencies.store.run(tenantId, async (scope) => {
       if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {
@@ -226,7 +241,12 @@ export class InventoryEngine {
       userId: actor.userId,
       permissionKey: ADJUST_PERMISSION_KEY,
       tokenSecV: actor.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: branchId,
+        resourceBranchId: branchId,
+        isSensitivePermission: true,
+      },
     });
     await this.dependencies.store.run(tenantId, async (scope) => {
       if (!(await scope.branchBelongsToTenant(tenantId, branchId))) {

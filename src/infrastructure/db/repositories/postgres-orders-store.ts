@@ -53,6 +53,7 @@ import { insertStockMovementRow, mapInventoryItem, type InventoryItemRow } from 
 import { resolveInvoiceAndSnapshot } from '../../../application/engines/tax/tax-resolution-engine.ts';
 import type { WithTenantContext, TenantQuery } from '../tenant-context.ts';
 import { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
+import { getCoveredPermissionKeys } from './shared/permission-queries.ts';
 
 function row<T>(rows: readonly T[]): T {
   const first = rows[0];
@@ -615,24 +616,18 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       if (typeof branchId !== 'string' || branchId.trim() === '') {
         throw new ValidationError('branchId is required to resolve the branch-covering void tier', 'branchId');
       }
-      const result = await q.query<{ permission_key: string }>(
-        `SELECT DISTINCT rp.permission_key
-           FROM users u
-           JOIN tenants t ON t.id = u.tenant_id
-           JOIN user_roles ur ON ur.user_id = u.id AND ur.tenant_id = u.tenant_id
-           JOIN roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
-           JOIN role_permissions rp ON rp.role_id = r.id AND rp.tenant_id = r.tenant_id
-          WHERE u.id = $2 AND u.tenant_id = $1 AND u.is_active AND t.status = 'active' AND ur.is_active
-            AND rp.permission_key = ANY($3::text[])
-            AND (ur.scope_type = 'tenant' AND ur.scope_id IS NULL
-                 OR ur.scope_type = 'branch' AND ur.scope_id IS NOT DISTINCT FROM $4)`,
-        [tid, userId, ['order:void', 'order:void:shift_supervisor', 'order:void:manager'], branchId],
+      const coveredKeys = await getCoveredPermissionKeys(
+        q,
+        tid,
+        userId,
+        branchId,
+        ['order:void', 'order:void:shift_supervisor', 'order:void:manager'],
       );
       let tier: VoidPermissionTier | null = null;
-      for (const r of result.rows) {
-        if (r.permission_key === 'order:void:manager') tier = 'manager';
-        else if (r.permission_key === 'order:void:shift_supervisor' && tier !== 'manager') tier = 'shift_supervisor';
-        else if (r.permission_key === 'order:void' && tier === null) tier = 'server';
+      for (const permissionKey of coveredKeys) {
+        if (permissionKey === 'order:void:manager') tier = 'manager';
+        else if (permissionKey === 'order:void:shift_supervisor' && tier !== 'manager') tier = 'shift_supervisor';
+        else if (permissionKey === 'order:void' && tier === null) tier = 'server';
       }
       return tier;
     },

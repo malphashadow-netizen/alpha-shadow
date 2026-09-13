@@ -58,17 +58,22 @@ export class KdsDeviceEngine {
 
   /**
    * Mints a device token for ONE branch. Returns the plaintext ONCE — the
-   * caller must display it now; it can never be recovered afterwards.
-   */
+  * caller must display it now; it can never be recovered afterwards.
+  */
   async issueDeviceToken(tenantId: string, actorUserId: string, input: NewKdsDeviceTokenInput): Promise<IssuedKdsDeviceToken> {
+    if (!UUID_RE.test(input.branchId)) throw new ValidationError('A device token requires a valid branch id', 'branchId');
+    if (input.label.length > MAX_LABEL_LENGTH) throw new ValidationError('A device token label is at most 200 characters', 'label');
     await this.dependencies.authorization.check({
       tenantId,
       userId: actorUserId,
       permissionKey: KDS_DEVICE_ADMIN_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: {
+        hasResource: true,
+        actorBranchId: input.branchId,
+        resourceBranchId: input.branchId,
+        isSensitivePermission: true,
+      },
     });
-    if (!UUID_RE.test(input.branchId)) throw new ValidationError('A device token requires a valid branch id', 'branchId');
-    if (input.label.length > MAX_LABEL_LENGTH) throw new ValidationError('A device token label is at most 200 characters', 'label');
     const plaintextToken = randomBytes(32).toString('base64url');
     const tokenHash = sha256Hex(plaintextToken);
     const record = await this.dependencies.store.run(tenantId, (scope) =>
@@ -89,16 +94,21 @@ export class KdsDeviceEngine {
    * periodic revalidation backstop).
    */
   async revokeDeviceToken(tenantId: string, actorUserId: string, tokenId: string): Promise<KdsDeviceTokenRecord> {
-    await this.dependencies.authorization.check({
-      tenantId,
-      userId: actorUserId,
-      permissionKey: KDS_DEVICE_ADMIN_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
-    });
     if (!UUID_RE.test(tokenId)) throw new ValidationError('Unknown device token', 'tokenId');
     return this.dependencies.store.run(tenantId, async (scope) => {
       const existing = await scope.loadDeviceTokenById(tenantId, tokenId);
       if (existing === null) throw new NotFoundError(`KDS device token ${tokenId} not found`);
+      await this.dependencies.authorization.check({
+        tenantId,
+        userId: actorUserId,
+        permissionKey: KDS_DEVICE_ADMIN_PERMISSION_KEY,
+        context: {
+          hasResource: true,
+          actorBranchId: existing.branchId,
+          resourceBranchId: existing.branchId,
+          isSensitivePermission: true,
+        },
+      });
       if (existing.status === 'revoked') return existing;
       return scope.revokeDeviceToken(tenantId, tokenId);
     });

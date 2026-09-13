@@ -49,7 +49,7 @@ function snapshot(): OrderFinancialSnapshot {
 function method(): PaymentMethodRecord {
   return {
     id: METHOD, tenantId: T, branchId: null, name: 'cash', type: 'cash',
-    currencyCode: null, fixedExchangeRate: null, isActive: true,
+    currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true,
   };
 }
 
@@ -102,6 +102,7 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
     loadUserDiscountCaps: async () => unused('loadUserDiscountCaps'),
     loadCouponByCode: async () => unused('loadCouponByCode'),
     insertPayment: async () => unused('insertPayment'),
+    postPaymentJournalEntry: async () => unused('postPaymentJournalEntry'),
     voidPayment: async () => unused('voidPayment'),
     refundPayment: async () => unused('refundPayment'),
     setOrderPaymentStatus: async () => {
