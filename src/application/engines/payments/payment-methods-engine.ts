@@ -27,6 +27,12 @@ const METHOD_TYPES: readonly PaymentMethodType[] = ['cash', 'card', 'wallet', 'f
 
 const PAYMENT_METHODS_ADMIN_PERMISSION_KEY = 'payments:methods_admin';
 
+function administrationContext(branchId: string | null) {
+  return branchId === null
+    ? { hasResource: false as const, actorBranchId: null, isSensitivePermission: true }
+    : { hasResource: true as const, actorBranchId: branchId, resourceBranchId: branchId, isSensitivePermission: true };
+}
+
 function assertTypeShape(input: { type: PaymentMethodType; currencyCode: string | null; fixedExchangeRate: string | null }): void {
   if (!METHOD_TYPES.includes(input.type)) {
     throw new ValidationError(`Unknown payment method type '${input.type}'`, 'type');
@@ -57,7 +63,7 @@ export class PaymentMethodsEngine {
       tenantId,
       userId: actorUserId,
       permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+      context: administrationContext(input.branchId),
     });
     if (input.name.trim() === '') throw new ValidationError('A payment method requires a name', 'name');
     assertTypeShape(input);
@@ -65,15 +71,23 @@ export class PaymentMethodsEngine {
   }
 
   async update(tenantId: string, actorUserId: string, paymentMethodId: string, input: UpdatePaymentMethodInput): Promise<PaymentMethodRecord> {
-    await this.dependencies.authorization.check({
-      tenantId,
-      userId: actorUserId,
-      permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
-    });
     return this.dependencies.store.run(tenantId, async (scope) => {
       const existing = await scope.loadPaymentMethod(tenantId, paymentMethodId);
-      if (existing === null) throw new NotFoundError(`Payment method ${paymentMethodId} not found`);
+      if (existing === null) {
+        await this.dependencies.authorization.check({
+          tenantId,
+          userId: actorUserId,
+          permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
+          context: administrationContext(null),
+        });
+        throw new NotFoundError(`Payment method ${paymentMethodId} not found`);
+      }
+      await this.dependencies.authorization.check({
+        tenantId,
+        userId: actorUserId,
+        permissionKey: PAYMENT_METHODS_ADMIN_PERMISSION_KEY,
+        context: administrationContext(existing.branchId),
+      });
       // The type/currency pair is fixed at creation (the fx_shape CHECK would
       // reject a cross-type rewrite anyway); only name/active/rate change.
       assertTypeShape({

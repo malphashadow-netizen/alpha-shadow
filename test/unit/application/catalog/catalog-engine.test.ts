@@ -452,3 +452,85 @@ describe('InMemoryCatalogRepository — branchBelongsToTenant', () => {
     expect(result).toBe(false);
   });
 });
+
+describe('CatalogEngine DD-004 — setBranchOverride branch scoping', () => {
+  /** Mirrors the real AuthorizationEngine ABAC branch-match rule for one grant. */
+  function branchScopedAuth(grantedBranchId: string | null): Pick<AuthorizationEngine, 'check'> {
+    return {
+      check: async (input) => {
+        if (grantedBranchId === null) {
+          return { allowed: true, effectiveMaxAmountMinorUnits: null };
+        }
+        const ctx = input.context;
+        if (ctx.hasResource && ctx.actorBranchId === grantedBranchId && ctx.resourceBranchId === grantedBranchId) {
+          return { allowed: true, effectiveMaxAmountMinorUnits: null };
+        }
+        throw new ForbiddenError(`missing permission ${input.permissionKey}`);
+      },
+    };
+  }
+
+  async function seedItem() {
+    const repo = new InMemoryCatalogRepository();
+    const engine = new CatalogEngine({ catalog: repo, authorization: allowAll });
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
+      categoryId: category.id,
+      name: { ar: 'لاتيه' },
+      basePrice: money(1800n, SAR),
+    });
+    return { repo, item };
+  }
+
+  it('1-2: a branch-A-scoped grant succeeds when overriding branch A', async () => {
+    const { repo, item } = await seedItem();
+    const engine = new CatalogEngine({ catalog: repo, authorization: branchScopedAuth(BRANCH_1) });
+    await expect(
+      engine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_1, menuItemId: item.id, isAvailable: false }),
+    ).resolves.toBeDefined();
+  });
+
+  it('3: the same branch-A-scoped grant is denied, with the same error shape, on branch B', async () => {
+    const { repo, item } = await seedItem();
+    const engine = new CatalogEngine({ catalog: repo, authorization: branchScopedAuth(BRANCH_1) });
+    await expect(
+      engine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_2, menuItemId: item.id, isAvailable: false }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it('4: a tenant-scoped grant succeeds on both branch A and branch B', async () => {
+    const { repo, item } = await seedItem();
+    const engine = new CatalogEngine({ catalog: repo, authorization: branchScopedAuth(null) });
+    await expect(
+      engine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_1, menuItemId: item.id, isAvailable: false }),
+    ).resolves.toBeDefined();
+    await expect(
+      engine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_2, menuItemId: item.id, isAvailable: false }),
+    ).resolves.toBeDefined();
+  });
+
+  it('5: a branch id that does not belong to the tenant returns NotFoundError without ever calling authorization.check', async () => {
+    const seen: unknown[] = [];
+    const recording: Pick<AuthorizationEngine, 'check'> = {
+      check: async () => {
+        seen.push(true);
+        return { allowed: true, effectiveMaxAmountMinorUnits: null };
+      },
+    };
+    const store = new InMemoryCatalogStore();
+    store.branches.set(BRANCH_1, { id: BRANCH_1, tenantId: TENANT });
+    const repo = new InMemoryCatalogRepository(store);
+    const engine = new CatalogEngine({ catalog: repo, authorization: allowAll });
+    const category = await engine.createCategory(TENANT, ACTOR, { name: { ar: 'قهوة' } });
+    const item = await engine.createItem(TENANT, ACTOR, {
+      categoryId: category.id,
+      name: { ar: 'لاتيه' },
+      basePrice: money(1800n, SAR),
+    });
+    const recordingEngine = new CatalogEngine({ catalog: repo, authorization: recording });
+    await expect(
+      recordingEngine.setBranchOverride(TENANT, ACTOR, { branchId: BRANCH_2, menuItemId: item.id, isAvailable: false }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(seen).toHaveLength(0);
+  });
+});

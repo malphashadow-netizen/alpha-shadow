@@ -59,6 +59,7 @@ export interface PaymentMethodRecord {
   readonly type: PaymentMethodType;
   readonly currencyCode: string | null;
   readonly fixedExchangeRate: string | null;
+  readonly clearingAccountSystemPurpose: string;
   readonly isActive: boolean;
 }
 
@@ -215,6 +216,8 @@ export interface NewPaymentMethodInput {
   readonly branchId: string | null;
   readonly currencyCode: string | null;
   readonly fixedExchangeRate: string | null;
+  /** Data-driven debit-account mapping. */
+  readonly clearingAccountSystemPurpose: string;
   readonly isActive: boolean;
 }
 
@@ -222,6 +225,7 @@ export interface UpdatePaymentMethodInput {
   readonly name?: string;
   readonly isActive?: boolean;
   readonly fixedExchangeRate?: string;
+  readonly clearingAccountSystemPurpose?: string;
 }
 
 export interface InsertPaymentInput {
@@ -235,6 +239,19 @@ export interface InsertPaymentInput {
   readonly shiftId: string;
   readonly createdBy: string;
   readonly idempotencyKey: string | null;
+}
+
+/** An account purpose stored on payment_methods; open text supports future methods without code changes. */
+export type PaymentJournalDebitPurpose = string;
+
+export interface PostPaymentJournalEntryInput {
+  readonly paymentId: string;
+  readonly branchId: string;
+  readonly currencyCode: string;
+  readonly amountMinor: bigint;
+  readonly debitSystemPurpose: PaymentJournalDebitPurpose;
+  readonly postedByUserId: string;
+  readonly occurredAt: Date;
 }
 
 export interface InsertOrderDiscountInput {
@@ -297,6 +314,7 @@ export interface PaymentsTxScope {
 
   // Payment lifecycle writes.
   insertPayment(tenantId: string, payment: InsertPaymentInput): Promise<PaymentRecord>;
+  postPaymentJournalEntry(tenantId: string, input: PostPaymentJournalEntryInput): Promise<void>;
   voidPayment(tenantId: string, paymentId: string, evidence: { voidedById: string; voidedAt: Date; voidReason: string }): Promise<PaymentRecord>;
   refundPayment(tenantId: string, paymentId: string): Promise<PaymentRecord>;
   setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;

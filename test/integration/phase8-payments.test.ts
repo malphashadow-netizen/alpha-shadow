@@ -53,6 +53,7 @@ import {
   CashierShiftRequiredError,
   CouponAvailabilityRaceError,
   DiscountOverrideRequiredError,
+  ForbiddenError,
   LoyaltyPointsDeferredError,
   PaymentExceedsBalanceError,
   PaymentReversalRequiredError,
@@ -126,7 +127,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -153,7 +154,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead, managerAuthenticator: authenticator });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     voids = new VoidModificationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
 
@@ -177,7 +178,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // opener carries the shift/catalog/methods keys; every collecting cashier
     // — the till cashier, cashierUser, noShiftCashier — carries
     // payments:collect so the gateway assertions below stay meaningful.)
-    opener = await createTieredUser(['shift:open', 'shift:close', 'catalog:write', 'payments:methods_admin'], '1111', null);
+    opener = await createTieredUser(['shift:open', 'shift:close', 'shift:x_report', 'catalog:write', 'payments:methods_admin'], '1111', null);
     verifier = await createPlainUser('2222');
     cashierUser = await createTieredUser(['payments:collect'], '3333', null);
     discountUser = await createTieredUser(['order:discount:apply'], '4444', { pct: '15.00', fixed: '20.00' });
@@ -198,9 +199,9 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     ));
 
     // Payment methods: domestic cash, card, and USD cash at a fixed 3.75.
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
-    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
+    methodCardId = (await methods.create(T, opener.userId, { name: 'شبكة', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true })).id;
+    methodUsdId = (await methods.create(T, opener.userId, { name: 'دولار نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '3.75000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -305,13 +306,13 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
 
   it('payment methods: foreign currency is cash-only and fully configured (engine + DB CHECKs)', async () => {
     // The engine validates the fx shape up front (fail-closed, no write)…
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'card', branchId: null, currencyCode: 'USD', fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'wallet', branchId: null, currencyCode: null, fixedExchangeRate: '1.00000000', clearingAccountSystemPurpose: 'card_clearing', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
-    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', isActive: true }))
+    await expect(methods.create(T, opener.userId, { name: 'bad', type: 'foreign_currency_cash', branchId: null, currencyCode: 'USD', fixedExchangeRate: '0.00000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true }))
       .rejects.toMatchObject({ code: 'validation.failed' });
     // …and the database re-verifies the same shape structurally (fx_shape CHECK),
     // whatever the code path.
@@ -331,7 +332,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     const before = await owner.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM exchange_rates WHERE tenant_id = $1 AND from_currency = 'EUR'", [T],
     );
-    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', isActive: true });
+    const method = await methods.create(T, opener.userId, { name: 'يورو نقدي', type: 'foreign_currency_cash', branchId: null, currencyCode: 'EUR', fixedExchangeRate: '4.10000000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true });
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' });
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.15000000' }); // no-op: no new row
     await methods.update(T, opener.userId, method.id, { fixedExchangeRate: '4.20000000' });
@@ -389,7 +390,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
   it('#8a starting_float matches the open cash count (atomic open, deferred verification)', async () => {
     // 5×10.00 + 3×50.00 = 200.00 SAR.
     const till = await setupTill([{ denominationValue: '10.00', quantity: 5 }, { denominationValue: '50.00', quantity: 3 }]);
-    const shift = await shifts.xReport(T, till.shiftId);
+    const shift = await shifts.xReport(T, opener.userId, till.shiftId);
     expect(shift.shift.startingFloat).toBe('200.0000');
     expect(shift.counts.filter((c) => c.countType === 'open')).toHaveLength(2);
     expect(shift.counts.map((c) => c.subtotal).sort()).toEqual(['150.0000', '50.0000']);
@@ -488,7 +489,7 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     // X Report: READ ONLY — live sales, no stored close columns, no resets.
     const signatureSql = "SELECT concat_ws('|', status, coalesce(closed_by_id::text, ''), coalesce(close_verified_by_id::text, ''), coalesce(closed_at::text, ''), coalesce(counted_cash::text, ''), coalesce(recorded_cash_sales::text, ''), coalesce(variance_type, ''), coalesce(notes, '')) AS sig FROM shift_reconciliations WHERE id = $1 AND tenant_id = $2";
     const before = await owner.query<{ sig: string }>(signatureSql, [till.shiftId, T]);
-    const x1 = await shifts.xReport(T, till.shiftId);
+    const x1 = await shifts.xReport(T, opener.userId, till.shiftId);
     expect(x1.shift.status).toBe('open');
     expect(x1.shift.countedCash).toBeNull();
     expect(x1.shift.recordedCashSales).toBeNull();
@@ -1116,6 +1117,60 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(Number(row(paymentsCount.rows).count)).toBe(0);
   });
 
+  it('B9b-db/ validate_payment rejects a direct payment insert for a voided order', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+
+    // Match B9b exactly: voidOrder itself marks every active order item voided.
+    await voids.voidOrder(T, actor(voidServerUser), {
+      orderId: order.order.id,
+      voidReasonId: reasonServer,
+    });
+
+    expect(row((await owner.query<{ payment_status: string }>(
+      'SELECT payment_status FROM orders WHERE id = $1 AND tenant_id = $2',
+      [order.order.id, T],
+    )).rows).payment_status).toBe('voided');
+
+    let rejected: unknown = null;
+    try {
+      await withApp(T, (q) => q.query(
+        `INSERT INTO payments (
+           id,
+           tenant_id,
+           order_id,
+           payment_method_id,
+           amount,
+           amount_in_base_currency,
+           shift_id,
+           created_by
+         )
+         VALUES ($1, $2, $3, $4, 10.00, 10.00, $5, $6)`,
+        [
+          randomUUID(),
+          T,
+          order.order.id,
+          methodCashId,
+          till.shiftId,
+          till.cashierId,
+        ],
+      ));
+    } catch (error: unknown) {
+      rejected = error;
+    }
+
+    expect(rejected).toMatchObject({
+      code: '23514',
+      message: expect.stringContaining('voided order cannot take a new payment') as string,
+    });
+
+    const paymentsCount = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2',
+      [T, order.order.id],
+    );
+    expect(Number(row(paymentsCount.rows).count)).toBe(0);
+  });
+
   // ── B9-c: terminal workflow states never block money ─────────────────────
   // (Permissive BY APPROVED SPEC: pay-after-service and complaint-voids are
   // legitimate on terminal states. These tests PIN that semantic — no prod
@@ -1244,5 +1299,245 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     expect(failure).toBeInstanceOf(CouponAvailabilityRaceError);
     expect((failure as CouponAvailabilityRaceError).message).toContain('P2-RACE-01');
     expect(toErrorResponse(failure, () => undefined)).toMatchObject({ status: 409, code: 'conflict' });
+  });
+
+  async function createBranchScopedPaymentsUser(
+    tenantId: string,
+    roles: readonly { keys: readonly string[]; scopeType: 'tenant' | 'branch'; scopeId: string | null }[],
+    pin = String(1000 + Math.trunc(Math.random() * 9000)),
+  ): Promise<TieredUser> {
+    const userId = randomUUID();
+    await withApp(tenantId, async (q) => {
+      await q.query('INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)', [userId, tenantId, `${userId}@example.test`, hashPin(PIN_PEPPER, tenantId, userId, pin)]);
+      for (const [index, role] of roles.entries()) {
+        const roleId = randomUUID();
+        await q.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, tenantId, `payments-scoped-${index}-${roleId}`]);
+        for (const key of role.keys) {
+          await q.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenantId, roleId, key]);
+        }
+        await q.query('INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id) VALUES ($1, $2, $3, $4, $5)', [tenantId, userId, roleId, role.scopeType, role.scopeId]);
+      }
+    });
+    const tokenSecV = deriveSecV(await permissionRead.listActiveUserRoles(tenantId, userId), await permissionRead.getSecurityVersion(tenantId, userId), sha256Hex);
+    return { userId, tokenSecV, pin };
+  }
+
+  it('AUTH-BR-07/a branch-only payments:void grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const orderA = await newOrder(tillA);
+    const orderB = await newOrder(tillB);
+    const paymentA = await payments.recordPayment(T, { orderId: orderA.order.id, paymentMethodId: methodCashId, cashierUserId: tillA.cashierId, amountText: '46.00' });
+    const paymentB = await payments.recordPayment(T, { orderId: orderB.order.id, paymentMethodId: methodCashId, cashierUserId: tillB.cashierId, amountText: '46.00' });
+    const subject = await createBranchScopedPaymentsUser(T, [
+      { keys: ['payments:void'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    await shifts.openShift(T, {
+      branchId: tillA.branchId,
+      cashierUserId: subject.userId,
+      openedByUserId: opener.userId,
+      openVerifiedByUserId: verifier.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    });
+
+    const resultA = await payments.voidPayment(T, actor(subject), { paymentId: paymentA.payment.id, reason: 'AUTH-BR-07 test' }).then(
+      (payment) => ({ payment, error: null }),
+      (error: unknown) => ({ payment: null, error }),
+    );
+    const resultB = await payments.voidPayment(T, actor(subject), { paymentId: paymentB.payment.id, reason: 'AUTH-BR-07 test' }).then(
+      (payment) => ({ payment, error: null }),
+      (error: unknown) => ({ payment: null, error }),
+    );
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.payment?.status ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.payment?.status ?? 'unknown';
+    console.log(`[AUTH-BR-07] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-07] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, status: resultA.payment?.status }).toEqual({ error: null, status: 'voided' });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('payments:void');
+  });
+
+  it('AUTH-BR-07b/a branch-only payments:collect grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const orderA = await newOrder(tillA);
+    const orderB = await newOrder(tillB);
+    const subject = await createBranchScopedPaymentsUser(T, [
+      { keys: ['payments:collect'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    await shifts.openShift(T, {
+      branchId: tillA.branchId,
+      cashierUserId: subject.userId,
+      openedByUserId: opener.userId,
+      openVerifiedByUserId: verifier.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    });
+
+    const resultA = await payments.recordPayment(T, {
+      orderId: orderA.order.id,
+      paymentMethodId: methodCashId,
+      cashierUserId: subject.userId,
+      tokenSecV: subject.tokenSecV,
+      amountText: '46.00',
+    }).then(
+      (recorded) => ({ recorded, error: null }),
+      (error: unknown) => ({ recorded: null, error }),
+    );
+    const resultB = await payments.recordPayment(T, {
+      orderId: orderB.order.id,
+      paymentMethodId: methodCashId,
+      cashierUserId: subject.userId,
+      tokenSecV: subject.tokenSecV,
+      amountText: '46.00',
+    }).then(
+      (recorded) => ({ recorded, error: null }),
+      (error: unknown) => ({ recorded: null, error }),
+    );
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.recorded?.payment.status ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.recorded?.payment.status ?? 'unknown';
+    console.log(`[AUTH-BR-07b] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-07b] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, status: resultA.recorded?.payment.status }).toEqual({ error: null, status: 'completed' });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('payments:collect');
+  });
+
+  it('AUTH-BR-05/a branch-only order:discount:apply grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const orderA = await newOrder(tillA);
+    const orderB = await newOrder(tillB);
+    const subject = await createBranchScopedPaymentsUser(T, [
+      { keys: ['order:discount:apply'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    await withApp(T, (q) => q.query(
+      `INSERT INTO user_discount_limits (tenant_id, user_id, permission_key, max_discount_percentage, max_discount_fixed_amount)
+       VALUES ($1, $2, 'order:discount:apply', '15.00', '20.00')`,
+      [T, subject.userId],
+    ));
+
+    const resultA = await discounts.applyDiscount(T, actor(subject), {
+      orderId: orderA.order.id,
+      mechanism: 'manual',
+      discountKind: 'fixed_amount',
+      discountValueText: '1.00',
+    }).then(
+      (discount) => ({ discount, error: null }),
+      (error: unknown) => ({ discount: null, error }),
+    );
+    const resultB = await discounts.applyDiscount(T, actor(subject), {
+      orderId: orderB.order.id,
+      mechanism: 'manual',
+      discountKind: 'fixed_amount',
+      discountValueText: '1.00',
+    }).then(
+      (discount) => ({ discount, error: null }),
+      (error: unknown) => ({ discount: null, error }),
+    );
+    const actualA = resultA.error instanceof Error ? `${resultA.error.name}: ${resultA.error.message}` : resultA.discount?.discountAmountApplied ?? 'unknown';
+    const actualB = resultB.error instanceof Error ? `${resultB.error.name}: ${resultB.error.message}` : resultB.discount?.discountAmountApplied ?? 'unknown';
+    console.log(`[AUTH-BR-05] branch A actual=${actualA}`);
+    console.log(`[AUTH-BR-05] branch B actual=${actualB}`);
+
+    expect.soft({ error: resultA.error, orderId: resultA.discount?.orderId }).toEqual({ error: null, orderId: orderA.order.id });
+    expect(resultB.error).toBeInstanceOf(ForbiddenError);
+    expect((resultB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((resultB.error as ForbiddenError).message).toContain('order:discount:apply');
+  });
+
+  it('[AUTH-BR-10/11] a branch-only shift:open + shift:close grant authorizes branch A and rejects branch B at the base permission gate', async () => {
+    const branchIdA = randomUUID();
+    const branchIdB = randomUUID();
+    await withApp(T, async (q) => {
+      await q.query(
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')",
+        [branchIdA, T, `AUTH-BR-10-A-${branchIdA}`],
+      );
+      await q.query(
+        "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, 'SAR', 'Asia/Riyadh', 'SA')",
+        [branchIdB, T, `AUTH-BR-10-B-${branchIdB}`],
+      );
+    });
+    const subjectOpen = await createBranchScopedPaymentsUser(T, [
+      { keys: ['shift:open'], scopeType: 'branch', scopeId: branchIdA },
+    ]);
+    const cashierA = await createPlainUser('6111');
+    const verifierA = await createPlainUser('6222');
+    const cashierB = await createPlainUser('6333');
+    const verifierB = await createPlainUser('6444');
+
+    const openA = await shifts.openShift(T, {
+      branchId: branchIdA,
+      cashierUserId: cashierA.userId,
+      openedByUserId: subjectOpen.userId,
+      openVerifiedByUserId: verifierA.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    const openB = await shifts.openShift(T, {
+      branchId: branchIdB,
+      cashierUserId: cashierB.userId,
+      openedByUserId: subjectOpen.userId,
+      openVerifiedByUserId: verifierB.userId,
+      openedAt: new Date(),
+      openCounts: [],
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    console.log(`[AUTH-BR-10] branch A actual=${openA.shift?.status ?? (openA.error as Error).name}`);
+    console.log(`[AUTH-BR-10] branch B actual=${openB.shift?.status ?? (openB.error as Error).name}`);
+
+    expect.soft({ error: openA.error, status: openA.shift?.status }).toEqual({ error: null, status: 'open' });
+    expect(openB.error).toBeInstanceOf(ForbiddenError);
+    expect((openB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((openB.error as ForbiddenError).message).toContain('shift:open');
+
+    const tillA = await setupTill();
+    const tillB = await setupTill();
+    const subjectClose = await createBranchScopedPaymentsUser(T, [
+      { keys: ['shift:close'], scopeType: 'branch', scopeId: tillA.branchId },
+    ]);
+    const closeVerifierA = await createPlainUser('6555');
+    const closeVerifierB = await createPlainUser('6666');
+
+    const closeA = await shifts.closeShift(T, {
+      shiftId: tillA.shiftId,
+      closedByUserId: subjectClose.userId,
+      closeVerifiedByUserId: closeVerifierA.userId,
+      closedAt: new Date(),
+      closeCounts: [],
+      notes: null,
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    const closeB = await shifts.closeShift(T, {
+      shiftId: tillB.shiftId,
+      closedByUserId: subjectClose.userId,
+      closeVerifiedByUserId: closeVerifierB.userId,
+      closedAt: new Date(),
+      closeCounts: [],
+      notes: null,
+    }).then(
+      (shift) => ({ shift, error: null }),
+      (error: unknown) => ({ shift: null, error }),
+    );
+    console.log(`[AUTH-BR-11] branch A actual=${closeA.shift?.status ?? (closeA.error as Error).name}`);
+    console.log(`[AUTH-BR-11] branch B actual=${closeB.shift?.status ?? (closeB.error as Error).name}`);
+
+    expect.soft({ error: closeA.error, status: closeA.shift?.status }).toEqual({ error: null, status: 'closed' });
+    expect(closeB.error).toBeInstanceOf(ForbiddenError);
+    expect((closeB.error as ForbiddenError).name).toBe('ForbiddenError');
+    expect((closeB.error as ForbiddenError).message).toContain('shift:close');
   });
 });

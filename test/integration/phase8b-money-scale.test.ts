@@ -97,7 +97,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -124,7 +124,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     discounts = new DiscountEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization, managerAuthenticator: authenticator });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead, managerAuthenticator: authenticator });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
     // Platform tax fixture: SA, per-line rounding, 15% exclusive VAT.
@@ -158,7 +158,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
       categoryId: menuCategoryId, name: { ar: 'طبق ياباني' }, basePrice: money(100n, currencyCode('JPY')), taxRuleId: saCategory.id,
     })).id;
 
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B1', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B1', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -241,7 +241,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     // Partial payment in USD cash @ 0.30770000 USD→KWD: 1.00 USD ⇒ 307.7 fils ⇒ 308.
     const usdMethod = await methods.create(T, opener.userId, {
       name: 'دولار B1', type: 'foreign_currency_cash', branchId: till.branchId,
-      currencyCode: 'USD', fixedExchangeRate: '0.30770000', isActive: true,
+      currencyCode: 'USD', fixedExchangeRate: '0.30770000', clearingAccountSystemPurpose: 'cash_on_hand', isActive: true,
     });
     const pay1 = await payments.recordPayment(T, {
       orderId: order, paymentMethodId: usdMethod.id, cashierUserId: till.cashier.userId, amountText: '1.00',
