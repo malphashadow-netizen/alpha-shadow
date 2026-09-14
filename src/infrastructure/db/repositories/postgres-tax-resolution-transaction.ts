@@ -87,7 +87,7 @@ export class PostgresTaxResolutionTransaction implements TaxResolutionTransactio
         AND tenant_id = $2 AND effective_from <= $3::date AND (effective_to IS NULL OR effective_to >= $3::date)`,
       [tenantCategoryId, this.tenantId, on]);
       if (tenantRate.rows.length > 1) throw new TaxConfigurationError('Overlapping tenant tax rates');
-      if (tenantRate.rows[0] !== undefined) return mapTenantTaxRate(tenantRate.rows[0]);
+      if (tenantRate.rows[0] !== undefined) return mapTenantTaxRate({ ...tenantRate.rows[0], tax_category_id: categoryId });
     }
     const r = await this.query.query<RateRow>(`SELECT ${RATE_COLUMNS} FROM tax_rates WHERE tax_category_id = $1
       AND effective_from <= $2::date AND (effective_to IS NULL OR effective_to >= $2::date)`, [categoryId, on]);
