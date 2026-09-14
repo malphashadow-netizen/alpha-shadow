@@ -11,11 +11,17 @@
  *
  * B7: every MUTATION (the 8 creates/updates, the 4 archives, attach and
  * setBranchOverride) requires its key — `catalog:write` for creates/updates,
- * `catalog:archive` for archives — checked as the first statement. The actor
- * is AUTH-ONLY (no actor column on catalog rows), so it travels as a
- * positional `actorUserId` parameter. The 4 archives delegate to the same
- * private doUpdate* bodies as the public updates (one key per operation —
- * an archive needs `catalog:archive` ONLY, never `catalog:write` too).
+ * `catalog:archive` for archives. For the 13 core menu-authoring operations
+ * the check is the first statement, tenant-wide (`hasResource:false`).
+ * DD-004: `setBranchOverride` is the sole exception — `branchBelongsToTenant`
+ * runs FIRST (a non-existent branch is rejected independently of the grant),
+ * then the gate runs branch-aware (`hasResource:true`, `input.branchId` as
+ * both actorBranchId and resourceBranchId) so a branch-scoped grant covers
+ * only its own branch. The actor is AUTH-ONLY (no actor column on catalog
+ * rows), so it travels as a positional `actorUserId` parameter. The 4
+ * archives delegate to the same private doUpdate* bodies as the public
+ * updates (one key per operation — an archive needs `catalog:archive` ONLY,
+ * never `catalog:write` too).
  * READS (list/get/getBranchMenu) stay unchecked: catalog:read exists in the
  * registry but no engine enforces it yet (out of B7 scope).
  * isSensitivePermission:false matches the 0008 seed (non-sensitive keys).
@@ -189,12 +195,21 @@ export class CatalogEngine {
     tenantId: string,
     actorUserId: string,
     permissionKey: 'catalog:write' | 'catalog:archive',
+    branchScope?: { actorBranchId: string; resourceBranchId: string },
   ): Promise<void> {
     await this.authorization.check({
       tenantId,
       userId: actorUserId,
       permissionKey,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+      context:
+        branchScope === undefined
+          ? { hasResource: false, actorBranchId: null, isSensitivePermission: false }
+          : {
+              hasResource: true,
+              actorBranchId: branchScope.actorBranchId,
+              resourceBranchId: branchScope.resourceBranchId,
+              isSensitivePermission: false,
+            },
     });
   }
 
@@ -406,10 +421,13 @@ export class CatalogEngine {
   }
 
   async setBranchOverride(tenantId: string, actorUserId: string, input: SetBranchOverrideInput): Promise<BranchMenuItemOverride> {
-    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write');
     if (!(await this.catalog.branchBelongsToTenant(tenantId, input.branchId))) {
       throw new NotFoundError(`Branch ${input.branchId} not found`);
     }
+    await this.requireCatalogKey(tenantId, actorUserId, 'catalog:write', {
+      actorBranchId: input.branchId,
+      resourceBranchId: input.branchId,
+    });
     const item = requireFound(await this.catalog.getItem(tenantId, input.menuItemId), `item ${input.menuItemId} not found`);
     const current = await this.catalog.getBranchOverride(tenantId, input.branchId, input.menuItemId);
     return this.catalog.upsertBranchOverride(tenantId, {

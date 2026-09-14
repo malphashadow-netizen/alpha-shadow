@@ -26,6 +26,7 @@ import type {
 import { isLastActiveMember } from '../../../domain/contracts/super-admin-guard.ts';
 import { TENANT_SUPER_ADMIN_ROLE_NAME } from '../../../domain/contracts/system-roles.ts';
 import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
+import { getCoveredPermissionKeys } from './shared/permission-queries.ts';
 
 interface ActiveUserRoleRow {
   readonly role_id: string;
@@ -147,6 +148,15 @@ export class PostgresPermissionReadRepository implements IPermissionReadReposito
       }));
     });
   }
+
+  async getCoveredPermissionKeys(
+    tenantId: string,
+    userId: string,
+    branchId: string,
+    candidateKeys: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.withTenantContext(tenantId, (q) => getCoveredPermissionKeys(q, tenantId, userId, branchId, candidateKeys));
+  }
 }
 
 export class PostgresPermissionWriteRepository implements IPermissionWriteRepository {
@@ -167,6 +177,71 @@ export class PostgresPermissionWriteRepository implements IPermissionWriteReposi
           tenantId,
           TENANT_SUPER_ADMIN_ROLE_NAME,
         ]);
+      },
+      { verifyTenantExists: false },
+    );
+  }
+
+  async registerTenantWithCountry(
+    tenantId: string,
+    tenantName: string,
+    countryCode: string,
+    branchId: string,
+    branchName: string,
+    timezone: string,
+  ): Promise<{ readonly reportingCurrency: string }> {
+    if (!/^[A-Z]{2}$/.test(countryCode)) {
+      throw new ValidationError('countryCode must contain exactly two uppercase letters', 'countryCode');
+    }
+
+    return this.withTenantContext(
+      tenantId,
+      async (q) => {
+        const jurisdiction = await q.query<{ default_currency_code: string }>(
+          `SELECT default_currency_code
+             FROM tax_jurisdictions
+            WHERE country_code = $1 AND is_active = true`,
+          [countryCode],
+        );
+        const reportingCurrency = jurisdiction.rows[0]?.default_currency_code;
+        if (reportingCurrency === undefined) {
+          throw new ValidationError(`countryCode ${countryCode} is not an active tax jurisdiction`, 'countryCode');
+        }
+
+        await q.query(
+          'INSERT INTO tenants (id, name, reporting_currency) VALUES ($1, $2, $3)',
+          [tenantId, tenantName, reportingCurrency],
+        );
+        const role = await q.query<{ id: string }>(
+          'INSERT INTO roles (tenant_id, name, is_system) VALUES ($1, $2, true) RETURNING id',
+          [tenantId, TENANT_SUPER_ADMIN_ROLE_NAME],
+        );
+        const systemRoleId = role.rows[0]?.id;
+        if (systemRoleId === undefined) throw new Error('INSERT INTO roles returned no row');
+        await q.query(
+          `INSERT INTO role_permissions (tenant_id, role_id, permission_key, max_amount_minor_units)
+           SELECT $1, $2, key, NULL FROM permissions_registry`,
+          [tenantId, systemRoleId],
+        );
+        await q.query(
+          `INSERT INTO role_permissions (tenant_id, role_id, permission_key, max_amount_minor_units)
+           SELECT $1, $2, key, NULL
+             FROM permissions_registry
+            WHERE key = ANY($3::text[])
+           ON CONFLICT DO NOTHING`,
+          [
+            tenantId,
+            systemRoleId,
+            ['tax_rate:create', 'tax_rate:close_and_supersede', 'tax:configure'],
+          ],
+        );
+        await q.query(
+          `INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [branchId, tenantId, branchName, reportingCurrency, timezone, countryCode],
+        );
+
+        return { reportingCurrency };
       },
       { verifyTenantExists: false },
     );

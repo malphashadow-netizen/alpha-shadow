@@ -77,6 +77,14 @@ export interface IPermissionReadRepository {
     permissionKey: string,
     relevantBranch: string | null,
   ): Promise<readonly PermissionGrant[]>;
+
+  /** Candidate permission keys whose active role scope covers the branch. */
+  getCoveredPermissionKeys(
+    tenantId: string,
+    userId: string,
+    branchId: string,
+    candidateKeys: readonly string[],
+  ): Promise<readonly string[]>;
 }
 
 export interface IPermissionWriteRepository {
@@ -86,6 +94,19 @@ export interface IPermissionWriteRepository {
    * Seeding is part of tenant creation, never a static migration.
    */
   createTenantWithSystemRole(tenantId: string, tenantName: string): Promise<void>;
+
+  /**
+   * Registers a tenant, its system role, and its first branch atomically.
+   * The reporting and branch currencies come from the active country registry.
+   */
+  registerTenantWithCountry(
+    tenantId: string,
+    tenantName: string,
+    countryCode: string,
+    branchId: string,
+    branchName: string,
+    timezone: string,
+  ): Promise<{ readonly reportingCurrency: string }>;
 
   /** Registers a "resource:action" permission in the global registry. */
   createPermission(tenantId: string, permissionKey: string, category: string, isSensitive: boolean): Promise<void>;

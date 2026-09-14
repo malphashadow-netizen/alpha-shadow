@@ -28,6 +28,7 @@ import type {
   PaymentStatus,
   PaymentsStore,
   PaymentsTxScope,
+  PostPaymentJournalEntryInput,
   ShiftRecord,
   UpdatePaymentMethodInput,
   UserDiscountCaps,
@@ -52,6 +53,7 @@ interface PaymentMethodRow {
   type: PaymentMethodType;
   currency_code: string | null;
   fixed_exchange_rate: string | null;
+  clearing_account_system_purpose: string;
   is_active: boolean;
 }
 
@@ -126,7 +128,8 @@ interface ShiftRow {
 function mapMethod(r: PaymentMethodRow): PaymentMethodRecord {
   return {
     id: r.id, tenantId: r.tenant_id, branchId: r.branch_id, name: r.name, type: r.type,
-    currencyCode: r.currency_code, fixedExchangeRate: r.fixed_exchange_rate, isActive: r.is_active,
+    currencyCode: r.currency_code, fixedExchangeRate: r.fixed_exchange_rate,
+    clearingAccountSystemPurpose: r.clearing_account_system_purpose, isActive: r.is_active,
   };
 }
 
@@ -397,6 +400,70 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       return mapPayment(r);
     },
 
+    async postPaymentJournalEntry(tid, input: PostPaymentJournalEntryInput): Promise<void> {
+      if (input.amountMinor <= 0n) throw new Error('Payment journal amount must be positive');
+      const result = await q.query<{ inserted: boolean }>(
+        `WITH selected_accounts AS (
+           SELECT
+             array_agg(id ORDER BY id) FILTER (WHERE system_purpose = $8) AS debit_ids,
+             array_agg(id ORDER BY id) FILTER (WHERE system_purpose = 'sales_revenue') AS credit_ids
+             FROM accounts
+            WHERE tenant_id = $1 AND is_active
+              AND system_purpose IN ($8, 'sales_revenue')
+         ), validated_accounts AS (
+           SELECT debit_ids[1] AS debit_id, credit_ids[1] AS credit_id
+             FROM selected_accounts
+            WHERE cardinality(debit_ids) = 1 AND cardinality(credit_ids) = 1
+         ), inserted_entry AS (
+           INSERT INTO journal_entries
+             (tenant_id, branch_id, accounting_date, occurred_at, source_type,
+              source_id, currency_code, description, posted_by, posted_at)
+           SELECT $1, $2, ($6::timestamptz AT TIME ZONE b.timezone)::date,
+                  $6::timestamptz, 'payment', $3::uuid, $4,
+                  'Payment ' || $3::uuid::text, $5, $6::timestamptz
+             FROM branches b, validated_accounts
+            WHERE b.id = $2 AND b.tenant_id = $1
+           ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+           RETURNING id
+         ), inserted_lines AS (
+           INSERT INTO journal_entry_lines
+             (tenant_id, journal_entry_id, line_number, account_id,
+              debit_minor, credit_minor, description)
+           SELECT $1, e.id, v.line_number, v.account_id,
+                  v.debit_minor, v.credit_minor, v.description
+             FROM inserted_entry e
+             CROSS JOIN validated_accounts a
+             CROSS JOIN LATERAL (VALUES
+               (1::smallint, a.debit_id, $7::bigint, 0::bigint, 'Payment clearing'),
+               (2::smallint, a.credit_id, 0::bigint, $7::bigint, 'Sales revenue')
+             ) AS v(line_number, account_id, debit_minor, credit_minor, description)
+           RETURNING 1
+         )
+         SELECT EXISTS (SELECT 1 FROM inserted_entry) AS inserted`,
+        [
+          tid,
+          input.branchId,
+          input.paymentId,
+          input.currencyCode,
+          input.postedByUserId,
+          input.occurredAt,
+          input.amountMinor.toString(),
+          input.debitSystemPurpose,
+        ],
+      );
+      if (result.rows[0] === undefined) throw new Error('Payment journal insert returned no result');
+      if (!result.rows[0].inserted) {
+        const existing = await q.query<{ id: string }>(
+          `SELECT id FROM journal_entries
+            WHERE tenant_id = $1 AND source_type = 'payment' AND source_id = $2`,
+          [tid, input.paymentId],
+        );
+        if (existing.rows[0] === undefined) {
+          throw new Error(`Payment journal accounts are missing or ambiguous for purpose '${input.debitSystemPurpose}'`);
+        }
+      }
+    },
+
     async voidPayment(tid, paymentId, evidence) {
       const result = await q.query<PaymentRow>(
         `UPDATE payments SET status = 'voided', voided_by = $3, voided_at = $4, void_reason = $5
@@ -487,9 +554,15 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
 
     async insertPaymentMethod(tid, input: NewPaymentMethodInput) {
       const result = await q.query<PaymentMethodRow>(
-        `INSERT INTO payment_methods (id, tenant_id, branch_id, name, type, currency_code, fixed_exchange_rate, is_active)
-         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [tid, input.branchId, input.name, input.type, input.currencyCode, input.fixedExchangeRate, input.isActive],
+        `INSERT INTO payment_methods
+           (id, tenant_id, branch_id, name, type, currency_code, fixed_exchange_rate,
+            clearing_account_system_purpose, is_active)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [
+          tid, input.branchId, input.name, input.type, input.currencyCode, input.fixedExchangeRate,
+          input.clearingAccountSystemPurpose,
+          input.isActive,
+        ],
       );
       const r = result.rows[0];
       if (r === undefined) throw new Error('Payment method could not be inserted');
@@ -502,9 +575,13 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
            name = COALESCE($3, name),
            is_active = COALESCE($4, is_active),
            fixed_exchange_rate = COALESCE($5, fixed_exchange_rate),
+           clearing_account_system_purpose = COALESCE($6, clearing_account_system_purpose),
            updated_at = now()
          WHERE tenant_id = $1 AND id = $2 RETURNING *`,
-        [tid, paymentMethodId, input.name ?? null, input.isActive ?? null, input.fixedExchangeRate ?? null],
+        [
+          tid, paymentMethodId, input.name ?? null, input.isActive ?? null,
+          input.fixedExchangeRate ?? null, input.clearingAccountSystemPurpose ?? null,
+        ],
       );
       const r = result.rows[0];
       if (r === undefined) throw new Error(`Payment method ${paymentMethodId} could not be updated`);
