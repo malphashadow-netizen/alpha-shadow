@@ -53,6 +53,7 @@ import { PaymentsEngine } from '../../src/application/engines/payments/payments-
 import { AuthorizationEngine } from '../../src/application/engines/rbac/authorization-engine.ts';
 import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
 import { PlatformTaxAdminEngine } from '../../src/application/engines/tax/platform-tax-admin-engine.ts';
+import type { PaymentsTxScope, ShiftsTxScope } from '../../src/domain/contracts/payments.ts';
 import { deriveSecV } from '../../src/domain/contracts/sec-v.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platform-tax-context.ts';
@@ -395,14 +396,16 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     // Test-only timing barrier: it makes both real transactions reach the
     // production lockShift boundary before either invokes the original lock.
     // It does not replace or reorder the repository/SQL locking behavior.
-    function synchronizeLockShift<TStore extends typeof originalPaymentDependencies.store | typeof originalShiftDependencies.store>(store: TStore): TStore {
+    function synchronizeLockShift<TScope extends PaymentsTxScope | ShiftsTxScope>(store: {
+      run<TResult>(tenantId: string, fn: (scope: TScope) => Promise<TResult>): Promise<TResult>;
+    }): typeof store {
       return {
-        run<TResult>(tenantId: string, fn: Parameters<TStore['run']>[1]): Promise<TResult> {
-          return store.run(tenantId, async (scope) => {
-            const synchronizedScope = new Proxy(scope, {
+        run<TResult>(tenantId: string, fn: (scope: TScope) => Promise<TResult>): Promise<TResult> {
+          return store.run<TResult>(tenantId, async (scope) => {
+            const synchronizedScope = new Proxy<TScope>(scope, {
               get(target, property, receiver): unknown {
                 if (property !== 'lockShift') return Reflect.get(target, property, receiver);
-                return async (...args: Parameters<typeof scope.lockShift>) => {
+                return async (...args: [tenantId: string, shiftId: string]) => {
                   lockArrivals += 1;
                   if (lockArrivals === 2) releaseLockBarrier();
                   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -423,7 +426,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
             return fn(synchronizedScope);
           });
         },
-      } as TStore;
+      };
     }
 
     const synchronizedPayments = new PaymentsEngine({
