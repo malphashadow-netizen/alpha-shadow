@@ -224,6 +224,18 @@ export class PostgresPermissionWriteRepository implements IPermissionWriteReposi
           [tenantId, systemRoleId],
         );
         await q.query(
+          `INSERT INTO role_permissions (tenant_id, role_id, permission_key, max_amount_minor_units)
+           SELECT $1, $2, key, NULL
+             FROM permissions_registry
+            WHERE key = ANY($3::text[])
+           ON CONFLICT DO NOTHING`,
+          [
+            tenantId,
+            systemRoleId,
+            ['tax_rate:create', 'tax_rate:close_and_supersede', 'tax:configure'],
+          ],
+        );
+        await q.query(
           `INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code)
            VALUES ($1, $2, $3, $4, $5, $6)`,
           [branchId, tenantId, branchName, reportingCurrency, timezone, countryCode],
