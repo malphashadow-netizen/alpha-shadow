@@ -1,4 +1,4 @@
-import type { TaxCategory, VatRegistrationStatus } from './tax.ts';
+import type { NewTaxRate, SupersedeTaxRateInput, TaxCategory, TaxRate, VatRegistrationStatus } from './tax.ts';
 
 /** Exact text displayed on the SEPARATE explicit-confirmation admin interface. */
 export const EXCISE_CONFIRMATION_TEXT = 'أنا مُصنِّع/مستورد هذا المنتج ومسجَّل ضريبيًا للإنتاج الانتقائي';
@@ -33,6 +33,11 @@ export interface TenantTaxAdminRepository {
   confirmExciseAssignment(actor: TenantTaxActor, input: ConfirmExciseAssignmentInput): Promise<void>;
   confirmExciseBranchOverride(actor: TenantTaxActor, input: ConfirmExciseOverrideInput): Promise<void>;
   setVatRegistration(actor: TenantTaxActor, status: VatRegistrationStatus, number: string | null): Promise<void>;
+}
+
+export interface TenantTaxRateAdminRepository {
+  createTenantTaxRate(tenantId: string, input: NewTaxRate): Promise<TaxRate>;
+  closeAndSupersedeTenantTaxRate(tenantId: string, input: SupersedeTaxRateInput): Promise<TaxRate>;
 }
 
 /** Catalog writes must never be an alternate excise-confirmation path. */

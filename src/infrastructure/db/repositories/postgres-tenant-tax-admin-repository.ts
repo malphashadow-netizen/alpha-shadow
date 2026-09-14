@@ -1,13 +1,13 @@
 import type {
   BranchTaxOverrideInput, CatalogTaxAssignmentPolicy, ConfirmExciseAssignmentInput, ConfirmExciseOverrideInput,
-  TenantTaxActor, TenantTaxAdminRepository,
+  TenantTaxActor, TenantTaxAdminRepository, TenantTaxRateAdminRepository,
 } from '../../../domain/contracts/tenant-tax-admin.ts';
-import type { TaxCategory, VatRegistrationStatus } from '../../../domain/contracts/tax.ts';
+import type { NewTaxRate, SupersedeTaxRateInput, TaxCategory, TaxRate, VatRegistrationStatus } from '../../../domain/contracts/tax.ts';
 import { assertOrdinaryTaxCategory } from '../../../domain/contracts/tax-rules.ts';
 import { NotFoundError } from '../../../shared/errors.ts';
 import type { TenantQuery, WithTenantContext } from '../tenant-context.ts';
 import { appendAuditLogInTransaction } from './postgres-audit-log-repository.ts';
-import { mapTaxCategory, type CategoryRow } from './tax-row-mappers.ts';
+import { mapTaxCategory, mapTenantTaxRate, RATE_COLUMNS, type CategoryRow, type RateRow } from './tax-row-mappers.ts';
 
 async function ordinaryCategory(q: TenantQuery, id: string): Promise<void> {
   const r = await q.query<CategoryRow>('SELECT * FROM tax_categories WHERE id = $1', [id]);
@@ -15,13 +15,35 @@ async function ordinaryCategory(q: TenantQuery, id: string): Promise<void> {
   if (category === undefined) throw new NotFoundError('Tax category not found');
   assertOrdinaryTaxCategory(mapTaxCategory(category));
 }
-export class PostgresTenantTaxAdminRepository implements TenantTaxAdminRepository, CatalogTaxAssignmentPolicy {
+export class PostgresTenantTaxAdminRepository implements TenantTaxAdminRepository, TenantTaxRateAdminRepository, CatalogTaxAssignmentPolicy {
   private readonly withTenantContext: WithTenantContext;
   constructor(withTenantContext: WithTenantContext) { this.withTenantContext = withTenantContext; }
   async getCategory(tenantId: string, categoryId: string): Promise<TaxCategory | null> {
     return this.withTenantContext(tenantId, async (q) => {
       const r = await q.query<CategoryRow>('SELECT * FROM tax_categories WHERE id = $1', [categoryId]);
       return r.rows[0] === undefined ? null : mapTaxCategory(r.rows[0]);
+    });
+  }
+  async createTenantTaxRate(tenantId: string, input: NewTaxRate): Promise<TaxRate> {
+    return this.withTenantContext(tenantId, async (q) => {
+      const result = await q.query<RateRow>(
+        `SELECT ${RATE_COLUMNS} FROM create_tenant_tax_rate($1,$2,$3,$4,$5::date,$6::date)`,
+        [tenantId, input.taxCategoryId, input.rateBps, input.isPriceInclusiveDefault, input.effectiveFrom, input.effectiveTo],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new NotFoundError('Created tenant tax rate was not returned');
+      return mapTenantTaxRate(row);
+    });
+  }
+  async closeAndSupersedeTenantTaxRate(tenantId: string, input: SupersedeTaxRateInput): Promise<TaxRate> {
+    return this.withTenantContext(tenantId, async (q) => {
+      const result = await q.query<RateRow>(
+        `SELECT ${RATE_COLUMNS} FROM close_and_supersede_tenant_tax_rate($1,$2,$3,$4,$5::date)`,
+        [tenantId, input.taxRateId, input.rateBps, input.isPriceInclusiveDefault, input.effectiveFrom],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new NotFoundError('Superseding tenant tax rate was not returned');
+      return mapTenantTaxRate(row);
     });
   }
   async assertOrdinaryAssignment(tenantId: string, taxCategoryId: string): Promise<void> {

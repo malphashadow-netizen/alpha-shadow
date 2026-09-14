@@ -1,7 +1,8 @@
-import type { BranchTaxOverrideInput, ConfirmExciseAssignmentInput, ConfirmExciseOverrideInput, TenantTaxActor, TenantTaxAdminRepository } from '../../../domain/contracts/tenant-tax-admin.ts';
-import type { TaxCategory, VatRegistrationStatus } from '../../../domain/contracts/tax.ts';
-import { assertExciseConfirmation, assertOrdinaryTaxCategory } from '../../../domain/contracts/tax-rules.ts';
-import { NotFoundError, TaxConfigurationError, ValidationError } from '../../../shared/errors.ts';
+import type { BranchTaxOverrideInput, ConfirmExciseAssignmentInput, ConfirmExciseOverrideInput, TenantTaxActor, TenantTaxAdminRepository, TenantTaxRateAdminRepository } from '../../../domain/contracts/tenant-tax-admin.ts';
+import type { NewTaxRate, SupersedeTaxRateInput, TaxCategory, TaxRate, VatRegistrationStatus } from '../../../domain/contracts/tax.ts';
+import { assertExciseConfirmation, assertOrdinaryTaxCategory, assertTaxDate, assertTaxDateRange } from '../../../domain/contracts/tax-rules.ts';
+import { NotFoundError, ServiceUnavailableError, TaxConfigurationError, ValidationError } from '../../../shared/errors.ts';
+import { assertTaxRateBps } from '../../../shared/tax-math.ts';
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
 
 export interface TenantTaxAdminDependencies {
@@ -11,6 +12,13 @@ export interface TenantTaxAdminDependencies {
 export class TenantTaxAdminEngine {
   private readonly dependencies: TenantTaxAdminDependencies;
   constructor(dependencies: TenantTaxAdminDependencies) { this.dependencies = dependencies; }
+  private rateRepository(): TenantTaxRateAdminRepository {
+    const repository = this.dependencies.repository as TenantTaxAdminRepository & Partial<TenantTaxRateAdminRepository>;
+    if (repository.createTenantTaxRate === undefined || repository.closeAndSupersedeTenantTaxRate === undefined) {
+      throw new ServiceUnavailableError('Tenant tax-rate administration repository is not configured');
+    }
+    return repository as TenantTaxAdminRepository & TenantTaxRateAdminRepository;
+  }
   private async authorize(actor: TenantTaxActor, key: string): Promise<void> {
     // Tenant-wide sensitive permission, no L1 cache and no caller-controlled
     // branch/sensitivity. This is NEVER a check of a tenant role's name.
@@ -22,6 +30,18 @@ export class TenantTaxAdminEngine {
     const category = await this.dependencies.repository.getCategory(tenantId, id);
     if (category === null) throw new NotFoundError('Tax category not found');
     return category;
+  }
+  async createTenantTaxRate(actor: TenantTaxActor, input: NewTaxRate): Promise<TaxRate> {
+    await this.authorize(actor, 'tax_rate:create');
+    assertTaxRateBps(input.rateBps);
+    assertTaxDateRange(input.effectiveFrom, input.effectiveTo);
+    return this.rateRepository().createTenantTaxRate(actor.tenantId, input);
+  }
+  async closeAndSupersedeTenantTaxRate(actor: TenantTaxActor, input: SupersedeTaxRateInput): Promise<TaxRate> {
+    await this.authorize(actor, 'tax_rate:close_and_supersede');
+    assertTaxRateBps(input.rateBps);
+    assertTaxDate(input.effectiveFrom);
+    return this.rateRepository().closeAndSupersedeTenantTaxRate(actor.tenantId, input);
   }
   async assignAdditionalCategory(actor: TenantTaxActor, menuItemId: string, taxCategoryId: string): Promise<void> {
     await this.authorize(actor, 'tax:configure');
