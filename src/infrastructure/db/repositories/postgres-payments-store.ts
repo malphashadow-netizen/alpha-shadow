@@ -256,12 +256,15 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       );
 
       const taxRows = await q.query<TaxPlanQueryRow>(
-        `SELECT s.order_line_id, s.tax_rate_id, s.tax_family, s.rate_bps_snapshot,
-                s.is_price_inclusive_snapshot, k.cascade_priority, c.rounding_strategy
+        `SELECT s.order_line_id, COALESCE(s.tax_rate_id, s.tenant_tax_rate_id) AS tax_rate_id,
+                s.tax_family, s.rate_bps_snapshot, s.is_price_inclusive_snapshot,
+                COALESCE(k.cascade_priority, tk.cascade_priority) AS cascade_priority, c.rounding_strategy
            FROM order_line_tax_snapshots s
            JOIN order_line_tax_contexts c ON c.order_line_id = s.order_line_id AND c.tenant_id = $1
-           JOIN tax_rates r ON r.id = s.tax_rate_id
-           JOIN tax_categories k ON k.id = r.tax_category_id
+           LEFT JOIN tax_rates r ON r.id = s.tax_rate_id
+           LEFT JOIN tax_categories k ON k.id = r.tax_category_id
+           LEFT JOIN tenant_tax_rates tr ON tr.id = s.tenant_tax_rate_id AND tr.tenant_id = $1
+           LEFT JOIN tenant_tax_categories tk ON tk.id = tr.tax_category_id AND tk.tenant_id = tr.tenant_id
           WHERE s.order_line_id IN (
                 SELECT i.id FROM order_items i
                  WHERE i.tenant_id = $1 AND i.order_id = $2 AND NOT i.is_voided)

@@ -8,6 +8,7 @@ import {
   PostgresPermissionWriteRepository,
   type PostgresPermissionRepositoryDependencies,
 } from '../../src/infrastructure/db/repositories/postgres-permission-repository.ts';
+import { PostgresTaxResolutionTransaction } from '../../src/infrastructure/db/repositories/postgres-tax-resolution-transaction.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { ValidationError } from '../../src/shared/errors.ts';
 import { testDatabaseUrl } from '../support/database.ts';
@@ -79,6 +80,36 @@ describe('integration: self-service tenant registration', () => {
     expect(result.reportingCurrency).toBe(expectedCurrency);
     expect(tenant.rows[0]?.reporting_currency).toBe(expectedCurrency);
     expect(branch.rows[0]).toEqual({ country_code: 'EG', base_currency: expectedCurrency });
+
+    const copied = await ownerPool.query<{
+      id: string; platform_category_id: string; platform_rate_id: string; tenant_rate_id: string;
+      platform_rate_bps: number; tenant_rate_bps: number;
+    }>(`SELECT tenant_category.id, tenant_category.platform_category_id,
+              platform_rate.id AS platform_rate_id, tenant_rate.id AS tenant_rate_id,
+              platform_rate.rate_bps AS platform_rate_bps, tenant_rate.rate_bps AS tenant_rate_bps
+         FROM tenant_tax_categories tenant_category
+         JOIN tax_categories platform_category ON platform_category.id = tenant_category.platform_category_id
+         JOIN tax_rates platform_rate
+           ON platform_rate.tax_category_id = platform_category.id AND platform_rate.effective_to IS NULL
+         JOIN tenant_tax_rates tenant_rate
+           ON tenant_rate.tenant_id = tenant_category.tenant_id
+          AND tenant_rate.tax_category_id = tenant_category.id
+          AND tenant_rate.effective_to IS NULL
+        WHERE tenant_category.tenant_id = $1
+        ORDER BY tenant_category.code`, [tenantId]);
+    const activePlatform = await ownerPool.query<{ id: string }>(
+      `SELECT id FROM tax_categories WHERE country_code = 'EG' AND is_active = true ORDER BY code`,
+    );
+    expect(copied.rows.map((row) => row.platform_category_id)).toEqual(activePlatform.rows.map((row) => row.id));
+    expect(copied.rows.every((row) => row.tenant_rate_bps === row.platform_rate_bps)).toBe(true);
+
+    const first = copied.rows[0];
+    if (first === undefined) throw new Error('tenant registration did not copy active tax configuration');
+    const resolved = await withApp(tenantId, async (q) => {
+      const tx = new PostgresTaxResolutionTransaction(q, tenantId);
+      return tx.getApplicableRate(first.platform_category_id, '2026-09-14');
+    });
+    expect(resolved).toMatchObject({ id: first.tenant_rate_id, source: 'tenant', rateBps: first.platform_rate_bps });
   });
 
   it('grants the system role every registered tenant permission without a financial cap', async () => {

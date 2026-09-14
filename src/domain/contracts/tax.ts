@@ -25,6 +25,7 @@ export interface TaxCategory {
   readonly isActive: boolean;
 }
 export interface TaxRate {
+  readonly source?: 'platform' | 'tenant';
   readonly id: string;
   readonly taxCategoryId: string;
   readonly rateBps: number;
@@ -72,6 +73,7 @@ export interface MenuItemTaxAssignment {
   readonly additionalTaxCategoryIds: readonly string[];
 }
 export interface ResolvedTaxLine {
+  readonly source?: 'platform' | 'tenant';
   readonly taxRateId: string;
   readonly taxFamily: TaxFamily;
   readonly computationSequence: number;

@@ -25,7 +25,12 @@ export function mapTaxCategory(r: CategoryRow): TaxCategory {
     cascadePriority: r.cascade_priority, name: parseLocalizedText(r.name, 'name', { allowEmpty: false }), isActive: r.is_active });
 }
 export function mapTaxRate(r: RateRow): TaxRate {
-  return Object.freeze({ id: r.id, taxCategoryId: r.tax_category_id, rateBps: r.rate_bps,
+  return Object.freeze({ id: r.id, source: 'platform', taxCategoryId: r.tax_category_id, rateBps: r.rate_bps,
+    isPriceInclusiveDefault: r.is_price_inclusive_default, effectiveFrom: r.effective_from,
+    effectiveTo: r.effective_to, supersededBy: r.superseded_by });
+}
+export function mapTenantTaxRate(r: RateRow): TaxRate {
+  return Object.freeze({ id: r.id, source: 'tenant', taxCategoryId: r.tax_category_id, rateBps: r.rate_bps,
     isPriceInclusiveDefault: r.is_price_inclusive_default, effectiveFrom: r.effective_from,
     effectiveTo: r.effective_to, supersededBy: r.superseded_by });
 }

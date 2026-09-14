@@ -241,6 +241,33 @@ export class PostgresPermissionWriteRepository implements IPermissionWriteReposi
           [branchId, tenantId, branchName, reportingCurrency, timezone, countryCode],
         );
 
+        const categories = await q.query(
+          `INSERT INTO tenant_tax_categories
+             (tenant_id, country_code, code, kind, tax_family, cascade_priority, name, is_active, platform_category_id)
+           SELECT $1, country_code, code, kind, tax_family, cascade_priority, name, is_active, id
+             FROM tax_categories
+            WHERE country_code = $2 AND is_active = true`,
+          [tenantId, countryCode],
+        );
+        if (categories.rowCount === 0) {
+          throw new ValidationError(`countryCode ${countryCode} has no active tax categories`, 'countryCode');
+        }
+        await q.query(
+          `INSERT INTO tenant_tax_rates
+             (tenant_id, tax_category_id, rate_bps, is_price_inclusive_default, effective_from, effective_to)
+           SELECT $1, tenant_category.id, platform_rate.rate_bps,
+                  platform_rate.is_price_inclusive_default, platform_rate.effective_from, platform_rate.effective_to
+             FROM tax_rates platform_rate
+             JOIN tax_categories platform_category ON platform_category.id = platform_rate.tax_category_id
+             JOIN tenant_tax_categories tenant_category
+               ON tenant_category.tenant_id = $1
+              AND tenant_category.platform_category_id = platform_category.id
+            WHERE platform_category.country_code = $2
+              AND platform_category.is_active = true
+              AND platform_rate.effective_to IS NULL`,
+          [tenantId, countryCode],
+        );
+
         return { reportingCurrency };
       },
       { verifyTenantExists: false },

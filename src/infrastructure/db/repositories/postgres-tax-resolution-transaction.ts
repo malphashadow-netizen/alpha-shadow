@@ -7,7 +7,7 @@ import { parseLocalizedText } from '../../../domain/contracts/catalog-rules.ts';
 import { ConflictError, NotFoundError, TaxConfigurationError } from '../../../shared/errors.ts';
 import { minorUnitsToDb } from '../../../shared/money.ts';
 import type { TenantQuery } from '../tenant-context.ts';
-import { LIABILITY_COLUMNS, RATE_COLUMNS, mapLiabilityRule, mapTaxCategory, mapTaxRate, type CategoryRow, type LiabilityRow, type RateRow } from './tax-row-mappers.ts';
+import { LIABILITY_COLUMNS, RATE_COLUMNS, mapLiabilityRule, mapTaxCategory, mapTaxRate, mapTenantTaxRate, type CategoryRow, type LiabilityRow, type RateRow } from './tax-row-mappers.ts';
 
 export class PostgresTaxResolutionTransaction implements TaxResolutionTransaction {
   readonly tenantId: string;
@@ -79,6 +79,16 @@ export class PostgresTaxResolutionTransaction implements TaxResolutionTransactio
     return r.rows[0]?.override_tax_category_id ?? null;
   }
   async getApplicableRate(categoryId: string, on: string): Promise<TaxRate | null> {
+    const tenantCategory = await this.query.query<{ id: string }>(`SELECT id FROM tenant_tax_categories
+      WHERE tenant_id = $1 AND platform_category_id = $2 AND is_active = true`, [this.tenantId, categoryId]);
+    const tenantCategoryId = tenantCategory.rows[0]?.id;
+    if (tenantCategoryId !== undefined) {
+      const tenantRate = await this.query.query<RateRow>(`SELECT ${RATE_COLUMNS} FROM tenant_tax_rates WHERE tax_category_id = $1
+        AND tenant_id = $2 AND effective_from <= $3::date AND (effective_to IS NULL OR effective_to >= $3::date)`,
+      [tenantCategoryId, this.tenantId, on]);
+      if (tenantRate.rows.length > 1) throw new TaxConfigurationError('Overlapping tenant tax rates');
+      if (tenantRate.rows[0] !== undefined) return mapTenantTaxRate(tenantRate.rows[0]);
+    }
     const r = await this.query.query<RateRow>(`SELECT ${RATE_COLUMNS} FROM tax_rates WHERE tax_category_id = $1
       AND effective_from <= $2::date AND (effective_to IS NULL OR effective_to >= $2::date)`, [categoryId, on]);
     if (r.rows.length > 1) throw new TaxConfigurationError('Overlapping tax rates');
@@ -101,9 +111,10 @@ export class PostgresTaxResolutionTransaction implements TaxResolutionTransactio
   async insertSnapshots(orderLineId: string, currencyCode: string, taxes: readonly ResolvedTaxLine[]): Promise<void> {
     for (const tax of taxes) {
       await this.query.query(`INSERT INTO order_line_tax_snapshots
-        (order_line_id, tax_rate_id, tax_family, computation_sequence, liable_party, rate_bps_snapshot,
+        (order_line_id, tax_rate_id, tenant_tax_rate_id, tax_family, computation_sequence, liable_party, rate_bps_snapshot,
          is_price_inclusive_snapshot, taxable_amount_minor, tax_amount_minor, currency_code)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [orderLineId, tax.taxRateId, tax.taxFamily, tax.computationSequence,
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [orderLineId, tax.source === 'tenant' ? null : tax.taxRateId,
+        tax.source === 'tenant' ? tax.taxRateId : null, tax.taxFamily, tax.computationSequence,
         tax.liableParty, tax.rateBps, tax.isPriceInclusive, minorUnitsToDb(tax.taxableAmountMinor), minorUnitsToDb(tax.taxAmountMinor), currencyCode]);
     }
   }
