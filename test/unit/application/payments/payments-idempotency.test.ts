@@ -83,13 +83,17 @@ function pgUniqueViolation(): Error & { code: string } {
 interface FakeScopeOptions {
   readonly byKey: PaymentRecord | null;
   readonly calls: { bumped: boolean; statusSet: boolean };
+  readonly collectionCalls: { count: number };
   readonly probe: (tenantId: string, idempotencyKey: string) => Promise<PaymentRecord | null>;
 }
 
 function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
   return {
     loadOrderFinancialSnapshot: async () => snapshot(),
-    lockOrder: async () => ({ id: ORDER }),
+    lockOrder: async () => {
+      options.collectionCalls.count += 1;
+      return { id: ORDER };
+    },
     bumpOrderRevision: async () => {
       options.calls.bumped = true;
     },
@@ -126,18 +130,19 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
 describe('payments idempotency branches (fake store)', () => {
   function setup(firstRunError: Error | undefined, byKey: PaymentRecord | null) {
     const calls = { bumped: false, statusSet: false };
+    const collectionCalls = { count: 0 };
     const probe = vi.fn(async (_tenantId: string, _key: string): Promise<PaymentRecord | null> => byKey);
-    const scope = fakeScope({ byKey, calls, probe });
+    const scope = fakeScope({ byKey, calls, collectionCalls, probe });
     let runs = 0;
     const store: PaymentsStore = {
       run: async (_tenantId, fn) => {
         runs += 1;
-        if (runs === 1 && firstRunError !== undefined) throw firstRunError;
+        if (runs === 2 && firstRunError !== undefined) throw firstRunError;
         return fn(scope);
       },
     };
     const engine = new PaymentsEngine({ store, authorization: allowAll });
-    return { engine, calls, probe, runs: () => runs };
+    return { engine, calls, probe, collectionRuns: () => collectionCalls.count };
   }
 
   it('U1 23505 + probe hit → replays the recorded payment (same id, stored change, live totals)', async () => {
@@ -178,17 +183,20 @@ describe('payments idempotency branches (fake store)', () => {
   });
 
   it('U6 blank / over-long keys are rejected before any store work', async () => {
-    const { engine, runs } = setup(undefined, null);
+    const { engine, collectionRuns } = setup(undefined, null);
     await expect(engine.recordPayment(T, input({ idempotencyKey: '   ' }))).rejects.toBeInstanceOf(ValidationError);
     await expect(engine.recordPayment(T, input({ idempotencyKey: 'k'.repeat(129) }))).rejects.toBeInstanceOf(ValidationError);
-    expect(runs()).toBe(0);
+    // Branch discovery is legitimate store work; invalid keys must still be
+    // rejected before the collection transaction reaches its first lock.
+    expect(collectionRuns()).toBe(0);
   });
 
   it('U7 the pre-check hit replays without writing (no bump, no status, no insert)', async () => {
     const insert = vi.fn(async () => unused('insertPayment'));
     const calls = { bumped: false, statusSet: false };
+    const collectionCalls = { count: 0 };
     const probe = vi.fn(async (_tenantId: string, _key: string): Promise<PaymentRecord | null> => recorded());
-    const scope: PaymentsTxScope = { ...fakeScope({ byKey: recorded(), calls, probe }), insertPayment: insert };
+    const scope: PaymentsTxScope = { ...fakeScope({ byKey: recorded(), calls, collectionCalls, probe }), insertPayment: insert };
     const engine = new PaymentsEngine({ store: { run: async (_tid, fn) => fn(scope) }, authorization: allowAll });
     const replay = await engine.recordPayment(T, input());
     expect(replay.payment.id).toBe('pay-b8-unit');

@@ -382,6 +382,58 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     const till = await setupTill();
     const created = await newOrder(till.branchId, till.cashier.userId);
     const orderId = created.order.id;
+    const originalPaymentDependencies = (payments as unknown as {
+      readonly dependencies: ConstructorParameters<typeof PaymentsEngine>[0];
+    }).dependencies;
+    const originalShiftDependencies = (shifts as unknown as {
+      readonly dependencies: ConstructorParameters<typeof ShiftEngine>[0];
+    }).dependencies;
+    let lockArrivals = 0;
+    let releaseLockBarrier!: () => void;
+    const lockBarrier = new Promise<void>((resolve) => { releaseLockBarrier = resolve; });
+
+    // Test-only timing barrier: it makes both real transactions reach the
+    // production lockShift boundary before either invokes the original lock.
+    // It does not replace or reorder the repository/SQL locking behavior.
+    function synchronizeLockShift<TStore extends typeof originalPaymentDependencies.store | typeof originalShiftDependencies.store>(store: TStore): TStore {
+      return {
+        run<TResult>(tenantId: string, fn: Parameters<TStore['run']>[1]): Promise<TResult> {
+          return store.run(tenantId, async (scope) => {
+            const synchronizedScope = new Proxy(scope, {
+              get(target, property, receiver): unknown {
+                if (property !== 'lockShift') return Reflect.get(target, property, receiver);
+                return async (...args: Parameters<typeof scope.lockShift>) => {
+                  lockArrivals += 1;
+                  if (lockArrivals === 2) releaseLockBarrier();
+                  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    await Promise.race([
+                      lockBarrier,
+                      new Promise<never>((_resolve, reject) => {
+                        timeoutHandle = setTimeout(() => { reject(new Error('Timed out waiting for close and collect to reach lockShift')); }, 2_000);
+                      }),
+                    ]);
+                  } finally {
+                    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                  }
+                  return scope.lockShift(...args);
+                };
+              },
+            });
+            return fn(synchronizedScope);
+          });
+        },
+      } as TStore;
+    }
+
+    const synchronizedPayments = new PaymentsEngine({
+      ...originalPaymentDependencies,
+      store: synchronizeLockShift(originalPaymentDependencies.store),
+    });
+    const synchronizedShifts = new ShiftEngine({
+      ...originalShiftDependencies,
+      store: synchronizeLockShift(originalShiftDependencies.store),
+    });
     // Counted 246.00 = float 200.00 + 46.00 sales.
     const closeCounts = [
       { denominationValue: '100.00', quantity: 2 },
@@ -389,11 +441,11 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
       { denominationValue: '5.00', quantity: 1 },
       { denominationValue: '1.00', quantity: 1 },
     ];
-    const close = () => shifts.closeShift(T, {
+    const close = () => synchronizedShifts.closeShift(T, {
       shiftId: till.shiftId, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
       closedAt: new Date(), closeCounts, notes: null,
     });
-    const collect = () => payments.recordPayment(T, {
+    const collect = () => synchronizedPayments.recordPayment(T, {
       orderId, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '46.00',
     });
 
