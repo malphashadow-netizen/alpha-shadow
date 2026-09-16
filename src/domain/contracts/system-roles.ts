@@ -11,3 +11,7 @@
  * seeded role's display name.
  */
 export const TENANT_SUPER_ADMIN_ROLE_NAME = 'TENANT_SUPER_ADMIN' as const;
+
+/** Dedicated bootstrap tenant for platform-level identities; never a restaurant. */
+export const PLATFORM_TENANT_ID = '9f6c1e42-7041-4be1-9d4f-1e29157c8a10' as const;
+export const PLATFORM_OWNER_ROLE_NAME = 'PLATFORM_OWNER' as const;

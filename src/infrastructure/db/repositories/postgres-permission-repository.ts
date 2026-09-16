@@ -58,7 +58,9 @@ export class PostgresPermissionReadRepository implements IPermissionReadReposito
   async isUserActive(tenantId: string, userId: string): Promise<boolean> {
     return this.withTenantContext(tenantId, async (q) => {
       const result = await q.query<{ is_active: boolean }>(
-        'SELECT is_active FROM users WHERE tenant_id = $1 AND id = $2',
+        `SELECT u.is_active
+           FROM users u JOIN tenants t ON t.id = u.tenant_id
+          WHERE u.tenant_id = $1 AND u.id = $2 AND t.status = 'active'`,
         [tenantId, userId],
       );
       return result.rows[0]?.is_active ?? false;

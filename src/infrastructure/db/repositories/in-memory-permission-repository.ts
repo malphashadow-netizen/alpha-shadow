@@ -30,6 +30,7 @@ import { TENANT_SUPER_ADMIN_ROLE_NAME } from '../../../domain/contracts/system-r
 export interface InMemoryTenantRecord {
   readonly id: string;
   readonly name: string;
+  readonly status?: string;
   readonly reportingCurrency?: string;
 }
 
@@ -138,7 +139,7 @@ export class InMemoryPermissionReadRepository implements IPermissionReadReposito
 
   async isUserActive(tenantId: string, userId: string): Promise<boolean> {
     const user = this.store.users.get(userId);
-    return user?.tenantId === tenantId && user.isActive;
+    return user?.tenantId === tenantId && user.isActive && this.store.tenants.get(tenantId)?.status !== 'suspended';
   }
 
   async getUserBranchId(tenantId: string, userId: string): Promise<string | null> {

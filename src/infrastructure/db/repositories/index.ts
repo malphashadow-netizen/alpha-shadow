@@ -38,6 +38,11 @@ export {
   type PostgresCatalogRepositoryDependencies,
 } from './postgres-catalog-repository.ts';
 export { InMemoryCatalogRepository, InMemoryCatalogStore } from './in-memory-catalog-repository.ts';
+export { InMemorySubscriptionPlansRepository } from './in-memory-subscription-plans-repository.ts';
+export { PostgresSubscriptionPlansRepository } from './postgres-subscription-plans-repository.ts';
+export { PostgresPlatformAdminRepository } from './postgres-platform-admin-repository.ts';
+export { InMemoryTenantStaffRepository } from './in-memory-tenant-staff-repository.ts';
+export { PostgresTenantStaffRepository } from './postgres-tenant-staff-repository.ts';
 export { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
 export { PostgresTaxSnapshotReader } from './postgres-tax-snapshot-reader.ts';
 export { PostgresOrderTaxUnitOfWork, type PostgresOrderTaxDependencies, type TransactionalOrderLineWriter } from './postgres-order-tax-unit-of-work.ts';
