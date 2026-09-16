@@ -53,6 +53,7 @@ import { PaymentsEngine } from '../../src/application/engines/payments/payments-
 import { AuthorizationEngine } from '../../src/application/engines/rbac/authorization-engine.ts';
 import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.ts';
 import { PlatformTaxAdminEngine } from '../../src/application/engines/tax/platform-tax-admin-engine.ts';
+import type { PaymentsTxScope, ShiftsTxScope } from '../../src/domain/contracts/payments.ts';
 import { deriveSecV } from '../../src/domain/contracts/sec-v.ts';
 import { createWithTenantContext, type WithTenantContext } from '../../src/infrastructure/db/tenant-context.ts';
 import { createWithPlatformTaxContext } from '../../src/infrastructure/db/platform-tax-context.ts';
@@ -113,7 +114,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -139,7 +140,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead, managerAuthenticator: authenticator });
     transitions = new WorkflowTransitionEngine({ store: ordersStore, authorization });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
 
@@ -176,7 +177,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
       categoryId: menuCategoryId, name: { ar: 'طبق B2' }, basePrice: money(4000n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
 
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B2', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B2', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
   });
 
   afterAll(async () => {
@@ -230,9 +231,49 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     const created = await newOrder(till.branchId, till.cashier.userId);
     const orderId = created.order.id;
 
+    // Explicit test-only barrier at the production lock boundary: both real
+    // REPEATABLE READ transactions must exist before either executes the real
+    // SELECT ... FOR UPDATE. This avoids relying on Promise scheduling across
+    // the branch-resolution and authorization preflight transactions.
+    const originalDependencies = (payments as unknown as {
+      readonly dependencies: ConstructorParameters<typeof PaymentsEngine>[0];
+    }).dependencies;
+    let lockArrivals = 0;
+    let releaseLockBarrier!: () => void;
+    const lockBarrier = new Promise<void>((resolve) => { releaseLockBarrier = resolve; });
+    const synchronizedStore: typeof originalDependencies.store = {
+      run<TResult>(tenantId: string, fn: Parameters<typeof originalDependencies.store.run<TResult>>[1]): Promise<TResult> {
+        return originalDependencies.store.run(tenantId, async (scope) => {
+          const synchronizedScope = new Proxy(scope, {
+            get(target, property, receiver): unknown {
+              if (property !== 'lockOrder') return Reflect.get(target, property, receiver);
+              return async (...args: Parameters<typeof scope.lockOrder>) => {
+                lockArrivals += 1;
+                if (lockArrivals === 2) releaseLockBarrier();
+                let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  await Promise.race([
+                    lockBarrier,
+                    new Promise<never>((_resolve, reject) => {
+                      timeoutHandle = setTimeout(() => { reject(new Error('Timed out waiting for both collects to reach lockOrder')); }, 2_000);
+                    }),
+                  ]);
+                } finally {
+                  if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                }
+                return scope.lockOrder(...args);
+              };
+            },
+          });
+          return fn(synchronizedScope);
+        });
+      },
+    };
+    const synchronizedPayments = new PaymentsEngine({ ...originalDependencies, store: synchronizedStore });
+
     // Two PARTIAL collects (30.00 each on a 46.00 balance): pre-fix both are
     // INSERT-only, so both commit and the till over-collects 60.00.
-    const collect = () => payments.recordPayment(T, {
+    const collect = () => synchronizedPayments.recordPayment(T, {
       orderId, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '30.00',
     });
     const [first, second] = await Promise.allSettled([collect(), collect()]);
@@ -342,6 +383,60 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     const till = await setupTill();
     const created = await newOrder(till.branchId, till.cashier.userId);
     const orderId = created.order.id;
+    const originalPaymentDependencies = (payments as unknown as {
+      readonly dependencies: ConstructorParameters<typeof PaymentsEngine>[0];
+    }).dependencies;
+    const originalShiftDependencies = (shifts as unknown as {
+      readonly dependencies: ConstructorParameters<typeof ShiftEngine>[0];
+    }).dependencies;
+    let lockArrivals = 0;
+    let releaseLockBarrier!: () => void;
+    const lockBarrier = new Promise<void>((resolve) => { releaseLockBarrier = resolve; });
+
+    // Test-only timing barrier: it makes both real transactions reach the
+    // production lockShift boundary before either invokes the original lock.
+    // It does not replace or reorder the repository/SQL locking behavior.
+    function synchronizeLockShift<TScope extends PaymentsTxScope | ShiftsTxScope>(store: {
+      run<TResult>(tenantId: string, fn: (scope: TScope) => Promise<TResult>): Promise<TResult>;
+    }): typeof store {
+      return {
+        run<TResult>(tenantId: string, fn: (scope: TScope) => Promise<TResult>): Promise<TResult> {
+          return store.run<TResult>(tenantId, async (scope) => {
+            const synchronizedScope = new Proxy<TScope>(scope, {
+              get(target, property, receiver): unknown {
+                if (property !== 'lockShift') return Reflect.get(target, property, receiver);
+                return async (...args: [tenantId: string, shiftId: string]) => {
+                  lockArrivals += 1;
+                  if (lockArrivals === 2) releaseLockBarrier();
+                  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    await Promise.race([
+                      lockBarrier,
+                      new Promise<never>((_resolve, reject) => {
+                        timeoutHandle = setTimeout(() => { reject(new Error('Timed out waiting for close and collect to reach lockShift')); }, 2_000);
+                      }),
+                    ]);
+                  } finally {
+                    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                  }
+                  return scope.lockShift(...args);
+                };
+              },
+            });
+            return fn(synchronizedScope);
+          });
+        },
+      };
+    }
+
+    const synchronizedPayments = new PaymentsEngine({
+      ...originalPaymentDependencies,
+      store: synchronizeLockShift(originalPaymentDependencies.store),
+    });
+    const synchronizedShifts = new ShiftEngine({
+      ...originalShiftDependencies,
+      store: synchronizeLockShift(originalShiftDependencies.store),
+    });
     // Counted 246.00 = float 200.00 + 46.00 sales.
     const closeCounts = [
       { denominationValue: '100.00', quantity: 2 },
@@ -349,11 +444,11 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
       { denominationValue: '5.00', quantity: 1 },
       { denominationValue: '1.00', quantity: 1 },
     ];
-    const close = () => shifts.closeShift(T, {
+    const close = () => synchronizedShifts.closeShift(T, {
       shiftId: till.shiftId, closedByUserId: opener.userId, closeVerifiedByUserId: verifier.userId,
       closedAt: new Date(), closeCounts, notes: null,
     });
-    const collect = () => payments.recordPayment(T, {
+    const collect = () => synchronizedPayments.recordPayment(T, {
       orderId, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: '46.00',
     });
 

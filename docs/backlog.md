@@ -292,6 +292,41 @@ should truncate the decoded bytes (or assert `parsePasswordHash(...) === null`)
 instead of assuming a 4-character cut is always malformed. Fix belongs to the
 auth phase owner — deliberately not touched by the Phase 4b branch.
 
+### Payments idempotency fake transaction order (test fixture corrected)
+`test/unit/application/payments/payments-idempotency.test.ts` previously had
+three deterministic fixture failures: U1 (`23505` + probe hit should replay),
+U3 (`23505` + probe hit for a different order should become a conflict), and
+U6 (invalid idempotency keys should not begin collection). The fake assumed
+that the first `PaymentsStore.run` call was the payment-collection transaction.
+The current `PaymentsEngine.recordPayment` path instead opens a read transaction
+first to discover the authoritative order branch for branch-scoped
+authorization, then opens the collection transaction. The fixture now injects
+its simulated `23505` into that second transaction. U6 separately counts
+arrival at `lockOrder`, preserving its intended guarantee that invalid keys
+never begin actual collection while acknowledging that branch discovery is
+legitimate preliminary store work.
+
+This behavior predates commit `f5d68f0` and was confirmed directly by checking
+the two unit tests plus `payments-engine.ts`, the payments contract, and the
+Postgres payments repository out from `2bebb6b`, reproducing the same U1, U3,
+and U6 failures, then restoring `f5d68f0`. Production payment/idempotency code
+was not changed to satisfy the stale fake ordering assumption. The test-only
+fixture distinguishes the branch lookup from the collection transaction and
+injects/counts behavior at the intended transaction boundary; no production
+behavior or payment/idempotency assertion was weakened.
+
+### close-vs-collect lock timing (test fixture corrected)
+The close-vs-collect integration test previously relied on promise scheduling:
+`closeShift` could complete after reaching `lockShift` before `recordPayment`
+finished its required order, idempotency, snapshot, method, and open-shift
+preflight work. The collection would then correctly fail with
+`payments.shift_required`, but the intended concurrent lock conflict was never
+exercised. A test-only Proxy barrier now pauses both repository scopes at
+`lockShift` until both real transactions arrive, with the same two-second
+timeout used by the existing double-collect barrier. It then invokes each
+original `lockShift` implementation unchanged, coordinating only test timing
+without replacing, reordering, or weakening the production database locks.
+
 ## Tax / order / invoice integration (Phase 6)
 
 The tax resolver, platform and tenant administration, snapshots and all 14

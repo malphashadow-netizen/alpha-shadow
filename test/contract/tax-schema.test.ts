@@ -11,7 +11,7 @@ describe('Phase 6 PostgreSQL schema/privilege contracts', () => {
   let client: pg.Client;
   beforeAll(async () => {
     client = await connectTestClient();
-    for (const name of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql']) {
+    for (const name of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '016_tenant_tax_write.sql']) {
       await client.query(await readFile(new URL(`../../migrations/roles/${name}`, import.meta.url), 'utf8'));
     }
   });
@@ -38,9 +38,14 @@ describe('Phase 6 PostgreSQL schema/privilege contracts', () => {
     expect(r.rows.some((c) => c.contype === 'x' && c.definition.includes('gist') && c.definition.includes('daterange') && c.definition.includes('&&'))).toBe(true);
     expect(r.rows.some((c) => c.contype === 'c' && c.definition.includes('10000'))).toBe(true);
   });
-  it('snapshot primary key is (order_line_id,tax_rate_id), with immutable trigger and BIGINT amounts', async () => {
+  it('snapshot primary key is (order_line_id,computation_sequence); dual-source rate FK is single-source-enforced, immutable, BIGINT', async () => {
     const pk = await client.query<{ definition: string }>("SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = 'order_line_tax_snapshots'::regclass AND contype = 'p'");
-    expect(pk.rows[0]?.definition).toBe('PRIMARY KEY (order_line_id, tax_rate_id)');
+    expect(pk.rows[0]?.definition).toBe('PRIMARY KEY (order_line_id, computation_sequence)');
+    const singleSource = await client.query<{ definition: string }>("SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = 'order_line_tax_snapshots_single_source'");
+    expect(singleSource.rows[0]?.definition).toContain('tax_rate_id IS NOT NULL');
+    expect(singleSource.rows[0]?.definition).toContain('tenant_tax_rate_id IS NOT NULL');
+    const nullability = await client.query<{ column_name: string; is_nullable: string }>("SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'order_line_tax_snapshots' AND column_name IN ('tax_rate_id','tenant_tax_rate_id')");
+    expect(nullability.rows.every((r) => r.is_nullable === 'YES')).toBe(true);
     const amounts = await client.query<{ data_type: string }>("SELECT data_type FROM information_schema.columns WHERE table_name = 'order_line_tax_snapshots' AND column_name IN ('taxable_amount_minor','tax_amount_minor')");
     expect(amounts.rows.map((r) => r.data_type)).toEqual(['bigint', 'bigint']);
     const trigger = await client.query("SELECT 1 FROM pg_trigger WHERE tgrelid = 'order_line_tax_snapshots'::regclass AND tgname = 'trg_order_tax_snapshot_immutable' AND tgenabled = 'O'");

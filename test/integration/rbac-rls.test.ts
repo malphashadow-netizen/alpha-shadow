@@ -167,6 +167,43 @@ describe('integration: RLS isolation on roles/role_permissions/user_roles (real 
     expect(rows.userRoles.map((r) => r.id)).toEqual([USER_ROLE_A]);
   });
 
+  it('rejects raw user_roles inserts whose scope_type and scope_id are inconsistent', async () => {
+    await seedTenant(TENANT_A, USER_A, ROLE_A, ROLE_PERM_A, USER_ROLE_A);
+
+    await expect(
+      withAppCtx(TENANT_A, async (q) =>
+        q.query(
+          `INSERT INTO user_roles
+             (id, tenant_id, user_id, role_id, scope_type, scope_id)
+           VALUES ($1, $2, $3, $4, 'tenant', $5)`,
+          [
+            'eeeeeeee-eeee-4eee-8eee-000000000010',
+            TENANT_A,
+            USER_A,
+            ROLE_A,
+            'bbbbbbbb-bbbb-4bbb-8bbb-000000000010',
+          ],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+
+    await expect(
+      withAppCtx(TENANT_A, async (q) =>
+        q.query(
+          `INSERT INTO user_roles
+             (id, tenant_id, user_id, role_id, scope_type, scope_id)
+           VALUES ($1, $2, $3, $4, 'branch', NULL)`,
+          [
+            'eeeeeeee-eeee-4eee-8eee-000000000011',
+            TENANT_A,
+            USER_A,
+            ROLE_A,
+          ],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+
   it('raw SELECT from a tenant-B connection returns ZERO tenant-A rows on all three tables', async () => {
     await seedTenant(TENANT_A, USER_A, ROLE_A, ROLE_PERM_A, USER_ROLE_A);
 

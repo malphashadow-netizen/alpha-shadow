@@ -208,6 +208,34 @@ describe('AuthorizationEngine — L1 cache and the sensitive bypass', () => {
     await expect(engine.check(input)).rejects.toThrow(ForbiddenError);
   });
 
+  it('(5b) payments:methods_admin is never read from the cache — denial AND grant', async () => {
+    const scenario = makeScenario();
+    await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');
+    seedActiveBranchUser(scenario);
+    await scenario.write.createPermission(TENANT, 'payments:methods_admin', 'payments', true);
+    const roleId = await scenario.write.createRole(TENANT, 'methods-admin');
+    await scenario.write.assignRolePermission(TENANT, roleId, 'payments:methods_admin', null);
+
+    const engine = makeEngine(scenario, new L1PermissionCache());
+    const input = {
+      tenantId: TENANT,
+      userId: USER,
+      permissionKey: 'payments:methods_admin',
+      context: { hasResource: false, actorBranchId: null, isSensitivePermission: true },
+    } as const;
+
+    // 1. No assignment yet → denied (must not be cached).
+    await expect(engine.check(input)).rejects.toThrow(ForbiddenError);
+
+    // 2. Grant it → the FRESH read must see the grant (a cached denial would still deny).
+    const userRoleId = await scenario.write.assignUserRole(TENANT, USER, roleId, 'tenant', null);
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
+
+    // 3. Revoke it → the FRESH read must see the revocation (a cached grant would still allow).
+    await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
+    await expect(engine.check(input)).rejects.toThrow(ForbiddenError);
+  });
+
   it('control: non-sensitive permission IS cached (the cache is real)', async () => {
     const scenario = makeScenario();
     await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');
@@ -228,6 +256,28 @@ describe('AuthorizationEngine — L1 cache and the sensitive bypass', () => {
     // First check populates the cache.
     await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
     // Revoke the assignment — the cache must still answer "allowed" within the TTL.
+    await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('F-10a: non-sensitive shift:x_report permission is served from the L1 cache within TTL', async () => {
+    const scenario = makeScenario();
+    await scenario.write.createTenantWithSystemRole(TENANT, 'tenant-a');
+    seedActiveBranchUser(scenario);
+    await scenario.write.createPermission(TENANT, 'shift:x_report', 'shift', false);
+    const roleId = await scenario.write.createRole(TENANT, 'shift-reporter');
+    await scenario.write.assignRolePermission(TENANT, roleId, 'shift:x_report', null);
+    const userRoleId = await scenario.write.assignUserRole(TENANT, USER, roleId, 'branch', BRANCH_A);
+
+    const engine = makeEngine(scenario, new L1PermissionCache());
+    const input = {
+      tenantId: TENANT,
+      userId: USER,
+      permissionKey: 'shift:x_report',
+      context: { hasResource: true, actorBranchId: BRANCH_A, resourceBranchId: BRANCH_A, isSensitivePermission: false },
+    } as const;
+
+    await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
     await scenario.write.deactivateUserRoleAssignment(TENANT, userRoleId);
     await expect(engine.check(input)).resolves.toMatchObject({ allowed: true });
   });

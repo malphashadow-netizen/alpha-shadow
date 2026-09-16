@@ -41,7 +41,7 @@ const ITEM_TRANSITION_PERMISSION_KEY = 'order:item:transition';
 
 export interface WorkflowTransitionEngineDependencies {
   readonly store: OrdersStore;
-  /** Audit F-D: the authorization gate. `check` runs FIRST — before any store call. */
+  /** Audit F-D/DD-003: the authorization gate. `check` now runs branch-aware, after the read-only item/order load but strictly before the first write (bumpOrderRevision). */
   readonly authorization: Pick<AuthorizationEngine, 'check'>;
 }
 
@@ -112,23 +112,54 @@ export class WorkflowTransitionEngine {
   }
 
   async transitionItem(tenantId: string, input: ItemStatusTransitionInput): Promise<ItemStatusTransitionResult> {
-    // Audit F-D: FIRST executable line — no store call happens before the gate.
-    await this.dependencies.authorization.check({
-      tenantId,
-      userId: input.actorUserId,
-      permissionKey: ITEM_TRANSITION_PERMISSION_KEY,
-      tokenSecV: input.tokenSecV,
-      context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
-    });
     return this.dependencies.store.run(tenantId, async (scope) => {
       // B2: resolve the order id, then lock FIRST and re-read under the lock.
       // The order lock + revision bump serialize every concurrent mutation of
       // this order (exactly one wins; the loser gets a 40001 serialization
       // failure; retryable as ConcurrencyRetryableError → 503).
+      //
+      // Audit F-D/DD-003: the gate can no longer run before any store call —
+      // the trusted resource branch is the ORDER's branch, only known after
+      // loading the item and locking its order. Both reads below are
+      // read-only and run BEFORE the gate; `bumpOrderRevision` (the first
+      // actual write) runs strictly AFTER the gate passes. A missing
+      // item/order is never disclosed to a branch-scoped caller who lacks
+      // even a tenant-wide grant: the probe check reuses the SAME
+      // tenant-wide (branchless) context, so the resulting ForbiddenError is
+      // identical in shape to a genuine cross-branch denial (DD-003
+      // non-disclosure requirement).
       const probe = await scope.loadOrderItem(tenantId, input.orderItemId);
-      if (probe === null) throw new NotFoundError(`Order item ${input.orderItemId} not found`);
+      if (probe === null) {
+        await this.dependencies.authorization.check({
+          tenantId,
+          userId: input.actorUserId,
+          permissionKey: ITEM_TRANSITION_PERMISSION_KEY,
+          tokenSecV: input.tokenSecV,
+          context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+        });
+        throw new NotFoundError(`Order item ${input.orderItemId} not found`);
+      }
       const order = await scope.lockOrder(tenantId, probe.orderId);
-      if (order === null) throw new NotFoundError(`Order ${probe.orderId} not found`);
+      if (order === null) {
+        await this.dependencies.authorization.check({
+          tenantId,
+          userId: input.actorUserId,
+          permissionKey: ITEM_TRANSITION_PERMISSION_KEY,
+          tokenSecV: input.tokenSecV,
+          context: { hasResource: false, actorBranchId: null, isSensitivePermission: false },
+        });
+        throw new NotFoundError(`Order ${probe.orderId} not found`);
+      }
+      // Audit F-D/DD-003: branch-aware gate — the ORDER's own trusted branch
+      // is both the actor's relevant branch and the resource branch. Runs
+      // BEFORE the first write (bumpOrderRevision).
+      await this.dependencies.authorization.check({
+        tenantId,
+        userId: input.actorUserId,
+        permissionKey: ITEM_TRANSITION_PERMISSION_KEY,
+        tokenSecV: input.tokenSecV,
+        context: { hasResource: true, actorBranchId: order.branchId, resourceBranchId: order.branchId, isSensitivePermission: false },
+      });
       await scope.bumpOrderRevision(tenantId, order.id);
       const item = await scope.loadOrderItem(tenantId, input.orderItemId);
       if (item === null) throw new NotFoundError(`Order item ${input.orderItemId} not found`);

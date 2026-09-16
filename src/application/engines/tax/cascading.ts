@@ -83,6 +83,7 @@ export function calculateCascadingTaxes(
         if (taxAmount === undefined) throw new TaxConfigurationError('Missing invoice allocation');
         const row: ResolvedTaxLine = Object.freeze({
           taxRateId: rate.id,
+          ...(work.tax.rate.source === undefined ? {} : { source: work.tax.rate.source }),
           taxFamily: work.tax.category.taxFamily,
           computationSequence: work.sequence,
           liableParty: 'restaurant',

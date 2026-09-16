@@ -3,7 +3,7 @@
  * succeeds with it — on the SAME fixture, so each test proves the denial was
  * the missing key and nothing else (grant → success leg).
  *
- * Keys covered: payments:collect, shift:open, shift:close,
+ * Keys covered: payments:collect, shift:open, shift:close, shift:x_report,
  * payments:methods_admin (create + update), catalog:write, catalog:archive
  * (including write-without-archive and open-without-close separation).
  */
@@ -43,6 +43,20 @@ interface TillUser {
 const PLATFORM_ACTOR = '71000000-0000-4000-8000-000000000005';
 const PIN_PEPPER = Buffer.from(randomBytes(48));
 
+async function grantBranchKeys(
+  write: PostgresPermissionWriteRepository,
+  tenantId: string,
+  userId: string,
+  branchId: string,
+  keys: readonly string[],
+): Promise<void> {
+  const roleId = await write.createRole(tenantId, `b7-branch-grant-${randomUUID()}`);
+  for (const key of keys) {
+    await write.assignRolePermission(tenantId, roleId, key, null);
+  }
+  await write.assignUserRole(tenantId, userId, roleId, 'branch', branchId);
+}
+
 describe('B7 permission denials (live)', () => {
   let owner: pg.Pool;
   let app: pg.Pool;
@@ -68,7 +82,7 @@ describe('B7 permission denials (live)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
@@ -93,7 +107,7 @@ describe('B7 permission denials (live)', () => {
     shifts = new ShiftEngine({ store: new PostgresShiftsStore({ withTenantContext: withApp }), authorization });
     const authenticator = new PostgresManagerOverrideAuthenticator({ withTenantContext: withApp, pepper: PIN_PEPPER });
     payments = new PaymentsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
-    creation = new OrderCreationEngine({ store: ordersStore, authorization, managerAuthenticator: authenticator });
+    creation = new OrderCreationEngine({ store: ordersStore, authorization, permissionRead: new PostgresPermissionReadRepository({ withTenantContext: withApp }), managerAuthenticator: authenticator });
     methods = new PaymentMethodsEngine({ store: new PostgresPaymentsStore({ withTenantContext: withApp }), authorization });
     permWrite = new PostgresPermissionWriteRepository({ withTenantContext: withApp });
 
@@ -122,7 +136,7 @@ describe('B7 permission denials (live)', () => {
     itemId = (await catalog.createItem(T, opener.userId, {
       categoryId: menuCategoryId, name: { ar: 'طبق B7' }, basePrice: money(4000n, currencyCode('SAR')), taxRuleId: saCategory.id,
     })).id;
-    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B7', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true })).id;
+    methodCashId = (await methods.create(T, opener.userId, { name: 'نقدي B7', type: 'cash', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'cash_on_hand', isActive: true })).id;
 
     branchId = randomUUID();
     const stationId = randomUUID();
@@ -211,9 +225,40 @@ describe('B7 permission denials (live)', () => {
     expect(closed.status).toBe('closed');
   });
 
+  it('F-10a shift:x_report: denied without the grant, succeeds once granted', async () => {
+    const reporter = await createUser();
+    const { shiftId } = await openShiftForFreshCashier(opener.userId, verifier.userId);
+    await expect(shifts.xReport(T, reporter.userId, shiftId))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission shift:x_report' });
+    await grantBranchKeys(permWrite, T, reporter.userId, branchId, ['shift:x_report']);
+    await expect(shifts.xReport(T, reporter.userId, shiftId))
+      .resolves.toMatchObject({ shift: { id: shiftId } });
+  });
+
+  it('F-10a shift:x_report: a branch-A grant cannot read a branch-B shift', async () => {
+    const reporter = await createUser();
+    const { shiftId: branchAShiftId } = await openShiftForFreshCashier(opener.userId, verifier.userId);
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      "INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, 'B7 branch B', 'SAR', 'Asia/Riyadh', 'SA')",
+      [branchB, T],
+    ));
+    const cashierB = await createUser();
+    const shiftB = await shifts.openShift(T, {
+      branchId: branchB, cashierUserId: cashierB.userId, openedByUserId: opener.userId, openVerifiedByUserId: verifier.userId,
+      openedAt: new Date(), openCounts: [],
+    });
+    await grantBranchKeys(permWrite, T, reporter.userId, branchId, ['shift:x_report']);
+
+    await expect(shifts.xReport(T, reporter.userId, branchAShiftId))
+      .resolves.toMatchObject({ shift: { id: branchAShiftId } });
+    await expect(shifts.xReport(T, reporter.userId, shiftB.id))
+      .rejects.toMatchObject({ code: 'forbidden' });
+  });
+
   it('D4a payments:methods_admin: create denied without the grant, succeeds once granted', async () => {
     const admin = await createUser();
-    const input = { name: 'بطاقة B7', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, isActive: true } as const;
+    const input = { name: 'بطاقة B7', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true } as const;
     await expect(methods.create(T, admin.userId, input))
       .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
     await grantKeys(permWrite, T, admin.userId, ['payments:methods_admin']);
@@ -248,5 +293,78 @@ describe('B7 permission denials (live)', () => {
     await grantKeys(permWrite, T, editor.userId, ['catalog:archive']);
     const archived = await catalog.archiveCategory(T, editor.userId, created.id);
     expect(archived.isActive).toBe(false);
+  });
+
+  it('AUTH-BR-19 payments:methods_admin create: a branch-A-only grant is scoped to branch A', async () => {
+    const branchOnly = await createUser();
+    await grantBranchKeys(permWrite, T, branchOnly.userId, branchId, ['payments:methods_admin']);
+
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      'INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)',
+      [branchB, T, 'B7 branch B', 'SAR', 'Asia/Riyadh', 'SA'],
+    ));
+
+    const allowedInA = await methods.create(T, branchOnly.userId, {
+      name: 'فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+    });
+    expect(allowedInA.branchId).toBe(branchId);
+
+    await expect(methods.create(T, branchOnly.userId, {
+      name: 'فرع B مرفوض', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+    })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    await expect(methods.create(T, branchOnly.userId, {
+      name: 'كل الفروع مرفوض', type: 'card', branchId: null, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+    })).rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    const tenantAdmin = await createUser();
+    await grantKeys(permWrite, T, tenantAdmin.userId, ['payments:methods_admin']);
+    for (const scopedBranchId of [branchId, branchB, null]) {
+      const created = await methods.create(T, tenantAdmin.userId, {
+        name: 'منحة tenant', type: 'card', branchId: scopedBranchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+      });
+      expect(created.branchId).toBe(scopedBranchId);
+    }
+  });
+
+  it('AUTH-BR-20 payments:methods_admin update: a branch-A-only grant cannot administer branch-B or tenant-wide methods, and does not disclose their existence', async () => {
+    const tenantAdmin = await createUser();
+    await grantKeys(permWrite, T, tenantAdmin.userId, ['payments:methods_admin']);
+
+    const branchB = randomUUID();
+    await withApp(T, (q) => q.query(
+      'INSERT INTO branches (id, tenant_id, name, base_currency, timezone, country_code) VALUES ($1, $2, $3, $4, $5, $6)',
+      [branchB, T, 'B7 branch B (update)', 'SAR', 'Asia/Riyadh', 'SA'],
+    ));
+
+    const methodInA = await methods.create(T, tenantAdmin.userId, {
+      name: 'وسيلة فرع A', type: 'card', branchId, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+    });
+    const methodInB = await methods.create(T, tenantAdmin.userId, {
+      name: 'وسيلة فرع B', type: 'card', branchId: branchB, currencyCode: null, fixedExchangeRate: null, clearingAccountSystemPurpose: 'card_clearing', isActive: true,
+    });
+
+    const branchOnly = await createUser();
+    await grantBranchKeys(permWrite, T, branchOnly.userId, branchId, ['payments:methods_admin']);
+
+    const updatedInA = await methods.update(T, branchOnly.userId, methodInA.id, { name: 'محدّث فرع A' });
+    expect(updatedInA.name).toBe('محدّث فرع A');
+
+    await expect(methods.update(T, branchOnly.userId, methodInB.id, { name: 'مرفوض' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    await expect(methods.update(T, branchOnly.userId, methodCashId, { name: 'مرفوض tenant-wide' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    // عدم الإفشاء: معرّف غير موجود تحت نفس المنحة المقيّدة بفرع يجب أن يفشل
+    // بنفس شكل الرفض الخاص بفرع B، وليس بـ NotFoundError.
+    await expect(methods.update(T, branchOnly.userId, randomUUID(), { name: 'غير موجود' }))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'missing permission payments:methods_admin' });
+
+    for (const target of [methodInA.id, methodInB.id, methodCashId]) {
+      const updated = await methods.update(T, tenantAdmin.userId, target, { name: 'منحة tenant محدثة' });
+      expect(updated.name).toBe('منحة tenant محدثة');
+    }
   });
 });
