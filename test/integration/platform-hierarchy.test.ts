@@ -10,7 +10,7 @@ import { InMemorySubscriptionPlansRepository } from '../../src/infrastructure/db
 import { InMemoryTenantStaffRepository } from '../../src/infrastructure/db/repositories/in-memory-tenant-staff-repository.ts';
 import { sha256Hex } from '../../src/shared/crypto.ts';
 import { ForbiddenError } from '../../src/shared/errors.ts';
-describe('platform hierarchy lifecycle', () => it('assigns trial, creates staff, blocks a suspended tenant, then restores access', async () => {
+describe('platform hierarchy lifecycle', () => { it('assigns trial, creates staff, blocks a suspended tenant, then restores access', async () => {
   const store=new InMemoryPermissionStore();const write=new InMemoryPermissionWriteRepository(store);const read=new InMemoryPermissionReadRepository(store);const auth=new AuthorizationEngine({read,hash:sha256Hex});
   await write.createTenantWithSystemRole(PLATFORM_TENANT_ID,'Platform');store.users.set('platform-owner',{id:'platform-owner',tenantId:PLATFORM_TENANT_ID,branchId:null,isActive:true,securityVersion:1});const platformRole=await write.createRole(PLATFORM_TENANT_ID,'platform-owner');
   for(const key of ['platform:tenant:create','platform:tenant:suspend','platform:tenant:reactivate','platform:subscription:assign','platform:subscription_plan:manage']){await write.createPermission(PLATFORM_TENANT_ID,key,'platform',true);await write.assignRolePermission(PLATFORM_TENANT_ID,platformRole,key,null);}await write.assignUserRole(PLATFORM_TENANT_ID,'platform-owner',platformRole,'tenant',null);
@@ -18,4 +18,4 @@ describe('platform hierarchy lifecycle', () => it('assigns trial, creates staff,
   await plansEngine.createPlan({userId:'platform-owner'},{id:'trial',name:'Trial',priceAmountMinor:0,priceCurrencyCode:'SAR',durationDays:7,isTrial:true});await platform.registerTenant({userId:'platform-owner'},'restaurant','Restaurant');await platform.assignSubscriptionPlan({userId:'platform-owner'},'restaurant','trial');
   store.users.set('tenant-owner',{id:'tenant-owner',tenantId:'restaurant',branchId:null,isActive:true,securityVersion:1});await write.createPermission('restaurant','staff:manage','staff',true);const ownerRole=await write.createRole('restaurant','owner');await write.assignRolePermission('restaurant',ownerRole,'staff:manage',null);await write.assignUserRole('restaurant','tenant-owner',ownerRole,'tenant',null);const staff=new TenantStaffEngine(auth,new InMemoryTenantStaffRepository(store));
   await staff.createStaffUser({tenantId:'restaurant',userId:'tenant-owner'},{userId:'worker',email:'worker@example.test'});await platform.suspendTenant({userId:'platform-owner'},'restaurant');await expect(staff.deactivateStaffUser({tenantId:'restaurant',userId:'tenant-owner'},'worker')).rejects.toThrow(ForbiddenError);await platform.reactivateTenant({userId:'platform-owner'},'restaurant');await expect(staff.deactivateStaffUser({tenantId:'restaurant',userId:'tenant-owner'},'worker')).resolves.toBeUndefined();
-}));
+}); });
