@@ -29,6 +29,9 @@ const sharedTestOptions = {
   restoreMocks: true,
   unstubEnvs: true,
   unstubGlobals: true,
+  // ESLint's TypeScript program load is occasionally slower than the former
+  // five-second default on constrained CI workers.
+  testTimeout: 30_000,
 } as const;
 
 const realDatabaseProject = {

@@ -41,6 +41,7 @@ export { InMemoryCatalogRepository, InMemoryCatalogStore } from './in-memory-cat
 export { InMemorySubscriptionPlansRepository } from './in-memory-subscription-plans-repository.ts';
 export { PostgresSubscriptionPlansRepository } from './postgres-subscription-plans-repository.ts';
 export { PostgresPlatformAdminRepository } from './postgres-platform-admin-repository.ts';
+export { InMemoryPlatformAdminRepository } from './in-memory-platform-admin-repository.ts';
 export { InMemoryTenantStaffRepository } from './in-memory-tenant-staff-repository.ts';
 export { PostgresTenantStaffRepository } from './postgres-tenant-staff-repository.ts';
 export { PostgresTaxResolutionTransaction } from './postgres-tax-resolution-transaction.ts';
