@@ -466,6 +466,11 @@ export class PaymentsEngine {
       if (reversalShift === null) {
         throw new CashierShiftRequiredError(actorUserId, pre.branchId);
       }
+      const lockedReversalShift = await scope.lockShift(tenantId, reversalShift.id);
+      if (lockedReversalShift?.status !== 'open') {
+        throw new CashierShiftRequiredError(actorUserId, pre.branchId);
+      }
+      await scope.bumpShiftRevision(tenantId, lockedReversalShift.id);
 
       const updated =
         to === 'voided'

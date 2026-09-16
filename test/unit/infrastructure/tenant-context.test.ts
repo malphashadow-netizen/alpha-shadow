@@ -329,7 +329,7 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
   it('16. verifyTenantExists throws NotFoundError for an unregistered tenant and never calls fn', async () => {
     const statusMock = vi.fn(async () => ({ rows: [] }));
     const queryMock = vi.fn(async (text: string) => {
-      if (text.startsWith('SELECT status FROM tenants')) {
+      if (text.includes('FROM tenants')) {
         return (await statusMock()) as never;
       }
       return { rows: [], rowCount: 0 } as never;
@@ -366,9 +366,9 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
   });
 
   it('18. exported withTenantContext applies production defaults (timeouts + tenant check) with a safe pool override', async () => {
-    const statusRows = { rows: [{ status: 'active' }] };
+    const statusRows = { rows: [{ status: 'active', subscription_status: 'active', subscription_ends_at: null, subscription_expired: false }] };
     const queryMock = vi.fn(async (text: string) => {
-      if (text.startsWith('SELECT status FROM tenants')) return statusRows as never;
+      if (text.includes('FROM tenants')) return statusRows as never;
       if (text === 'BEGIN' || text === 'COMMIT' || text === 'DISCARD ALL' || text.startsWith('SELECT set_config')) {
         return { rows: [], rowCount: 0 } as never;
       }
@@ -390,8 +390,11 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
       `SELECT set_config($1, $2, true)`,
       // B3: the lock_timeout bound is the third transaction-scoped default.
       `SELECT set_config($1, $2, true)`,
-      // B5: existence AND active status in one in-transaction probe.
-      'SELECT status FROM tenants WHERE id = $1',
+      // B5: tenant availability, including live subscription expiry, is one in-transaction probe.
+      `SELECT status, subscription_status, subscription_ends_at,
+                  subscription_ends_at IS NOT NULL AND subscription_ends_at <= now() AS subscription_expired
+             FROM tenants
+            WHERE id = $1`,
       'COMMIT',
       'DISCARD ALL',
     ]);
@@ -404,7 +407,7 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
   it('19. verifyTenantExists throws TenantSuspendedError for a non-active tenant and never calls fn', async () => {
     const statusMock = vi.fn(async () => ({ rows: [{ status: 'suspended' }] }));
     const queryMock = vi.fn(async (text: string) => {
-      if (text.startsWith('SELECT status FROM tenants')) {
+      if (text.includes('FROM tenants')) {
         return (await statusMock()) as never;
       }
       return { rows: [], rowCount: 0 } as never;
@@ -425,6 +428,44 @@ describe('infrastructure/tenant-context — withTenantContext', () => {
     ).rejects.toMatchObject({ code: 'tenant.suspended', status: 'suspended' });
     expect(callbackRan).toBe(false);
     expect(statusMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { name: 'an end date in the future', subscriptionEndsAt: new Date('2099-01-01T00:00:00.000Z'), subscriptionExpired: false },
+    { name: 'no end date', subscriptionEndsAt: null, subscriptionExpired: false },
+  ])('20. verifyTenantExists permits an active tenant with $name', async ({ subscriptionEndsAt, subscriptionExpired }) => {
+    const tenantProbe = vi.fn(async () => ({
+      rows: [{ status: 'active', subscription_status: 'active', subscription_ends_at: subscriptionEndsAt, subscription_expired: subscriptionExpired }],
+    }));
+    const queryMock = vi.fn(async (text: string) => {
+      if (text.includes('FROM tenants')) return (await tenantProbe()) as never;
+      return { rows: [], rowCount: 0 } as never;
+    });
+    const client: TenantClient = { query: queryMock as TenantClient['query'], release: vi.fn() as TenantClient['release'] };
+    const w = createWithTenantContext(createMockPool(client), { verifyTenantExists: true });
+
+    await expect(w(VALID_TENANT, async () => 'allowed')).resolves.toBe('allowed');
+    expect(tenantProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('21. verifyTenantExists rejects an active tenant whose live subscription expiry has passed', async () => {
+    const tenantProbe = vi.fn(async () => ({
+      rows: [{ status: 'active', subscription_status: 'active', subscription_ends_at: new Date('2000-01-01T00:00:00.000Z'), subscription_expired: true }],
+    }));
+    const queryMock = vi.fn(async (text: string) => {
+      if (text.includes('FROM tenants')) return (await tenantProbe()) as never;
+      return { rows: [], rowCount: 0 } as never;
+    });
+    const client: TenantClient = { query: queryMock as TenantClient['query'], release: vi.fn() as TenantClient['release'] };
+    const w = createWithTenantContext(createMockPool(client), { verifyTenantExists: true });
+
+    let callbackRan = false;
+    await expect(w(VALID_TENANT, async () => {
+      callbackRan = true;
+      return 'unreachable';
+    })).rejects.toMatchObject({ code: 'tenant.suspended', status: 'subscription_expired' });
+    expect(callbackRan).toBe(false);
+    expect(tenantProbe).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     port: config.port,
     user: config.user,
     password: config.password,
+    createPostgresUser: true,
     authMethod: 'scram-sha-256',
     persistent: false,
     initdbFlags: ['--encoding=UTF8', '--locale=C'],

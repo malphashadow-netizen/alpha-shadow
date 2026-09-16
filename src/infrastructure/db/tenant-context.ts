@@ -61,7 +61,7 @@ export interface WithTenantContextOptions {
    * so the transaction lifecycle still belongs to this module.
    */
   readonly pool?: TenantPool | undefined;
-  /** When true, verifies the tenant row exists in public.tenants AND its status is 'active' before fn runs (B5: suspended → TenantSuspendedError). */
+  /** When true, verifies the tenant row exists in public.tenants, is active, and has not expired before fn runs (B5: unavailable → TenantSuspendedError). */
   readonly verifyTenantExists?: boolean | undefined;
   /** PostgreSQL statement_timeout (ms). undefined = inherit server default. */
   readonly statementTimeoutMs?: number | undefined;
@@ -186,21 +186,34 @@ export function createWithTenantContext(pool: TenantPool, options: WithTenantCon
       await client.query('SELECT set_config($1, $2, true)', [TENANT_ID_SETTING, validTenantId]);
 
       if (verifyTenantExists) {
-        // B5: existence AND active status in ONE in-transaction probe. The
-        // check is positive on 'active' (fail-closed): a suspended (or any
-        // non-active) tenant fails every operation here with a distinct
-        // 403. Login/refresh fold this into the uniform 401 at the engine
-        // layer — the status must never leak through authentication.
-        const tenantCheck = await client.query<{ status: string }>(
-          'SELECT status FROM tenants WHERE id = $1',
+        // B5: existence, status, and live subscription expiry in ONE
+        // in-transaction probe against this tenant's row. The database
+        // evaluates now() as part of that same query, so no cached timestamp
+        // can race an operation. The checks are positive on availability
+        // (fail-closed): unavailable tenants fail every operation here with a
+        // distinct 403. Login/refresh fold this into the uniform 401 at the
+        // engine layer — availability must never leak through authentication.
+        const tenantCheck = await client.query<{
+          status: string;
+          subscription_status: string;
+          subscription_ends_at: Date | null;
+          subscription_expired: boolean;
+        }>(
+          `SELECT status, subscription_status, subscription_ends_at,
+                  subscription_ends_at IS NOT NULL AND subscription_ends_at <= now() AS subscription_expired
+             FROM tenants
+            WHERE id = $1`,
           [validTenantId],
         );
-        const tenantStatus = tenantCheck.rows[0]?.status;
-        if (tenantStatus === undefined) {
+        const tenant = tenantCheck.rows[0];
+        if (tenant === undefined) {
           throw new NotFoundError(`Tenant "${validTenantId}" does not exist`);
         }
-        if (tenantStatus !== 'active') {
-          throw new TenantSuspendedError(tenantStatus);
+        if (tenant.status !== 'active') {
+          throw new TenantSuspendedError(tenant.status);
+        }
+        if (tenant.subscription_expired) {
+          throw new TenantSuspendedError('subscription_expired');
         }
       }
 
