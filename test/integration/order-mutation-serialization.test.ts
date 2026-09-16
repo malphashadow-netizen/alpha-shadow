@@ -396,6 +396,7 @@ describe('B2 live acceptance (order/shift mutation serialization)', () => {
     // Test-only timing barrier: it makes both real transactions reach the
     // production lockShift boundary before either invokes the original lock.
     // It does not replace or reorder the repository/SQL locking behavior.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- TScope must stay generic: it preserves the exact PaymentsTxScope/ShiftsTxScope identity per call site. A union parameter type fails typecheck (TS2322) due to contravariant fn-parameter checking against PaymentsStore/ShiftsStore.
     function synchronizeLockShift<TScope extends PaymentsTxScope | ShiftsTxScope>(store: {
       run<TResult>(tenantId: string, fn: (scope: TScope) => Promise<TResult>): Promise<TResult>;
     }): typeof store {

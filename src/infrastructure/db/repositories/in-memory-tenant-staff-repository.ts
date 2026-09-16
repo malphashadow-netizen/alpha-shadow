@@ -1,9 +1,34 @@
-import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
+import { ConflictError, NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import type { CreateStaffUserInput, StaffPermissionAssignment, TenantStaffRepository } from '../../../domain/contracts/tenant-staff.ts';
 import type { InMemoryPermissionStore } from './in-memory-permission-repository.ts';
 export class InMemoryTenantStaffRepository implements TenantStaffRepository {
   constructor(private readonly store: InMemoryPermissionStore) {}
-  createStaffUser(tenantId:string,input:CreateStaffUserInput):Promise<void> { if(!this.store.tenants.has(tenantId))throw new NotFoundError(`tenant ${tenantId} not found`); this.store.users.set(input.userId,{id:input.userId,tenantId,branchId:input.branchId ?? null,isActive:true,securityVersion:1}); return Promise.resolve(); }
-  assignPermissions(tenantId:string,userId:string,assignments:readonly StaffPermissionAssignment[]):Promise<void> { const user=this.store.users.get(userId);if(user?.tenantId!==tenantId)throw new NotFoundError(`user ${userId} not found in tenant ${tenantId}`);for(const a of assignments){if((a.scopeType==='tenant'&&a.scopeId!==null)||(a.scopeType==='branch'&&a.scopeId===null))throw new ValidationError('invalid role scope','scopeId');const role=this.store.roles.get(a.roleId);if(role?.tenantId!==tenantId)throw new NotFoundError(`role ${a.roleId} not found in tenant ${tenantId}`);const id=this.store.nextId('user-role');this.store.userRoles.set(id,{id,tenantId,userId,roleId:a.roleId,scopeType:a.scopeType,scopeId:a.scopeId,isActive:true});} return Promise.resolve(); }
-  deactivateStaffUser(tenantId:string,userId:string):Promise<void> { const user=this.store.users.get(userId);if(user?.tenantId!==tenantId)throw new NotFoundError(`user ${userId} not found in tenant ${tenantId}`);this.store.users.set(userId,{...user,isActive:false}); return Promise.resolve(); }
+  createStaffUser(tenantId: string, input: CreateStaffUserInput): Promise<void> {
+    if (!this.store.tenants.has(tenantId)) throw new NotFoundError(`tenant ${tenantId} not found`);
+    if (this.store.users.has(input.userId)) throw new ConflictError(`user ${input.userId} already exists`);
+    if (input.branchId !== null && input.branchId !== undefined) {
+      const branch = this.store.branches.get(input.branchId);
+      if (branch?.tenantId !== tenantId) throw new NotFoundError(`branch ${input.branchId} not found in tenant ${tenantId}`);
+    }
+    this.store.users.set(input.userId, { id: input.userId, tenantId, branchId: input.branchId ?? null, isActive: true, securityVersion: 1 });
+    return Promise.resolve();
+  }
+  assignPermissions(tenantId: string, userId: string, assignments: readonly StaffPermissionAssignment[]): Promise<void> {
+    const user = this.store.users.get(userId);
+    if (user?.tenantId !== tenantId) throw new NotFoundError(`user ${userId} not found in tenant ${tenantId}`);
+    for (const a of assignments) {
+      if ((a.scopeType === 'tenant' && a.scopeId !== null) || (a.scopeType === 'branch' && a.scopeId === null)) throw new ValidationError('invalid role scope', 'scopeId');
+      const role = this.store.roles.get(a.roleId);
+      if (role?.tenantId !== tenantId) throw new NotFoundError(`role ${a.roleId} not found in tenant ${tenantId}`);
+      const id = this.store.nextId('user-role');
+      this.store.userRoles.set(id, { id, tenantId, userId, roleId: a.roleId, scopeType: a.scopeType, scopeId: a.scopeId, isActive: true });
+    }
+    return Promise.resolve();
+  }
+  deactivateStaffUser(tenantId: string, userId: string): Promise<void> {
+    const user = this.store.users.get(userId);
+    if (user?.tenantId !== tenantId) throw new NotFoundError(`user ${userId} not found in tenant ${tenantId}`);
+    this.store.users.set(userId, { ...user, isActive: false });
+    return Promise.resolve();
+  }
 }

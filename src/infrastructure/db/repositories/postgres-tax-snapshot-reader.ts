@@ -29,11 +29,25 @@ export class PostgresTaxSnapshotReader implements TaxSnapshotReader {
       }>(`SELECT order_line_id, tax_rate_id, tenant_tax_rate_id, tax_family, computation_sequence, liable_party,
           rate_bps_snapshot, is_price_inclusive_snapshot, taxable_amount_minor, tax_amount_minor, currency_code
           FROM order_line_tax_snapshots WHERE order_line_id = $1 ORDER BY computation_sequence`, [orderLineId]);
-      return Object.freeze(r.rows.map((row) => Object.freeze({ orderLineId: row.order_line_id,
-        taxRateId: row.tax_rate_id ?? row.tenant_tax_rate_id!, source: row.tax_rate_id === null ? 'tenant' as const : 'platform' as const,
-        taxFamily: row.tax_family, computationSequence: row.computation_sequence, liableParty: row.liable_party,
-        rateBps: row.rate_bps_snapshot, isPriceInclusive: row.is_price_inclusive_snapshot,
-        taxableAmountMinor: minorUnitsFromDb(row.taxable_amount_minor), taxAmountMinor: minorUnitsFromDb(row.tax_amount_minor), currencyCode: row.currency_code })));
+      return Object.freeze(r.rows.map((row) => {
+        const taxRateId = row.tax_rate_id ?? row.tenant_tax_rate_id;
+        if (taxRateId === null) {
+          throw new Error(`Tax snapshot for order line ${row.order_line_id} is missing both tax_rate_id and tenant_tax_rate_id`);
+        }
+        return Object.freeze({
+          orderLineId: row.order_line_id,
+          taxRateId,
+          source: row.tax_rate_id === null ? 'tenant' as const : 'platform' as const,
+          taxFamily: row.tax_family,
+          computationSequence: row.computation_sequence,
+          liableParty: row.liable_party,
+          rateBps: row.rate_bps_snapshot,
+          isPriceInclusive: row.is_price_inclusive_snapshot,
+          taxableAmountMinor: minorUnitsFromDb(row.taxable_amount_minor),
+          taxAmountMinor: minorUnitsFromDb(row.tax_amount_minor),
+          currencyCode: row.currency_code,
+        });
+      }));
     });
   }
 }
