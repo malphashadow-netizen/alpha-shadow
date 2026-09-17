@@ -15,6 +15,8 @@
  * handshake carries it as the `?token=` query parameter (browsers cannot set
  * headers on an upgrade), the polling fallback as `Authorization: Bearer`.
  */
+import { requireNonNegativeInteger, requirePositiveInteger } from '../../shared/integer-validation.ts';
+
 export interface KdsClientEvent {
   readonly sequenceId: number;
   readonly eventType: string;
@@ -67,18 +69,10 @@ export class KdsRealtimeClient {
       maxWebSocketRetries: 3,
       ...options,
     };
-    if (!Number.isInteger(this.options.pollIntervalMs) || this.options.pollIntervalMs < 1) {
-      throw new Error('pollIntervalMs must be a positive integer');
-    }
-    if (!Number.isInteger(this.options.reconnectBaseDelayMs) || this.options.reconnectBaseDelayMs < 1) {
-      throw new Error('reconnectBaseDelayMs must be a positive integer');
-    }
-    if (!Number.isInteger(this.options.reconnectMaxDelayMs) || this.options.reconnectMaxDelayMs < 1) {
-      throw new Error('reconnectMaxDelayMs must be a positive integer');
-    }
-    if (!Number.isInteger(this.options.maxWebSocketRetries) || this.options.maxWebSocketRetries < 0) {
-      throw new Error('maxWebSocketRetries must be a non-negative integer');
-    }
+    this.requirePositiveInteger(this.options.pollIntervalMs, 'pollIntervalMs');
+    this.requirePositiveInteger(this.options.reconnectBaseDelayMs, 'reconnectBaseDelayMs');
+    this.requirePositiveInteger(this.options.reconnectMaxDelayMs, 'reconnectMaxDelayMs');
+    this.requireNonNegativeInteger(this.options.maxWebSocketRetries, 'maxWebSocketRetries');
     if (this.options.reconnectMaxDelayMs < this.options.reconnectBaseDelayMs) {
       throw new Error('reconnectMaxDelayMs must be greater than or equal to reconnectBaseDelayMs');
     }
@@ -134,6 +128,22 @@ export class KdsRealtimeClient {
     // legitimately pass the plain-HTTP base URL of the KDS service.
     const wsBase = base.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
     return `${wsBase}/kds/${this.options.tenantId}/branches/${this.options.branchId}/ws?token=${encodeURIComponent(this.options.deviceToken)}`;
+  }
+
+  private requirePositiveInteger(value: number, field: string): void {
+    try {
+      requirePositiveInteger(value, field);
+    } catch {
+      throw new Error(`${field} must be a positive integer`);
+    }
+  }
+
+  private requireNonNegativeInteger(value: number, field: string): void {
+    try {
+      requireNonNegativeInteger(value, field);
+    } catch {
+      throw new Error(`${field} must be a non-negative integer`);
+    }
   }
 
   private pollUrl(): string {

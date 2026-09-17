@@ -22,8 +22,9 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { InvalidCredentialsError, RateLimitError, TenantSuspendedError, ValidationError } from '../../../shared/errors.ts';
+import { InvalidCredentialsError, RateLimitError, TenantSuspendedError } from '../../../shared/errors.ts';
 import { sha256Hex, timingSafeEqualHex } from '../../../shared/crypto.ts';
+import { requirePositiveInteger } from '../../../shared/integer-validation.ts';
 import type { IAuthAuditSink, IAuthRepository, IRefreshTokenStore, SecVInputs } from '../../../domain/contracts/auth.ts';
 import type { ITokenService, Sha256Hex } from '../../../shared/auth/ports.ts';
 import { deriveSecV } from '../../../domain/contracts/sec-v.ts';
@@ -76,9 +77,7 @@ export class RefreshEngine {
       ['accountRateLimit', accountRateLimit],
     ] as const;
     for (const [field, value] of positiveIntegerOptions) {
-      if (!Number.isInteger(value) || value < 1) {
-        throw new ValidationError(`${field} must be a positive integer`, field);
-      }
+      requirePositiveInteger(value, field);
     }
     this.authRepository = deps.authRepository;
     this.refreshTokenStore = deps.refreshTokenStore;

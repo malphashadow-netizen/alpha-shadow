@@ -597,6 +597,25 @@ describe('Phase 8 live acceptance (payments + discounts + shifts)', () => {
     })).rejects.toBeInstanceOf(PaymentExceedsBalanceError);
   });
 
+  it('rolls back the PostgreSQL payment transaction when explicit cash change is incorrect', async () => {
+    const till = await setupTill();
+    const order = await newOrder(till);
+
+    await expect(payments.recordPayment(T, {
+      orderId: order.order.id,
+      paymentMethodId: methodCashId,
+      cashierUserId: till.cashierId,
+      amountText: '50.00',
+      explicitChangeMinor: 0n,
+    })).rejects.toMatchObject({ code: 'validation.failed', field: 'explicitChangeMinor' });
+
+    const paymentRows = await owner.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM payments WHERE tenant_id = $1 AND order_id = $2',
+      [T, order.order.id],
+    );
+    expect(Number(row(paymentRows.rows).count)).toBe(0);
+  });
+
   it('foreign-currency cash: manual fixed rate snapshot, change in base currency, #6 immutable snapshot', async () => {
     const till = await setupTill();
     const order = await newOrder(till); // total 46.00 SAR

@@ -46,6 +46,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { OrderOutboxEvent } from '../../domain/contracts/orders.ts';
 import { ValidationError } from '../../shared/errors.ts';
+import { requireNonNegativeInteger, requirePositiveInteger } from '../../shared/integer-validation.ts';
 
 export interface KdsWireEvent {
   readonly sequence_id: number;
@@ -90,6 +91,7 @@ export interface KdsRealtimeServerOptions {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const KDS_MAX_EVENT_BATCH_LIMIT = 1_000;
 
 interface KdsRoute {
   readonly tenantId: string;
@@ -179,24 +181,27 @@ export class KdsRealtimeServer {
   private boundPort = 0;
 
   constructor(options: KdsRealtimeServerOptions) {
-    if (options.pollIntervalMs !== undefined && (!Number.isInteger(options.pollIntervalMs) || options.pollIntervalMs < 1)) {
-      throw new ValidationError('pollIntervalMs must be a positive integer', 'pollIntervalMs');
+    if (options.pollIntervalMs !== undefined) {
+      requirePositiveInteger(options.pollIntervalMs, 'pollIntervalMs');
     }
-    if (options.maxLimit !== undefined && (!Number.isInteger(options.maxLimit) || options.maxLimit < 1)) {
-      throw new ValidationError('maxLimit must be a positive integer', 'maxLimit');
+    if (options.maxLimit !== undefined) {
+      requirePositiveInteger(options.maxLimit, 'maxLimit');
+      if (options.maxLimit > KDS_MAX_EVENT_BATCH_LIMIT) {
+        throw new ValidationError('maxLimit must be a positive integer', 'maxLimit');
+      }
     }
-    if (options.revalidationMs !== undefined && (!Number.isInteger(options.revalidationMs) || options.revalidationMs < 0)) {
-      throw new ValidationError('revalidationMs must be a non-negative integer', 'revalidationMs');
+    if (options.revalidationMs !== undefined) {
+      requireNonNegativeInteger(options.revalidationMs, 'revalidationMs');
     }
-    if (options.authFailureLimit !== undefined && (!Number.isInteger(options.authFailureLimit) || options.authFailureLimit < 1)) {
-      throw new ValidationError('authFailureLimit must be a positive integer', 'authFailureLimit');
+    if (options.authFailureLimit !== undefined) {
+      requirePositiveInteger(options.authFailureLimit, 'authFailureLimit');
     }
-    if (options.authFailureWindowMs !== undefined && (!Number.isInteger(options.authFailureWindowMs) || options.authFailureWindowMs < 1)) {
-      throw new ValidationError('authFailureWindowMs must be a positive integer', 'authFailureWindowMs');
+    if (options.authFailureWindowMs !== undefined) {
+      requirePositiveInteger(options.authFailureWindowMs, 'authFailureWindowMs');
     }
     this.options = {
       pollIntervalMs: 200,
-      maxLimit: 1_000,
+      maxLimit: KDS_MAX_EVENT_BATCH_LIMIT,
       authFailureLimit: 10,
       authFailureWindowMs: 60_000,
       revalidationMs: 60_000,

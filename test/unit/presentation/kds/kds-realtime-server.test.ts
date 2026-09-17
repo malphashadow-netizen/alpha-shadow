@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 
-import { KdsRealtimeServer } from '../../../../src/presentation/kds/kds-realtime-server.ts';
+import { KDS_MAX_EVENT_BATCH_LIMIT, KdsRealtimeServer } from '../../../../src/presentation/kds/kds-realtime-server.ts';
 import { ValidationError } from '../../../../src/shared/errors.ts';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
@@ -35,6 +35,7 @@ describe('KdsRealtimeServer', () => {
     for (const maxLimit of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new KdsRealtimeServer({ ...options(), maxLimit })).toThrow(ValidationError);
     }
+    expect(() => new KdsRealtimeServer({ ...options(), maxLimit: KDS_MAX_EVENT_BATCH_LIMIT + 1 })).toThrow(ValidationError);
     for (const revalidationMs of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new KdsRealtimeServer({ ...options(), revalidationMs })).toThrow(ValidationError);
     }
