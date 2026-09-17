@@ -45,6 +45,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { OrderOutboxEvent } from '../../domain/contracts/orders.ts';
+import { ValidationError } from '../../shared/errors.ts';
 
 export interface KdsWireEvent {
   readonly sequence_id: number;
@@ -154,7 +155,7 @@ interface Subscription {
   lastSequenceId: number;
   /** 0 at subscribe so the FIRST pump always revalidates (see pump). */
   lastRevalidatedAt: number;
-  timer: ReturnType<typeof setInterval> | null;
+  timer: ReturnType<typeof setTimeout> | null;
   socket: WebSocket;
 }
 
@@ -178,6 +179,15 @@ export class KdsRealtimeServer {
   private boundPort = 0;
 
   constructor(options: KdsRealtimeServerOptions) {
+    if (options.pollIntervalMs !== undefined && (!Number.isInteger(options.pollIntervalMs) || options.pollIntervalMs < 1)) {
+      throw new ValidationError('pollIntervalMs must be a positive integer', 'pollIntervalMs');
+    }
+    if (options.maxLimit !== undefined && (!Number.isInteger(options.maxLimit) || options.maxLimit < 1)) {
+      throw new ValidationError('maxLimit must be a positive integer', 'maxLimit');
+    }
+    if (options.revalidationMs !== undefined && (!Number.isInteger(options.revalidationMs) || options.revalidationMs < 0)) {
+      throw new ValidationError('revalidationMs must be a non-negative integer', 'revalidationMs');
+    }
     this.options = {
       pollIntervalMs: 200,
       maxLimit: 1_000,
@@ -237,7 +247,7 @@ export class KdsRealtimeServer {
 
   async stop(): Promise<void> {
     for (const subscription of this.subscriptions) {
-      if (subscription.timer !== null) clearInterval(subscription.timer);
+      if (subscription.timer !== null) clearTimeout(subscription.timer);
       subscription.socket.close(1001, 'server shutting down');
     }
     this.subscriptions.clear();
@@ -403,16 +413,22 @@ export class KdsRealtimeServer {
       };
       subscription = sub;
       this.subscriptions.add(sub);
-      // Replay everything the client missed, then keep streaming.
-      void this.pump(sub, true);
-      sub.timer = setInterval(() => {
-        void this.pump(sub, false);
-      }, this.options.pollIntervalMs);
+      // Replay everything the client missed, then keep streaming. Each round
+      // schedules its successor only after it settles, so one subscription
+      // can never have overlapping reads or revalidation probes.
+      const scheduleNextPump = (): void => {
+        if (!this.subscriptions.has(sub) || sub.socket.readyState !== sub.socket.OPEN) return;
+        sub.timer = setTimeout(() => {
+          sub.timer = null;
+          void this.pump(sub, false).finally(scheduleNextPump);
+        }, this.options.pollIntervalMs);
+      };
+      void this.pump(sub, true).finally(scheduleNextPump);
     });
     socket.on('close', () => {
       const sub = subscription;
       if (sub !== null) {
-        if (sub.timer !== null) clearInterval(sub.timer);
+        if (sub.timer !== null) clearTimeout(sub.timer);
         this.subscriptions.delete(sub);
       }
     });
@@ -423,7 +439,7 @@ export class KdsRealtimeServer {
 
   private dropSubscription(subscription: Subscription, code: number, reason: string): void {
     if (subscription.timer !== null) {
-      clearInterval(subscription.timer);
+      clearTimeout(subscription.timer);
       subscription.timer = null;
     }
     this.subscriptions.delete(subscription);

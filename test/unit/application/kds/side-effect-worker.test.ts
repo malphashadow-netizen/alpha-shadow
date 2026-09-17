@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SideEffectWorker } from '../../../../src/application/engines/kds/side-effect-worker.ts';
+import { ValidationError } from '../../../../src/shared/errors.ts';
 import type {
   OrderOutboxEvent,
   OrdersStore,
@@ -57,6 +58,18 @@ function fakeStore(events: readonly OrderOutboxEvent[], outcomes: readonly SideE
 }
 
 describe('SideEffectWorker', () => {
+  it('validates numeric configuration bounds at construction', () => {
+    const store = {} as OrdersStore;
+    const executor = {} as SideEffectExecutor;
+    expect(() => new SideEffectWorker({ store, executor, stalePendingAfterMs: 0, batchSize: 1 })).not.toThrow();
+    for (const stalePendingAfterMs of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new SideEffectWorker({ store, executor, stalePendingAfterMs })).toThrow(ValidationError);
+    }
+    for (const batchSize of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new SideEffectWorker({ store, executor, batchSize })).toThrow(ValidationError);
+    }
+  });
+
   it('uses separate claim and confirm transactions and passes the deterministic idempotency key', async () => {
     const event = eventFixture('event-1', { fires_kitchen_ticket: true, notifies_customer: false });
     const { store, runCount } = fakeStore([event], [{ outcome: 'claimed', attemptCount: 1 }]);

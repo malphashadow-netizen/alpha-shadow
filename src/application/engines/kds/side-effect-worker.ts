@@ -42,6 +42,7 @@ import type {
   SideEffectType,
 } from '../../../domain/contracts/orders.ts';
 import { parseOrderBehaviorFlags } from '../../../domain/contracts/orders.ts';
+import { ValidationError } from '../../../shared/errors.ts';
 
 export interface SideEffectWorkerDependencies {
   readonly store: OrdersStore;
@@ -66,6 +67,12 @@ export class SideEffectWorker {
   private readonly dependencies: SideEffectWorkerDependencies;
 
   constructor(dependencies: SideEffectWorkerDependencies) {
+    if (dependencies.stalePendingAfterMs !== undefined && (!Number.isInteger(dependencies.stalePendingAfterMs) || dependencies.stalePendingAfterMs < 0)) {
+      throw new ValidationError('stalePendingAfterMs must be a non-negative integer', 'stalePendingAfterMs');
+    }
+    if (dependencies.batchSize !== undefined && (!Number.isInteger(dependencies.batchSize) || dependencies.batchSize < 1)) {
+      throw new ValidationError('batchSize must be a positive integer', 'batchSize');
+    }
     this.dependencies = dependencies;
   }
 

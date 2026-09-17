@@ -253,9 +253,12 @@ export class PaymentsEngine {
         const excess = grossBaseMinor - totals.remainingBalanceMinor;
         changeMinor = excess > 0n ? excess : 0n;
         if (input.explicitChangeMinor !== undefined) {
-          if (input.explicitChangeMinor < 0n) throw new ValidationError('Change cannot be negative', 'explicitChangeMinor');
-          if (input.explicitChangeMinor > grossBaseMinor) throw new ValidationError('Change cannot exceed the tendered amount', 'explicitChangeMinor');
-          changeMinor = input.explicitChangeMinor;
+          if (input.explicitChangeMinor !== changeMinor) {
+            throw new ValidationError(
+              `explicitChangeMinor must equal the calculated change of ${changeMinor.toString()} minor units`,
+              'explicitChangeMinor',
+            );
+          }
         }
       } else if (input.explicitChangeMinor !== undefined && input.explicitChangeMinor !== 0n) {
         throw new ValidationError('Change is only given on cash methods', 'explicitChangeMinor');
