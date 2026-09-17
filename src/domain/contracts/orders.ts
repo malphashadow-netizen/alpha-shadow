@@ -388,12 +388,31 @@ export interface ManagerOverrideAuthenticator {
 export type SideEffectType = 'kitchen_ticket_print' | 'customer_notification';
 
 export interface SideEffectClaimOutcome {
-  readonly outcome: 'claimed' | 'succeeded' | 'retry';
+  /**
+   * 'claimed': this run now owns a fresh pending row — execute the effect.
+   * 'already_succeeded': a prior attempt already delivered this effect —
+   *   never re-execute.
+   * 'owned_by_live_worker': a pending row younger than stalePendingAfterMs
+   *   belongs to a concurrent live attempt right now — never re-execute
+   *   (distinct from already_succeeded for accurate metrics/diagnostics).
+   * 'retry': a stale pending or a failed row — re-execute on the same row.
+   */
+  readonly outcome: 'claimed' | 'already_succeeded' | 'owned_by_live_worker' | 'retry';
   readonly attemptCount: number;
 }
 
 export interface SideEffectExecutor {
-  execute(event: OrderOutboxEvent, sideEffectType: SideEffectType): Promise<void>;
+  /**
+   * idempotencyKey is ${outboxEventId}:${sideEffectType} — the SAME pair
+   * bound by the UNIQUE constraint on side_effect_delivery_log. Any real
+   * integration (printer, SMS gateway, push service) MUST treat a repeated
+   * call with the same idempotencyKey as a no-op within a reasonable window.
+   * This is the FINAL line of defense against duplicate external effects
+   * when a process crash lands between a successful execute() and the
+   * confirming markSideEffect('succeeded') call — claim-then-execute alone
+   * cannot make an external side effect participate in a DB commit.
+   */
+  execute(event: OrderOutboxEvent, sideEffectType: SideEffectType, idempotencyKey: string): Promise<void>;
 }
 
 export interface SideEffectRunReport {

@@ -19,7 +19,16 @@
  *
  * Consequence for a PARTIAL FAILURE (kitchen ticket printed, notification
  * failed): a retry re-executes ONLY the failed half. Event delivery is
- * at-least-once; the EXTERNAL EFFECT is exactly-once.
+ * at-least-once. The external effect is exactly-once ONLY IF the injected
+ * executor is idempotent by idempotencyKey — claim-then-execute alone cannot
+ * make an external system participate in the DB's commit/rollback, so a crash
+ * between a successful execute() and the confirming markSideEffect('succeeded')
+ * can cause a retry to re-invoke execute() with the SAME idempotencyKey.
+ * Treating that key as a deduplication key at the integration boundary is a
+ * mandatory contract on every real executor, not a guarantee this worker can
+ * provide alone. `already_succeeded` means a prior execution completed,
+ * whereas `owned_by_live_worker` means a concurrent live attempt owns a fresh
+ * pending row; both must not be executed by this worker.
  *
  * The executor is a port: real printing/SMS/push integrations are the future
  * integrations phase; tests inject fakes. The worker itself is production
@@ -68,37 +77,64 @@ export class SideEffectWorker {
   async processPending(tenantId: string, branchId?: string  ): Promise<SideEffectRunReport> {
     const staleAfter = this.dependencies.stalePendingAfterMs ?? 60_000;
     const limit = this.dependencies.batchSize ?? 200;
-    return this.dependencies.store.run(tenantId, async (scope) => {
+
+    const claimed = await this.dependencies.store.run(tenantId, async (scope) => {
       const events = await scope.loadEventsWithBehaviorFlags(tenantId, limit, branchId);
-      let executed = 0;
       let skippedAsSucceeded = 0;
-      let failed = 0;
+      const effectsToExecute: { event: OrderOutboxEvent; type: SideEffectType }[] = [];
       for (const event of events) {
         for (const type of requiredSideEffectTypes(event)) {
           const claim = await scope.claimSideEffect(tenantId, event.id, type, staleAfter);
-          if (claim.outcome === 'succeeded') {
-            // A previous attempt already delivered this external effect (or a
-            // live attempt owns it): never execute twice.
+          if (claim.outcome === 'already_succeeded' || claim.outcome === 'owned_by_live_worker') {
             skippedAsSucceeded += 1;
             continue;
           }
-          try {
-            await this.dependencies.executor.execute(event, type);
-            await scope.markSideEffect(tenantId, event.id, type, 'succeeded');
-            executed += 1;
-          } catch (error) {
-            await scope.markSideEffect(
-              tenantId,
-              event.id,
-              type,
-              'failed',
-              error instanceof Error ? error.message : String(error),
-            );
-            failed += 1;
-          }
+          effectsToExecute.push({ event, type });
         }
       }
-      return { examined: events.length, executed, skippedAsSucceeded, failed };
+      return { examinedCount: events.length, skippedAsSucceeded, effectsToExecute };
     });
+
+    const results: { event: OrderOutboxEvent; type: SideEffectType; status: 'succeeded' | 'failed'; errorMessage?: string }[] = [];
+    for (const { event, type } of claimed.effectsToExecute) {
+      try {
+        await this.dependencies.executor.execute(event, type, `${event.id}:${type}`);
+        results.push({ event, type, status: 'succeeded' });
+      } catch (error) {
+        results.push({
+          event,
+          type,
+          status: 'failed',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const confirmed = await this.dependencies.store.run(tenantId, async (scope) => {
+      let executed = 0;
+      let failed = 0;
+      for (const result of results) {
+        await scope.markSideEffect(
+          tenantId,
+          result.event.id,
+          result.type,
+          result.status,
+          result.errorMessage,
+        );
+        if (result.status === 'succeeded') {
+          executed += 1;
+        } else {
+          failed += 1;
+        }
+      }
+      return { executed, failed };
+    });
+
+    return {
+      examined: claimed.examinedCount,
+      executed: confirmed.executed,
+      skippedAsSucceeded: claimed.skippedAsSucceeded,
+      failed: confirmed.failed,
+    };
   }
 }

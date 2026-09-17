@@ -549,12 +549,12 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
         throw new Error('side_effect_delivery_log row disappeared inside the claim transaction');
       }
       if (prior.status === 'succeeded') {
-        return { outcome: 'succeeded', attemptCount: prior.attempt_count };
+        return { outcome: 'already_succeeded', attemptCount: prior.attempt_count };
       }
       const staleBefore = new Date(Date.now() - stalePendingAfterMs);
       if (prior.status === 'pending' && prior.updated_at > staleBefore) {
         // A live attempt owns the row right now — do not double-execute.
-        return { outcome: 'succeeded', attemptCount: prior.attempt_count };
+        return { outcome: 'owned_by_live_worker', attemptCount: prior.attempt_count };
       }
       const retried = await q.query<{ attempt_count: number }>(
         `UPDATE side_effect_delivery_log
