@@ -76,4 +76,38 @@ describe('KdsRealtimeServer', () => {
       await server.stop();
     }
   });
+
+  it.each([
+    'after=1x',
+    'after=1.5',
+    'after=-1',
+    'after=',
+    'after=9007199254740992',
+    'limit=1x',
+    'limit=1.5',
+    'limit=-1',
+    'limit=0',
+    'limit=',
+    'limit=9007199254740992',
+  ])('rejects malformed polling query %s before reading events', async (query) => {
+    let reads = 0;
+    const server = new KdsRealtimeServer({
+      ...options(),
+      readEvents: async () => {
+        reads += 1;
+        return [];
+      },
+    });
+    const port = await server.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/kds/${TENANT}/branches/${BRANCH}/events?${query}`, {
+        headers: { authorization: 'Bearer token' },
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'bad_request' });
+      expect(reads).toBe(0);
+    } finally {
+      await server.stop();
+    }
+  });
 });

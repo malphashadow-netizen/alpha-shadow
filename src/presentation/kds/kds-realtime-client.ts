@@ -57,7 +57,7 @@ export class KdsRealtimeClient {
   private socket: WebSocket | null = null;
   private wsFailures = 0;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: KdsRealtimeClientOptions) {
     this.options = {
@@ -67,6 +67,21 @@ export class KdsRealtimeClient {
       maxWebSocketRetries: 3,
       ...options,
     };
+    if (!Number.isInteger(this.options.pollIntervalMs) || this.options.pollIntervalMs < 1) {
+      throw new Error('pollIntervalMs must be a positive integer');
+    }
+    if (!Number.isInteger(this.options.reconnectBaseDelayMs) || this.options.reconnectBaseDelayMs < 1) {
+      throw new Error('reconnectBaseDelayMs must be a positive integer');
+    }
+    if (!Number.isInteger(this.options.reconnectMaxDelayMs) || this.options.reconnectMaxDelayMs < 1) {
+      throw new Error('reconnectMaxDelayMs must be a positive integer');
+    }
+    if (!Number.isInteger(this.options.maxWebSocketRetries) || this.options.maxWebSocketRetries < 0) {
+      throw new Error('maxWebSocketRetries must be a non-negative integer');
+    }
+    if (this.options.reconnectMaxDelayMs < this.options.reconnectBaseDelayMs) {
+      throw new Error('reconnectMaxDelayMs must be greater than or equal to reconnectBaseDelayMs');
+    }
     this.lastSequenceId = options.initialLastSequenceId ?? 0;
   }
 
@@ -88,7 +103,7 @@ export class KdsRealtimeClient {
     this.state = 'stopped';
     if (this.pendingTimer !== null) clearTimeout(this.pendingTimer);
     this.pendingTimer = null;
-    if (this.pollTimer !== null) clearInterval(this.pollTimer);
+    if (this.pollTimer !== null) clearTimeout(this.pollTimer);
     this.pollTimer = null;
     const socket = this.socket;
     this.socket = null;
@@ -204,10 +219,14 @@ export class KdsRealtimeClient {
         // transient: the next tick retries from the same sequence cursor
       }
     };
-    void poll();
-    this.pollTimer = setInterval(() => {
-      void poll();
-    }, this.options.pollIntervalMs);
+    const scheduleNextPoll = (): void => {
+      if (this.state !== 'polling') return;
+      this.pollTimer = setTimeout(() => {
+        this.pollTimer = null;
+        void poll().finally(scheduleNextPoll);
+      }, this.options.pollIntervalMs);
+    };
+    void poll().finally(scheduleNextPoll);
   }
 
   private handleMessage(raw: string): void {

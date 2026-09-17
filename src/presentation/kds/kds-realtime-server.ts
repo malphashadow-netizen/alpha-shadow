@@ -378,9 +378,9 @@ export class KdsRealtimeServer {
       finish(400, { error: 'bad_request' });
       return;
     }
-    const after = Number.parseInt(url.searchParams.get('after') ?? '0', 10);
-    const limit = Number.parseInt(url.searchParams.get('limit') ?? String(this.options.maxLimit), 10);
-    if (!Number.isInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1) {
+    const after = parseQueryInteger(url.searchParams.get('after') ?? '0');
+    const limit = parseQueryInteger(url.searchParams.get('limit') ?? String(this.options.maxLimit));
+    if (after === null || after < 0 || limit === null || limit < 1) {
       finish(400, { error: 'bad_request' });
       return;
     }
@@ -493,4 +493,10 @@ export class KdsRealtimeServer {
     if (last !== undefined) subscription.lastSequenceId = last.sequenceId;
     subscription.socket.send(JSON.stringify({ type: 'events', events: events.map(toWire) }));
   }
+}
+
+function parseQueryInteger(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
