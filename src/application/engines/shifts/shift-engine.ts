@@ -123,16 +123,26 @@ export class ShiftEngine {
       if (existing !== null) {
         throw new ConflictError('The cashier already holds an open shift (parallel shifts are forbidden)');
       }
-      const shift = await scope.insertShift(tenantId, {
-        id: randomUUID(),
-        branchId: input.branchId,
-        cashierId: input.cashierUserId,
-        openedById: input.openedByUserId,
-        openVerifiedById: input.openVerifiedByUserId,
-        // Audit F-B: input.openedAt is ignored (kept required for signature stability) — the server clock stamps the opening.
-        openedAt: new Date(),
-        startingFloat: minorToDecimalText(floatMinor, digits),
-      });
+      let shift: ShiftRecord;
+      try {
+        shift = await scope.insertShift(tenantId, {
+          id: randomUUID(),
+          branchId: input.branchId,
+          cashierId: input.cashierUserId,
+          openedById: input.openedByUserId,
+          openVerifiedById: input.openVerifiedByUserId,
+          // Audit F-B: input.openedAt is ignored (kept required for signature stability) — the server clock stamps the opening.
+          openedAt: new Date(),
+          startingFloat: minorToDecimalText(floatMinor, digits),
+        });
+      } catch (error: unknown) {
+        if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {
+          if ('constraint' in error && error.constraint === 'uq_shift_one_open_per_cashier') {
+            throw new ConflictError('The cashier already holds an open shift (parallel shifts are forbidden)');
+          }
+        }
+        throw error;
+      }
       await scope.insertCashCountDetails(tenantId, shift.id, 'open', input.openCounts);
       return shift;
     });
