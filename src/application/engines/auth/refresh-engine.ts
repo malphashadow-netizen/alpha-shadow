@@ -22,7 +22,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { InvalidCredentialsError, RateLimitError, TenantSuspendedError } from '../../../shared/errors.ts';
+import { InvalidCredentialsError, RateLimitError, TenantSuspendedError, ValidationError } from '../../../shared/errors.ts';
 import { sha256Hex, timingSafeEqualHex } from '../../../shared/crypto.ts';
 import type { IAuthAuditSink, IAuthRepository, IRefreshTokenStore, SecVInputs } from '../../../domain/contracts/auth.ts';
 import type { ITokenService, Sha256Hex } from '../../../shared/auth/ports.ts';
@@ -67,15 +67,28 @@ export class RefreshEngine {
   private readonly accountRateLimit: number;
 
   constructor(deps: RefreshEngineDeps) {
+    const rateLimitWindowMs = deps.rateLimitWindowMs ?? RATE_LIMIT_WINDOW_MS;
+    const ipRateLimit = deps.ipRateLimit ?? IP_RATE_LIMIT;
+    const accountRateLimit = deps.accountRateLimit ?? ACCOUNT_RATE_LIMIT;
+    const positiveIntegerOptions = [
+      ['rateLimitWindowMs', rateLimitWindowMs],
+      ['ipRateLimit', ipRateLimit],
+      ['accountRateLimit', accountRateLimit],
+    ] as const;
+    for (const [field, value] of positiveIntegerOptions) {
+      if (!Number.isInteger(value) || value < 1) {
+        throw new ValidationError(`${field} must be a positive integer`, field);
+      }
+    }
     this.authRepository = deps.authRepository;
     this.refreshTokenStore = deps.refreshTokenStore;
     this.auditSink = deps.auditSink;
     this.tokenService = deps.tokenService;
     this.sha256 = deps.sha256 ?? sha256Hex;
     this.refreshTtlSeconds = deps.refreshTtlSeconds;
-    this.rateLimitWindowMs = deps.rateLimitWindowMs ?? RATE_LIMIT_WINDOW_MS;
-    this.ipRateLimit = deps.ipRateLimit ?? IP_RATE_LIMIT;
-    this.accountRateLimit = deps.accountRateLimit ?? ACCOUNT_RATE_LIMIT;
+    this.rateLimitWindowMs = rateLimitWindowMs;
+    this.ipRateLimit = ipRateLimit;
+    this.accountRateLimit = accountRateLimit;
   }
 
   async refresh(request: RefreshRequest, context: LoginContext): Promise<RefreshSuccess> {

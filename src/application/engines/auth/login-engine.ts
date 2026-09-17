@@ -21,7 +21,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { InvalidCredentialsError, RateLimitError, TenantSuspendedError } from '../../../shared/errors.ts';
+import { InvalidCredentialsError, RateLimitError, TenantSuspendedError, ValidationError } from '../../../shared/errors.ts';
 import { sha256Hex } from '../../../shared/crypto.ts';
 import type { AuthUserRecord, IAuthAuditSink, IAuthRepository, IRefreshTokenStore } from '../../../domain/contracts/auth.ts';
 import type { IPasswordHasher, IPinHasher, ITokenService, Sha256Hex } from '../../../shared/auth/ports.ts';
@@ -90,6 +90,25 @@ export class LoginEngine {
   private readonly refreshTtlSeconds: number;
 
   constructor(deps: LoginEngineDeps) {
+    const passwordThreshold = deps.passwordThreshold ?? PASSWORD_LOCK_THRESHOLD;
+    const pinThreshold = deps.pinThreshold ?? PIN_LOCK_THRESHOLD;
+    const lockWindowMs = deps.lockWindowMs ?? LOCK_WINDOW_MS;
+    const rateLimitWindowMs = deps.rateLimitWindowMs ?? RATE_LIMIT_WINDOW_MS;
+    const ipRateLimit = deps.ipRateLimit ?? IP_RATE_LIMIT;
+    const accountRateLimit = deps.accountRateLimit ?? ACCOUNT_RATE_LIMIT;
+    const positiveIntegerOptions = [
+      ['passwordThreshold', passwordThreshold],
+      ['pinThreshold', pinThreshold],
+      ['lockWindowMs', lockWindowMs],
+      ['rateLimitWindowMs', rateLimitWindowMs],
+      ['ipRateLimit', ipRateLimit],
+      ['accountRateLimit', accountRateLimit],
+    ] as const;
+    for (const [field, value] of positiveIntegerOptions) {
+      if (!Number.isInteger(value) || value < 1) {
+        throw new ValidationError(`${field} must be a positive integer`, field);
+      }
+    }
     this.authRepository = deps.authRepository;
     this.refreshTokenStore = deps.refreshTokenStore;
     this.auditSink = deps.auditSink;
@@ -98,12 +117,12 @@ export class LoginEngine {
     this.pinHasher = deps.pinHasher;
     this.sha256 = deps.sha256 ?? sha256Hex;
     this.refreshTtlSeconds = deps.refreshTtlSeconds;
-    this.passwordThreshold = deps.passwordThreshold ?? PASSWORD_LOCK_THRESHOLD;
-    this.pinThreshold = deps.pinThreshold ?? PIN_LOCK_THRESHOLD;
-    this.lockWindowMs = deps.lockWindowMs ?? LOCK_WINDOW_MS;
-    this.rateLimitWindowMs = deps.rateLimitWindowMs ?? RATE_LIMIT_WINDOW_MS;
-    this.ipRateLimit = deps.ipRateLimit ?? IP_RATE_LIMIT;
-    this.accountRateLimit = deps.accountRateLimit ?? ACCOUNT_RATE_LIMIT;
+    this.passwordThreshold = passwordThreshold;
+    this.pinThreshold = pinThreshold;
+    this.lockWindowMs = lockWindowMs;
+    this.rateLimitWindowMs = rateLimitWindowMs;
+    this.ipRateLimit = ipRateLimit;
+    this.accountRateLimit = accountRateLimit;
   }
 
   async login(request: LoginRequest, context: LoginContext): Promise<LoginOutcome> {

@@ -17,14 +17,14 @@ import { describe, expect, it } from 'vitest';
 
 import { InvalidCredentialsError, TenantSuspendedError } from '../../../../src/shared/errors.ts';
 import { sha256Hex } from '../../../../src/shared/crypto.ts';
-import { LoginEngine, PASSWORD_LOCK_THRESHOLD, PIN_LOCK_THRESHOLD } from '../../../../src/application/engines/auth/login-engine.ts';
+import { LoginEngine, PASSWORD_LOCK_THRESHOLD, PIN_LOCK_THRESHOLD, type LoginEngineDeps } from '../../../../src/application/engines/auth/login-engine.ts';
 import { buildAuthFakes, type FakeUser } from '../../../support/auth-fakes.ts';
 import { generatePassword, generatePin } from '../../../support/auth-secrets.ts';
 
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
 const TENANT_B = '22222222-2222-4222-8222-222222222222';
 
-async function makeEngine() {
+async function makeEngine(overrides: Partial<Pick<LoginEngineDeps, 'passwordThreshold' | 'pinThreshold' | 'lockWindowMs' | 'rateLimitWindowMs' | 'ipRateLimit' | 'accountRateLimit'>> = {}) {
   const fakes = await buildAuthFakes();
   const engine = new LoginEngine({
     authRepository: fakes.repo,
@@ -35,6 +35,7 @@ async function makeEngine() {
     pinHasher: fakes.pinHasher,
     refreshTtlSeconds: fakes.refreshTtlSeconds,
     sha256: sha256Hex,
+    ...overrides,
   });
   return { engine, ...fakes };
 }
@@ -68,6 +69,15 @@ function pinUser(overrides: Partial<FakeUser> & Pick<FakeUser, 'id' | 'tenantId'
 const ctx = { ipAddress: '203.0.113.7', userAgent: 'unit-test' };
 
 describe('LoginEngine — password mode', () => {
+  it('rejects invalid lockout and rate-limit configuration at construction', async () => {
+    await expect(makeEngine({ passwordThreshold: 0 })).rejects.toThrow('passwordThreshold');
+    await expect(makeEngine({ pinThreshold: 1.5 })).rejects.toThrow('pinThreshold');
+    await expect(makeEngine({ lockWindowMs: Number.NaN })).rejects.toThrow('lockWindowMs');
+    await expect(makeEngine({ rateLimitWindowMs: Number.POSITIVE_INFINITY })).rejects.toThrow('rateLimitWindowMs');
+    await expect(makeEngine({ ipRateLimit: -1 })).rejects.toThrow('ipRateLimit');
+    await expect(makeEngine({ accountRateLimit: 0 })).rejects.toThrow('accountRateLimit');
+  });
+
   it('returns tokens on a correct password', async () => {
     const { engine, repo, hashPasswordValue } = await makeEngine();
     const password = generatePassword();

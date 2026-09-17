@@ -13,14 +13,14 @@ import { describe, expect, it } from 'vitest';
 import { InvalidCredentialsError, TenantSuspendedError } from '../../../../src/shared/errors.ts';
 import { sha256Hex } from '../../../../src/shared/crypto.ts';
 import { LoginEngine } from '../../../../src/application/engines/auth/login-engine.ts';
-import { RefreshEngine } from '../../../../src/application/engines/auth/refresh-engine.ts';
+import { RefreshEngine, type RefreshEngineDeps } from '../../../../src/application/engines/auth/refresh-engine.ts';
 import { buildAuthFakes, type FakeUser } from '../../../support/auth-fakes.ts';
 import { generatePassword } from '../../../support/auth-secrets.ts';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const ctx = { ipAddress: '203.0.113.9', userAgent: 'unit' };
 
-async function boot() {
+async function boot(overrides: Partial<Pick<RefreshEngineDeps, 'rateLimitWindowMs' | 'ipRateLimit' | 'accountRateLimit'>> = {}) {
   const fakes = await buildAuthFakes();
   const login = new LoginEngine({
     authRepository: fakes.repo,
@@ -31,6 +31,7 @@ async function boot() {
     pinHasher: fakes.pinHasher,
     refreshTtlSeconds: fakes.refreshTtlSeconds,
     sha256: sha256Hex,
+    ...overrides,
   });
   const refresh = new RefreshEngine({
     authRepository: fakes.repo,
@@ -60,6 +61,12 @@ function baseUser(id: string, passwordHash: string): FakeUser {
 }
 
 describe('RefreshEngine', () => {
+  it('rejects invalid rate-limit configuration after applying defaults', async () => {
+    await expect(boot({ rateLimitWindowMs: 0 })).rejects.toThrow('rateLimitWindowMs');
+    await expect(boot({ ipRateLimit: 1.5 })).rejects.toThrow('ipRateLimit');
+    await expect(boot({ accountRateLimit: Number.NaN })).rejects.toThrow('accountRateLimit');
+  });
+
   it('rotates a valid refresh token and invalidates the old one', async () => {
     const { login, refresh, repo, hashPasswordValue } = await boot();
     const password = generatePassword();

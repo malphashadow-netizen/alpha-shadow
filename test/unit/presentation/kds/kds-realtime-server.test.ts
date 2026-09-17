@@ -26,7 +26,9 @@ function options() {
 
 describe('KdsRealtimeServer', () => {
   it('validates numeric configuration bounds at construction', () => {
-    expect(() => new KdsRealtimeServer({ ...options(), pollIntervalMs: 1, maxLimit: 1, revalidationMs: 0 })).not.toThrow();
+    expect(() => new KdsRealtimeServer({
+      ...options(), pollIntervalMs: 1, maxLimit: 1, revalidationMs: 0, authFailureLimit: 1, authFailureWindowMs: 1,
+    })).not.toThrow();
     for (const pollIntervalMs of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new KdsRealtimeServer({ ...options(), pollIntervalMs })).toThrow(ValidationError);
     }
@@ -35,6 +37,12 @@ describe('KdsRealtimeServer', () => {
     }
     for (const revalidationMs of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new KdsRealtimeServer({ ...options(), revalidationMs })).toThrow(ValidationError);
+    }
+    for (const authFailureLimit of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new KdsRealtimeServer({ ...options(), authFailureLimit })).toThrow(ValidationError);
+    }
+    for (const authFailureWindowMs of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new KdsRealtimeServer({ ...options(), authFailureWindowMs })).toThrow(ValidationError);
     }
   });
 

@@ -188,6 +188,12 @@ export class KdsRealtimeServer {
     if (options.revalidationMs !== undefined && (!Number.isInteger(options.revalidationMs) || options.revalidationMs < 0)) {
       throw new ValidationError('revalidationMs must be a non-negative integer', 'revalidationMs');
     }
+    if (options.authFailureLimit !== undefined && (!Number.isInteger(options.authFailureLimit) || options.authFailureLimit < 1)) {
+      throw new ValidationError('authFailureLimit must be a positive integer', 'authFailureLimit');
+    }
+    if (options.authFailureWindowMs !== undefined && (!Number.isInteger(options.authFailureWindowMs) || options.authFailureWindowMs < 1)) {
+      throw new ValidationError('authFailureWindowMs must be a positive integer', 'authFailureWindowMs');
+    }
     this.options = {
       pollIntervalMs: 200,
       maxLimit: 1_000,
