@@ -258,7 +258,9 @@ describe('payment journal entries', () => {
       entries: Number((await q.query('SELECT id FROM journal_entries')).rowCount),
       lines: Number((await q.query('SELECT id FROM journal_entry_lines')).rowCount),
     }));
-    expect(own.accounts).toBe(4);
+    // 3 seeded by 0060's trigger + '1150' inserted by this test + 6 seeded by
+    // 0067 (DD-005 phase 0) = 10. The isolated tenant gets the 9 seeded ones only.
+    expect(own.accounts).toBe(10);
     expect(own.entries).toBe(3);
     expect(own.lines).toBe(6);
 
@@ -267,7 +269,7 @@ describe('payment journal entries', () => {
       entries: Number((await q.query('SELECT id FROM journal_entries')).rowCount),
       lines: Number((await q.query('SELECT id FROM journal_entry_lines')).rowCount),
     }));
-    expect(isolated).toEqual({ accounts: 3, entries: 0, lines: 0 });
+    expect(isolated).toEqual({ accounts: 9, entries: 0, lines: 0 });
   });
 
   it('posts immutable event-date reversals for voids and refunds without orphaning failed lifecycle changes', async () => {

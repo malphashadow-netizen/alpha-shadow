@@ -70,8 +70,11 @@ SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   v_purpose text;
   v_count bigint;
+  v_prev text;
 BEGIN
+  v_prev := current_setting('app.current_tenant_id', true);
   IF NOT EXISTS (SELECT 1 FROM public.tenants WHERE id = p_tenant_id) THEN
+    PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
     RAISE EXCEPTION 'cannot seed DD-005 accounts for a non-existent tenant' USING ERRCODE = '23503';
   END IF;
   PERFORM set_config('app.current_tenant_id', p_tenant_id::text, true);
@@ -98,10 +101,12 @@ BEGIN
     FROM public.accounts
     WHERE tenant_id = p_tenant_id AND system_purpose = v_purpose;
     IF v_count <> 1 THEN
+      PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
       RAISE EXCEPTION 'DD-005 account purpose % has % rows for tenant %',
         v_purpose, v_count, p_tenant_id;
     END IF;
   END LOOP;
+  PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
 END;
 $$;
 
@@ -113,9 +118,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_system_accounting_unique
 CREATE OR REPLACE FUNCTION seed_tenant_dd005_system_user(p_tenant_id uuid) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE v_count bigint;
+DECLARE
+  v_count bigint;
+  v_prev text;
 BEGIN
+  v_prev := current_setting('app.current_tenant_id', true);
   IF NOT EXISTS (SELECT 1 FROM public.tenants WHERE id = p_tenant_id) THEN
+    PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
     RAISE EXCEPTION 'cannot seed DD-005 system user for a non-existent tenant' USING ERRCODE = '23503';
   END IF;
   PERFORM set_config('app.current_tenant_id', p_tenant_id::text, true);
@@ -135,9 +144,11 @@ BEGIN
   FROM public.users
   WHERE tenant_id = p_tenant_id AND is_system_accounting_user;
   IF v_count <> 1 THEN
+    PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
     RAISE EXCEPTION 'DD-005 system accounting user has % rows for tenant %',
       v_count, p_tenant_id;
   END IF;
+  PERFORM set_config('app.current_tenant_id', coalesce(v_prev, ''), true);
 END;
 $$;
 
@@ -153,3 +164,8 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+REVOKE ALL ON FUNCTION seed_tenant_dd005_accounts(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION seed_tenant_dd005_system_user(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION log_payment_method_rate_change() FROM PUBLIC;
+REVOKE ALL ON FUNCTION seed_new_tenant_payment_accounts() FROM PUBLIC;

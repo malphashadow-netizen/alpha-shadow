@@ -67,6 +67,15 @@ describe('DD-005 exchange-rate live barriers', () => {
     ).rejects.toSatisfy((error: unknown) => sqlState(error) === '42501');
   });
 
+  it('denies PUBLIC execution of the DD-005 SECURITY DEFINER seed functions', async () => {
+    await expect(
+      appClient?.query<RateRow>('SELECT seed_tenant_dd005_accounts($1)', [TENANT]),
+    ).rejects.toSatisfy((error: unknown) => sqlState(error) === '42501');
+    await expect(
+      appClient?.query<RateRow>('SELECT seed_tenant_dd005_system_user($1)', [TENANT]),
+    ).rejects.toSatisfy((error: unknown) => sqlState(error) === '42501');
+  });
+
   it('rejects owner mutation through the append-only trigger and preserves the rate', async () => {
     await owner.query<RateRow>('SELECT set_config($1, $2, false)', [
       'app.current_tenant_id',
