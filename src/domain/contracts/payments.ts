@@ -254,6 +254,13 @@ export interface PostPaymentJournalEntryInput {
   readonly occurredAt: Date;
 }
 
+/** An immutable, full reversal of the payment's original journal entry. */
+export interface PostPaymentJournalReversalEntryInput {
+  readonly paymentId: string;
+  readonly postedByUserId: string;
+  readonly occurredAt: Date;
+}
+
 export interface InsertOrderDiscountInput {
   readonly id: string;
   readonly orderId: string;
@@ -315,6 +322,7 @@ export interface PaymentsTxScope {
   // Payment lifecycle writes.
   insertPayment(tenantId: string, payment: InsertPaymentInput): Promise<PaymentRecord>;
   postPaymentJournalEntry(tenantId: string, input: PostPaymentJournalEntryInput): Promise<void>;
+  postPaymentJournalReversalEntry(tenantId: string, input: PostPaymentJournalReversalEntryInput): Promise<void>;
   voidPayment(tenantId: string, paymentId: string, evidence: { voidedById: string; voidedAt: Date; voidReason: string }): Promise<PaymentRecord>;
   refundPayment(tenantId: string, paymentId: string): Promise<PaymentRecord>;
   setOrderPaymentStatus(tenantId: string, orderId: string, paymentStatus: OrderPaymentStatus): Promise<void>;

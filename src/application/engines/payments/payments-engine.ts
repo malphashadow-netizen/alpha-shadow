@@ -475,14 +475,24 @@ export class PaymentsEngine {
       }
       await scope.bumpShiftRevision(tenantId, lockedReversalShift.id);
 
+      // DD-004: this is the immutable financial-event time for both lifecycle
+      // paths. It is also the persisted void time, and the reversal's event
+      // date (rather than the original payment's accounting date).
+      const lifecycleOccurredAt = new Date();
       const updated =
         to === 'voided'
           ? await scope.voidPayment(tenantId, paymentId, {
               voidedById: actorUserId,
-              voidedAt: new Date(),
+              voidedAt: lifecycleOccurredAt,
               voidReason: voidReason ?? '',
             })
           : await scope.refundPayment(tenantId, paymentId);
+
+      await scope.postPaymentJournalReversalEntry(tenantId, {
+        paymentId,
+        postedByUserId: actorUserId,
+        occurredAt: lifecycleOccurredAt,
+      });
 
       await scope.appendAuditEvidence(tenantId, {
         userId: actorUserId,

@@ -128,7 +128,7 @@ describe('payment journal entries', () => {
         [methodIds.cash, methodIds.card, methodIds.bankTransfer, tenantId],
       );
 
-      for (const orderId of [randomUUID(), randomUUID(), randomUUID()]) {
+      for (const orderId of [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()]) {
         await q.query(
           `INSERT INTO orders
              (id, tenant_id, branch_id, order_type, sales_channel_code, current_status_kind_id)
@@ -187,6 +187,41 @@ describe('payment journal entries', () => {
     });
   }
 
+  async function assertReversal(paymentId: string, debitPurpose: string, amountMinor: string, expectedOccurredAt?: Date): Promise<void> {
+    await withApp(tenantId, async (q) => {
+      const entries = await q.query<{ id: string; reversal_of_journal_entry_id: string; occurred_at: Date }>(
+        `SELECT id, reversal_of_journal_entry_id, occurred_at
+           FROM journal_entries
+          WHERE tenant_id = $1 AND source_type = 'payment_reversal' AND source_id = $2`,
+        [tenantId, paymentId],
+      );
+      expect(entries.rowCount).toBe(1);
+      expect(entries.rows[0]?.reversal_of_journal_entry_id).toBeTruthy();
+      if (expectedOccurredAt !== undefined) expect(entries.rows[0]?.occurred_at.getTime()).toBe(expectedOccurredAt.getTime());
+      const lines = await q.query<{ system_purpose: string; debit_minor: string; credit_minor: string }>(
+        `SELECT a.system_purpose, l.debit_minor, l.credit_minor
+           FROM journal_entry_lines l
+           JOIN accounts a ON a.id = l.account_id AND a.tenant_id = l.tenant_id
+          WHERE l.tenant_id = $1 AND l.journal_entry_id = $2
+          ORDER BY l.line_number`,
+        [tenantId, entries.rows[0]?.id],
+      );
+      expect(lines.rows).toEqual([
+        { system_purpose: debitPurpose, debit_minor: '0', credit_minor: amountMinor },
+        { system_purpose: 'sales_revenue', debit_minor: amountMinor, credit_minor: '0' },
+      ]);
+      const net = await q.query<{ net_minor: string }>(
+        `SELECT COALESCE(sum(l.debit_minor - l.credit_minor), 0)::text AS net_minor
+           FROM journal_entries e
+           JOIN journal_entry_lines l ON l.tenant_id = e.tenant_id AND l.journal_entry_id = e.id
+          WHERE e.tenant_id = $1 AND e.source_id = $2
+            AND e.source_type IN ('payment', 'payment_reversal')`,
+        [tenantId, paymentId],
+      );
+      expect(net.rows[0]?.net_minor).toBe('0');
+    });
+  }
+
   it('posts cash, card, and data-only custom clearing purposes and deduplicates a replay', async () => {
     const [cashOrder, cardOrder, bankOrder] = await unpostedOrderIds();
     if (cashOrder === undefined || cardOrder === undefined || bankOrder === undefined) throw new Error('Missing journal test orders');
@@ -233,5 +268,54 @@ describe('payment journal entries', () => {
       lines: Number((await q.query('SELECT id FROM journal_entry_lines')).rowCount),
     }));
     expect(isolated).toEqual({ accounts: 3, entries: 0, lines: 0 });
+  });
+
+  it('posts immutable event-date reversals for voids and refunds without orphaning failed lifecycle changes', async () => {
+    const [voidOrder, refundOrder] = await unpostedOrderIds();
+    if (voidOrder === undefined || refundOrder === undefined) throw new Error('Missing reversal test orders');
+
+    const voided = await payments.recordPayment(tenantId, {
+      orderId: voidOrder, paymentMethodId: methodIds.cash, cashierUserId: cashierId,
+      amountText: '10.00', idempotencyKey: `void-${randomUUID()}`,
+    });
+    const original = await withApp(tenantId, async (q) => q.query<{ id: string; occurred_at: Date; posted_at: Date }>(
+      `SELECT id, occurred_at, posted_at FROM journal_entries
+        WHERE tenant_id = $1 AND source_type = 'payment' AND source_id = $2`,
+      [tenantId, voided.payment.id],
+    ));
+    const voidResult = await payments.voidPayment(tenantId, { userId: cashierId, tokenSecV: '1' }, {
+      paymentId: voided.payment.id, reason: 'cashier correction',
+    });
+    await assertReversal(voided.payment.id, 'cash_on_hand', '1000', voidResult.voidedAt ?? undefined);
+    const originalAfter = await withApp(tenantId, async (q) => q.query<{ id: string; occurred_at: Date; posted_at: Date }>(
+      `SELECT id, occurred_at, posted_at FROM journal_entries
+        WHERE tenant_id = $1 AND source_type = 'payment' AND source_id = $2`,
+      [tenantId, voided.payment.id],
+    ));
+    expect(originalAfter.rows).toEqual(original.rows);
+
+    const refunded = await payments.recordPayment(tenantId, {
+      orderId: refundOrder, paymentMethodId: methodIds.card, cashierUserId: cashierId,
+      amountText: '10.00', idempotencyKey: `refund-${randomUUID()}`,
+    });
+    const beforeRefund = new Date();
+    await payments.refundPayment(tenantId, { userId: cashierId, tokenSecV: '1' }, { paymentId: refunded.payment.id });
+    await assertReversal(refunded.payment.id, 'card_clearing', '1000');
+    const reversalTime = await withApp(tenantId, async (q) => q.query<{ occurred_at: Date }>(
+      `SELECT occurred_at FROM journal_entries
+        WHERE tenant_id = $1 AND source_type = 'payment_reversal' AND source_id = $2`,
+      [tenantId, refunded.payment.id],
+    ));
+    expect(reversalTime.rows[0]?.occurred_at.getTime()).toBeGreaterThanOrEqual(beforeRefund.getTime());
+
+    await expect(payments.voidPayment(tenantId, { userId: cashierId, tokenSecV: '1' }, {
+      paymentId: voided.payment.id, reason: 'repeat must fail',
+    })).rejects.toThrow();
+    const reversalCount = await withApp(tenantId, async (q) => q.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM journal_entries
+        WHERE tenant_id = $1 AND source_type = 'payment_reversal' AND source_id = $2`,
+      [tenantId, voided.payment.id],
+    ));
+    expect(reversalCount.rows[0]?.count).toBe('1');
   });
 });

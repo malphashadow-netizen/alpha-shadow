@@ -29,6 +29,7 @@ import type {
   PaymentsStore,
   PaymentsTxScope,
   PostPaymentJournalEntryInput,
+  PostPaymentJournalReversalEntryInput,
   ShiftRecord,
   UpdatePaymentMethodInput,
   UserDiscountCaps,
@@ -463,6 +464,51 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
         );
         if (existing.rows[0] === undefined) {
           throw new Error(`Payment journal accounts are missing or ambiguous for purpose '${input.debitSystemPurpose}'`);
+        }
+      }
+    },
+
+    async postPaymentJournalReversalEntry(tid, input: PostPaymentJournalReversalEntryInput): Promise<void> {
+      const result = await q.query<{ inserted: boolean }>(
+        `WITH original_entry AS (
+           SELECT id, branch_id, currency_code
+             FROM journal_entries
+            WHERE tenant_id = $1 AND source_type = 'payment' AND source_id = $2::uuid
+         ), inserted_entry AS (
+           INSERT INTO journal_entries
+             (tenant_id, branch_id, accounting_date, occurred_at, source_type,
+              source_id, currency_code, description, posted_by, posted_at,
+              reversal_of_journal_entry_id)
+           SELECT $1, o.branch_id, ($4::timestamptz AT TIME ZONE b.timezone)::date,
+                  $4::timestamptz, 'payment_reversal', $2::uuid, o.currency_code,
+                  'Payment reversal ' || $2::uuid::text, $3, $4::timestamptz, o.id
+             FROM original_entry o
+             JOIN branches b ON b.id = o.branch_id AND b.tenant_id = $1
+           ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+           RETURNING id, reversal_of_journal_entry_id
+         ), inserted_lines AS (
+           INSERT INTO journal_entry_lines
+             (tenant_id, journal_entry_id, line_number, account_id,
+              debit_minor, credit_minor, description)
+           SELECT $1, e.id, l.line_number, l.account_id,
+                  l.credit_minor, l.debit_minor, 'Reversal: ' || COALESCE(l.description, '')
+             FROM inserted_entry e
+             JOIN journal_entry_lines l
+               ON l.tenant_id = $1 AND l.journal_entry_id = e.reversal_of_journal_entry_id
+           RETURNING 1
+         )
+         SELECT EXISTS (SELECT 1 FROM inserted_entry) AS inserted`,
+        [tid, input.paymentId, input.postedByUserId, input.occurredAt],
+      );
+      if (result.rows[0] === undefined) throw new Error('Payment journal reversal insert returned no result');
+      if (!result.rows[0].inserted) {
+        const existing = await q.query<{ id: string }>(
+          `SELECT id FROM journal_entries
+            WHERE tenant_id = $1 AND source_type = 'payment_reversal' AND source_id = $2`,
+          [tid, input.paymentId],
+        );
+        if (existing.rows[0] === undefined) {
+          throw new Error(`Original payment journal entry is missing for payment ${input.paymentId}`);
         }
       }
     },

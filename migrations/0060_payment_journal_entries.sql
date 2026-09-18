@@ -147,8 +147,8 @@ ALTER TABLE payment_methods
 ALTER TABLE payment_methods
   ALTER COLUMN clearing_account_system_purpose SET DEFAULT 'card_clearing';
 
--- Posted accounting evidence is append-only. Corrections will use explicit
--- reversals after DD-004 is resolved; this phase never mutates old entries.
+-- Posted accounting evidence is append-only. DD-004 corrections use separate
+-- reversal entries and never mutate the original payment evidence.
 CREATE FUNCTION prevent_journal_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION '% is immutable accounting evidence: % is forbidden',
