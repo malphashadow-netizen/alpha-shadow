@@ -95,11 +95,28 @@ CREATE POLICY tenant_isolation ON inventory_cost_layers
 CREATE OR REPLACE FUNCTION guard_inventory_cost_ledger_currency()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
   v_currency_code text;
   v_minor_unit_digits smallint;
+  v_inventory_item_id uuid;
 BEGIN
+  -- stock_movements has no unique item-bearing key, so this trigger validates
+  -- the movement's item without requiring a migration change to that ledger.
+  SELECT inventory_item_id
+    INTO v_inventory_item_id
+    FROM stock_movements
+   WHERE id = NEW.stock_movement_id
+     AND tenant_id = NEW.tenant_id;
+
+  IF v_inventory_item_id IS NOT NULL
+     AND v_inventory_item_id IS DISTINCT FROM NEW.inventory_item_id THEN
+    RAISE EXCEPTION 'inventory_cost_ledger movement item must match ledger item: % is forbidden', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
   SELECT currency_code, minor_unit_digits
     INTO v_currency_code, v_minor_unit_digits
     FROM inventory_cost_ledger
