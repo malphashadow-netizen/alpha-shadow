@@ -103,12 +103,16 @@ describe("DD-005 cost ledger append-only barriers", () => {
       await client.query(
         `CREATE ROLE ${role} LOGIN PASSWORD '${rolePassword}'`,
       );
-      await client.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
-      const grants = readFileSync(
+      const inventoryGrants = readFileSync(
+        new URL("../../migrations/roles/010_phase9_inventory.sql", import.meta.url),
+        "utf8",
+      ).replaceAll("app_login", role);
+      await client.query(inventoryGrants);
+      const costLedgerGrants = readFileSync(
         new URL("../../migrations/roles/019_dd005_phase1.sql", import.meta.url),
         "utf8",
       ).replaceAll("app_login", role);
-      await client.query(grants);
+      await client.query(costLedgerGrants);
     } finally {
       await client.end();
     }

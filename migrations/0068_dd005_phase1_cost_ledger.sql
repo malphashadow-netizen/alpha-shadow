@@ -95,7 +95,6 @@ CREATE POLICY tenant_isolation ON inventory_cost_layers
 CREATE OR REPLACE FUNCTION guard_inventory_cost_ledger_currency()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
@@ -111,8 +110,7 @@ BEGIN
    WHERE id = NEW.stock_movement_id
      AND tenant_id = NEW.tenant_id;
 
-  IF v_inventory_item_id IS NOT NULL
-     AND v_inventory_item_id IS DISTINCT FROM NEW.inventory_item_id THEN
+  IF v_inventory_item_id IS DISTINCT FROM NEW.inventory_item_id THEN
     RAISE EXCEPTION 'inventory_cost_ledger movement item must match ledger item: % is forbidden', TG_OP
       USING ERRCODE = '42501';
   END IF;
@@ -125,7 +123,7 @@ BEGIN
    ORDER BY id DESC
    LIMIT 1;
 
-  IF v_currency_code IS NOT NULL
+  IF FOUND
      AND (v_currency_code IS DISTINCT FROM NEW.currency_code
        OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits) THEN
     RAISE EXCEPTION 'inventory_cost_ledger currency is fixed per inventory item: % is forbidden', TG_OP
@@ -135,8 +133,33 @@ BEGIN
 END;
 $$;
 
--- Layers inherit their item identity through the composite FK above, so no
--- separate currency guard is needed: their ledger is already item-bound.
+CREATE OR REPLACE FUNCTION guard_inventory_cost_layer_ledger_consistency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_original_qty numeric(18,4);
+  v_total_cost_minor bigint;
+  v_currency_code text;
+  v_minor_unit_digits smallint;
+BEGIN
+  SELECT original_qty, total_cost_minor, currency_code, minor_unit_digits
+    INTO v_original_qty, v_total_cost_minor, v_currency_code, v_minor_unit_digits
+   FROM inventory_cost_ledger
+   WHERE id = NEW.cost_ledger_id
+     AND tenant_id = NEW.tenant_id;
+
+  IF v_original_qty IS DISTINCT FROM NEW.original_qty
+     OR v_total_cost_minor IS DISTINCT FROM NEW.total_cost_minor
+     OR v_currency_code IS DISTINCT FROM NEW.currency_code
+     OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits THEN
+    RAISE EXCEPTION 'inventory_cost_layers must match ledger receipt facts: % is forbidden', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION guard_inventory_cost_ledger_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -192,6 +215,11 @@ CREATE TRIGGER trg_cost_ledger_immutable
   BEFORE UPDATE OR DELETE ON inventory_cost_ledger
   FOR EACH ROW
   EXECUTE FUNCTION guard_inventory_cost_ledger_immutable();
+DROP TRIGGER IF EXISTS trg_cost_layer_ledger_consistency ON inventory_cost_layers;
+CREATE TRIGGER trg_cost_layer_ledger_consistency
+  BEFORE INSERT ON inventory_cost_layers
+  FOR EACH ROW
+  EXECUTE FUNCTION guard_inventory_cost_layer_ledger_consistency();
 DROP TRIGGER IF EXISTS trg_cost_layer_writes ON inventory_cost_layers;
 CREATE TRIGGER trg_cost_layer_writes
   BEFORE UPDATE ON inventory_cost_layers

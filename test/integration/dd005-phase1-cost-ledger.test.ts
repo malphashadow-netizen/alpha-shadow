@@ -129,7 +129,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1, $2, $3, 1, 1, $4, 2)",
             [tenantA, f.item, f.movement, "SAR"],
           ),
-        "23503",
+        "42501",
       );
     }));
   it("rejects a second ledger row for the same stock movement", async () =>
@@ -188,7 +188,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,2,1,1,$4,2)",
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,11,5000,5000,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
         "23514",
@@ -201,7 +201,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,1,1,2,$4,2)",
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,5000,5001,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
         "23514",
@@ -214,7 +214,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,0,1,1,$4,2)",
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,0,5000,1,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
         "23514",
@@ -228,7 +228,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,1,1,1,$4,2)",
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,5000,5000,$4,2)",
             [tenantA, other.item, id, "SAR"],
           ),
         "23503",
@@ -302,6 +302,32 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       const f = await fixture(client);
       const other = await fixture(client);
       await expectCode(() => ledger(client, f.item, other.movement), "42501");
+    }));
+  it("rejects a layer whose currency differs from its ledger", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const id = await ledger(client, f.item, f.movement);
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,5000,5000,'USD',2)",
+            [tenantA, f.item, id],
+          ),
+        "42501",
+      );
+    }));
+  it("rejects a layer whose receipt quantity differs from its ledger", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const id = await ledger(client, f.item, f.movement);
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,9,9,5000,5000,'SAR',2)",
+            [tenantA, f.item, id],
+          ),
+        "42501",
+      );
     }));
   it("hides another tenant cost ledger rows under RLS", async () =>
     transaction(async (client) => {
