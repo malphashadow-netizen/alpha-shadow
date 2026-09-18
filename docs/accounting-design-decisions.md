@@ -89,8 +89,8 @@ Payment-method clearing-account selection is fully data-driven through
 country-specific clearing purpose therefore requires account and
 payment-method data, not another payment-posting code branch.
 
-DD-004 and DD-005 remain **مؤجل** exactly as documented below; this decision
-does not define Void/Refund reversals or inventory valuation/COGS.
+DD-004 is implemented by migration 0066 with immutable event-date reversal
+journal entries. DD-005 remains **مؤجل** except for its phase-0 foundation.
 
 ### Status
 
@@ -182,8 +182,9 @@ must not use floating-point numbers.
 
 ### Status
 
-**مؤجل.** Neither the Void/Refund posting method nor the accounting-date policy
-has been approved.
+**محسوم ومطبّق.** Migration 0066 records one immutable reversal journal entry
+per original entry on the Void/Refund event date; it preserves the original entry
+and uses a tenant-safe reversal link.
 
 ### What future implementation must not assume
 

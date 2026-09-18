@@ -1,0 +1,6 @@
+-- DD-005 needs no new grants on accounts.
+-- 0060 ends with REVOKE ALL ON FUNCTION seed_tenant_payment_accounts(uuid)
+-- FROM PUBLIC; yet tenant creation works on main today — therefore the role
+-- executing INSERT INTO tenants already holds EXECUTE as schema owner. The
+-- DD-005 seed functions sit in the exact same position, so no new grant is
+-- required.
