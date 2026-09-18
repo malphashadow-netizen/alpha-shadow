@@ -7,6 +7,18 @@ silently.
 
 ## Security gaps — tenant isolation layer
 
+### DD-005 phase 0
+The DD-005 SECURITY DEFINER seed functions restore
+`app.current_tenant_id` to `''` when no previous context existed. A later RLS
+access therefore fails closed with `22P02` (empty text cast to `uuid`) rather
+than the unset-setting `42704`; future code must not use either error code to
+distinguish “no context” from “wrong context”. Every tenant now also has a real
+disabled `users` row with `is_system_accounting_user = true`; staff-list and
+user-count queries must explicitly exclude that flag, never a magic email
+address. Finally, `REVOKE ALL ON FUNCTION` on a trigger function does not stop
+the trigger firing: PostgreSQL checks EXECUTE when `CREATE TRIGGER` runs, not
+when it fires. Migration 0060 uses the same revoke-at-end pattern.
+
 ### Rate limiting (IMPLEMENTED for authentication — Phase 3)
 `RateLimitError` (`rate_limit.exceeded`, → 429) is now enforced on the
 authentication path. Two INDEPENDENT sliding-window limiters run per login /

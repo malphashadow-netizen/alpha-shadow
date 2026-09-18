@@ -5,7 +5,8 @@ This is the first document to read before continuing DD-005 work.
 ## Preflight (read-only)
 
 Run this query before a production migration. It reports code-purpose conflicts,
-branch currencies missing from the registry, and duplicate account purposes.
+purposes assigned to unexpected codes, branch currencies missing from the
+registry, and duplicate account purposes.
 
 ```sql
 WITH expected(code, purpose) AS (
@@ -21,6 +22,11 @@ SELECT 'code_purpose_conflict' AS issue, a.tenant_id, a.code, a.system_purpose
 FROM accounts a
 JOIN expected e ON e.code = a.code
 WHERE a.system_purpose IS DISTINCT FROM e.purpose
+UNION ALL
+SELECT 'purpose_on_unexpected_code', a.tenant_id, a.code, a.system_purpose
+FROM accounts a
+JOIN expected e ON e.purpose = a.system_purpose
+WHERE a.code IS DISTINCT FROM e.code
 UNION ALL
 SELECT 'unknown_branch_currency', b.tenant_id, b.base_currency, NULL
 FROM branches b
@@ -38,7 +44,9 @@ HAVING count(*) > 1;
 
 1. **Phase 0 — foundation: complete.** Migration 0067 seeds account purposes,
    creates one disabled system accounting user per tenant, adds rate provenance,
-   and installs the branch currency foreign key.
+   installs the branch currency foreign key, and revokes PUBLIC execution from
+   its seed functions; `test/contract/dd005-exchange-rate-barriers.test.ts`
+   proves the live SQLSTATE `42501` denial.
 2. **Phase 1 — purchase evidence: pending.** Define immutable receiving and
    supplier-cost facts; do not infer cost from quantity movements.
 3. **Phase 2 — valuation policy: pending.** Approve FIFO or weighted-average
