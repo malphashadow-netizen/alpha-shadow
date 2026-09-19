@@ -98,14 +98,15 @@ LANGUAGE plpgsql
 SET search_path = public
 AS $$
 DECLARE
-  v_currency_code text;
+  v_base_currency_code text;
   v_minor_unit_digits smallint;
   v_inventory_item_id uuid;
+  v_quantity_delta numeric(18,4);
 BEGIN
   -- stock_movements has no unique item-bearing key, so this trigger validates
   -- the movement's item without requiring a migration change to that ledger.
-  SELECT inventory_item_id
-    INTO v_inventory_item_id
+  SELECT inventory_item_id, quantity_delta
+    INTO v_inventory_item_id, v_quantity_delta
     FROM stock_movements
    WHERE id = NEW.stock_movement_id
      AND tenant_id = NEW.tenant_id;
@@ -115,18 +116,43 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  SELECT currency_code, minor_unit_digits
-    INTO v_currency_code, v_minor_unit_digits
-    FROM inventory_cost_ledger
-   WHERE tenant_id = NEW.tenant_id
-     AND inventory_item_id = NEW.inventory_item_id
-   ORDER BY id DESC
-   LIMIT 1;
+  IF v_quantity_delta = 0 THEN
+    RAISE EXCEPTION 'inventory_cost_ledger zero quantity movement is forbidden: %', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
 
-  IF FOUND
-     AND (v_currency_code IS DISTINCT FROM NEW.currency_code
-       OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits) THEN
-    RAISE EXCEPTION 'inventory_cost_ledger currency is fixed per inventory item: % is forbidden', TG_OP
+  IF NEW.original_qty IS DISTINCT FROM abs(v_quantity_delta) THEN
+    RAISE EXCEPTION 'inventory_cost_ledger original_qty must match stock movement quantity: %', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- A negative movement is a provisional shortage-sale layer (phase 2).
+  -- A positive movement is a real receipt.
+  IF v_quantity_delta > 0 AND NEW.is_provisional = true THEN
+    RAISE EXCEPTION 'inventory_cost_ledger positive movement cannot be provisional: %', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF v_quantity_delta < 0 AND NEW.is_provisional = false THEN
+    RAISE EXCEPTION 'inventory_cost_ledger negative movement must be provisional: %', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT b.base_currency, c.minor_unit_digits
+    INTO v_base_currency_code, v_minor_unit_digits
+    FROM inventory_items i
+    JOIN branches b
+      ON b.id = i.branch_id
+     AND b.tenant_id = i.tenant_id
+    JOIN currencies c
+      ON c.code = b.base_currency
+   WHERE i.id = NEW.inventory_item_id
+     AND i.tenant_id = NEW.tenant_id;
+
+  IF v_base_currency_code IS NULL
+     OR v_base_currency_code IS DISTINCT FROM NEW.currency_code
+     OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits THEN
+    RAISE EXCEPTION 'inventory_cost_ledger currency must match branch base currency: % is forbidden', TG_OP
       USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
@@ -143,9 +169,17 @@ DECLARE
   v_total_cost_minor bigint;
   v_currency_code text;
   v_minor_unit_digits smallint;
+  v_is_provisional boolean;
 BEGIN
-  SELECT original_qty, total_cost_minor, currency_code, minor_unit_digits
-    INTO v_original_qty, v_total_cost_minor, v_currency_code, v_minor_unit_digits
+  -- Consumption goes through the allocation path alone (the decrementing UPDATE).
+  IF NEW.remaining_qty IS DISTINCT FROM NEW.original_qty
+     OR NEW.remaining_cost_minor IS DISTINCT FROM NEW.total_cost_minor THEN
+    RAISE EXCEPTION 'inventory_cost_layers layer must be created unconsumed: % is forbidden', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT original_qty, total_cost_minor, currency_code, minor_unit_digits, is_provisional
+    INTO v_original_qty, v_total_cost_minor, v_currency_code, v_minor_unit_digits, v_is_provisional
    FROM inventory_cost_ledger
    WHERE id = NEW.cost_ledger_id
      AND tenant_id = NEW.tenant_id;
@@ -153,8 +187,9 @@ BEGIN
   IF v_original_qty IS DISTINCT FROM NEW.original_qty
      OR v_total_cost_minor IS DISTINCT FROM NEW.total_cost_minor
      OR v_currency_code IS DISTINCT FROM NEW.currency_code
-     OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits THEN
-    RAISE EXCEPTION 'inventory_cost_layers must match ledger receipt facts: % is forbidden', TG_OP
+     OR v_minor_unit_digits IS DISTINCT FROM NEW.minor_unit_digits
+     OR v_is_provisional IS DISTINCT FROM NEW.is_provisional THEN
+    RAISE EXCEPTION 'inventory_cost_layers must match ledger receipt facts including is_provisional: % is forbidden', TG_OP
       USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
@@ -164,6 +199,7 @@ $$;
 CREATE OR REPLACE FUNCTION guard_inventory_cost_ledger_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
   RAISE EXCEPTION 'inventory_cost_ledger is append-only: % is forbidden', TG_OP

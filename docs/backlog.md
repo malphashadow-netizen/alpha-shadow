@@ -304,8 +304,9 @@ should truncate the decoded bytes (or assert `parsePasswordHash(...) === null`)
 instead of assuming a 4-character cut is always malformed. Fix belongs to the
 auth phase owner — deliberately not touched by the Phase 4b branch.
 
-`test/integration/phase5-catalog.test.ts` يفشل مسبقًا بالخطأ `permission denied for table role_permissions`.
-هذا يمنع خضرة مشروع integration كاملًا، ولا يتعلق بتغييرات DD-005.
+### فشل تكامل سابق خارج DD-005
+`test/integration/phase5-catalog.test.ts` بيفشل بـ "permission denied for table role_permissions" — فشل سابق لـDD-005 وغير ناتج عنه.
+الفرضية إن app_login ناقصه GRANT على role_permissions في ملفات roles/، وده تاسك منفصل خارج DD-005 وممنوع إصلاحه هنا.
 
 ### Payments idempotency fake transaction order (test fixture corrected)
 `test/unit/application/payments/payments-idempotency.test.ts` previously had

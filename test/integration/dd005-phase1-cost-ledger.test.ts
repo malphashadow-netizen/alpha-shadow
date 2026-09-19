@@ -61,7 +61,7 @@ async function fixture(client: pg.Client, tenant = tenantA): Promise<Fixture> {
     [role, tenant, role],
   );
   await client.query(
-    "INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, 'inventory:receive')",
+    "INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, 'inventory:receive'), ($1, $2, 'inventory:adjust')",
     [tenant, role],
   );
   await client.query(
@@ -90,15 +90,25 @@ async function ledger(
   return Number(result.rows[0]?.id);
 }
 
+function isDatabaseError(
+  error: unknown,
+): error is { code?: string; message?: string } {
+  return typeof error === "object" && error !== null && "code" in error;
+}
+
 async function expectCode(
   work: () => Promise<unknown>,
   code: string,
+  message?: string,
 ): Promise<void> {
   try {
     await work();
     throw new Error("expected database rejection");
   } catch (error: unknown) {
-    expect((error as { code?: string }).code).toBe(code);
+    expect(isDatabaseError(error)).toBe(true);
+    if (!isDatabaseError(error)) return;
+    expect(error.code).toBe(code);
+    if (message !== undefined) expect(error.message).toContain(message);
   }
 }
 
@@ -157,16 +167,17 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       const f = await fixture(client);
       await expectCode(() => ledger(client, f.item, f.movement, 0), "23514");
     }));
-  it("rejects original_qty of zero", async () =>
+  it("rejects a ledger row whose original_qty does not match the stock movement", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,1,0,$4,2)",
+            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,1,7,$4,2)",
             [tenantA, f.item, f.movement, "SAR"],
           ),
-        "23514",
+        "42501",
+        "original_qty",
       );
     }));
   it("rejects minor_unit_digits above four", async () =>
@@ -178,7 +189,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,1,1,$4,5)",
             [tenantA, f.item, f.movement, "SAR"],
           ),
-        "23514",
+        "42501",
       );
     }));
   it("rejects a layer whose remaining_qty exceeds original_qty", async () =>
@@ -191,7 +202,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,11,5000,5000,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
-        "23514",
+        "42501",
       );
     }));
   it("rejects a layer whose remaining_cost_minor exceeds total_cost_minor", async () =>
@@ -204,7 +215,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,5000,5001,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
-        "23514",
+        "42501",
       );
     }));
   it("rejects a fully consumed layer that still carries remaining cost", async () =>
@@ -217,7 +228,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,0,5000,1,$4,2)",
             [tenantA, f.item, id, "SAR"],
           ),
-        "23514",
+        "42501",
       );
     }));
   it("rejects a layer pointing at a ledger row for a different inventory item", async () =>
@@ -234,7 +245,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "23503",
       );
     }));
-  it("rejects a ledger row whose currency differs from an earlier row of the same item", async () =>
+  it("rejects a ledger row whose currency differs from the branch base currency", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       await ledger(client, f.item, f.movement);
@@ -249,8 +260,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         await ledger(client, f.item, laterMovement, 1, "USD");
         throw new Error("expected currency rejection");
       } catch (error: unknown) {
-        expect((error as { code?: string }).code).toBe("42501");
-        expect((error as Error).message).toContain("currency");
+        expect(isDatabaseError(error)).toBe(true);
+        if (!isDatabaseError(error)) return;
+        expect(error.code).toBe("42501");
+        expect(error.message).toContain("branch base currency");
       }
     }));
   it("defaults is_provisional to false on a plain receipt row", async () =>
@@ -342,6 +355,77 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "42501",
       );
     }));
+  it("rejects a layer created already partially consumed", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const id = await ledger(client, f.item, f.movement);
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,3,5000,5000,'SAR',2)",
+            [tenantA, f.item, id],
+          ),
+        "42501",
+        "unconsumed",
+      );
+    }));
+  it("rejects a layer whose is_provisional differs from its ledger", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const id = await ledger(client, f.item, f.movement);
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,10,10,5000,5000,'SAR',2,true)",
+            [tenantA, f.item, id],
+          ),
+        "42501",
+        "is_provisional",
+      );
+    }));
+  // The guard checks quantity_delta's sign, so negative manual_adjustment covers sale_deduction's phase-2 path.
+  it("rejects a non-provisional ledger row on a negative stock movement", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const negative = randomUUID();
+      const reason = randomUUID();
+      await client.query(
+        "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
+        [reason, tenantA, reason],
+      );
+      await client.query(
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
+        [negative, tenantA, f.branch, f.item, f.user, reason],
+      );
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,5000,10,'SAR',2,false)",
+            [tenantA, f.item, negative],
+          ),
+        "42501",
+        "provisional",
+      );
+    }));
+  it("accepts a provisional ledger row on a negative stock movement", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const negative = randomUUID();
+      const reason = randomUUID();
+      await client.query(
+        "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
+        [reason, tenantA, reason],
+      );
+      await client.query(
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
+        [negative, tenantA, f.branch, f.item, f.user, reason],
+      );
+      const result = await client.query(
+        "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,5000,10,'SAR',2,true)",
+        [tenantA, f.item, negative],
+      );
+      expect(result.rowCount).toBe(1);
+    }));
   it("hides another tenant cost ledger rows under RLS", async () =>
     transaction(async (client) => {
       const a = await fixture(client);
@@ -352,7 +436,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         tenantB,
       ]);
       await client.query(
-        "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,1,$4,2)",
+        "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,10,$4,2)",
         [tenantB, b.item, b.movement, "SAR"],
       );
       const reader = `dd005_rls_${randomUUID().replaceAll("-", "")}`;

@@ -103,6 +103,19 @@ describe("DD-005 cost ledger append-only barriers", () => {
       await client.query(
         `CREATE ROLE ${role} LOGIN PASSWORD '${rolePassword}'`,
       );
+      const appLoginGrants = readFileSync(
+        new URL("../../migrations/roles/001_app_login.sql", import.meta.url),
+        "utf8",
+      ).replaceAll("app_login", role);
+      await client.query(appLoginGrants);
+      const currencyGrants = readFileSync(
+        new URL(
+          "../../migrations/roles/004_app_login_phase4.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ).replaceAll("app_login", role);
+      await client.query(currencyGrants);
       const inventoryGrants = readFileSync(
         new URL("../../migrations/roles/010_phase9_inventory.sql", import.meta.url),
         "utf8",
@@ -241,7 +254,7 @@ describe("DD-005 cost ledger append-only barriers", () => {
         ]);
         await client.query("SELECT * FROM inventory_cost_ledger");
         const inserted = await client.query(
-          "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits) VALUES ($1,$2,$3,1,1,$4,2)",
+          "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits) VALUES ($1,$2,$3,100,10,$4,2)",
           [tenant, f.item, movement, "SAR"],
         );
         expect(inserted.rowCount).toBe(1);
