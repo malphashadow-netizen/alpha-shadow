@@ -210,6 +210,7 @@ $$;
 CREATE OR REPLACE FUNCTION guard_inventory_cost_layer_writes()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
   IF NEW.id IS DISTINCT FROM OLD.id
@@ -235,6 +236,7 @@ $$;
 CREATE OR REPLACE FUNCTION guard_inventory_cost_layer_delete()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
   RAISE EXCEPTION 'inventory_cost_layers is append-only: % is forbidden', TG_OP

@@ -180,32 +180,38 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "original_qty",
       );
     }));
-  it("rejects minor_unit_digits above four", async () =>
+  it("rejects minor_unit_digits that disagree with the branch base currency", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,1,1,$4,5)",
+            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,1,10,$4,5)",
             [tenantA, f.item, f.movement, "SAR"],
           ),
         "42501",
+        "branch base currency",
       );
     }));
-  it("rejects a layer whose remaining_qty exceeds original_qty", async () =>
+  it("rejects an allocation update that empties quantity while cost remains", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       const id = await ledger(client, f.item, f.movement);
+      await client.query(
+        "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,5000,5000,$4,2)",
+        [tenantA, f.item, id, "SAR"],
+      );
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,11,5000,5000,$4,2)",
-            [tenantA, f.item, id, "SAR"],
+            "UPDATE inventory_cost_layers SET remaining_qty = 0 WHERE cost_ledger_id = $1",
+            [id],
           ),
-        "42501",
+        "23514",
+        "no_orphan_cost",
       );
     }));
-  it("rejects a layer whose remaining_cost_minor exceeds total_cost_minor", async () =>
+  it("rejects a layer born with remaining_cost_minor above total_cost_minor", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       const id = await ledger(client, f.item, f.movement);
@@ -216,9 +222,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             [tenantA, f.item, id, "SAR"],
           ),
         "42501",
+        "unconsumed",
       );
     }));
-  it("rejects a fully consumed layer that still carries remaining cost", async () =>
+  it("rejects a layer born fully consumed", async () =>
     transaction(async (client) => {
       const f = await fixture(client);
       const id = await ledger(client, f.item, f.movement);
@@ -229,6 +236,7 @@ describe("DD-005 phase 1 cost ledger structure", () => {
             [tenantA, f.item, id, "SAR"],
           ),
         "42501",
+        "unconsumed",
       );
     }));
   it("rejects a layer pointing at a ledger row for a different inventory item", async () =>
