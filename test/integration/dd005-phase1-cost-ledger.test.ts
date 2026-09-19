@@ -329,6 +329,19 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "42501",
       );
     }));
+  it("rejects a layer whose total_cost_minor differs from its ledger", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const id = await ledger(client, f.item, f.movement);
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits) VALUES ($1,$2,$3,10,10,4000,4000,'SAR',2)",
+            [tenantA, f.item, id],
+          ),
+        "42501",
+      );
+    }));
   it("hides another tenant cost ledger rows under RLS", async () =>
     transaction(async (client) => {
       const a = await fixture(client);

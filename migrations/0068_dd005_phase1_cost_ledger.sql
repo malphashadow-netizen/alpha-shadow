@@ -136,6 +136,7 @@ $$;
 CREATE OR REPLACE FUNCTION guard_inventory_cost_layer_ledger_consistency()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 DECLARE
   v_original_qty numeric(18,4);
