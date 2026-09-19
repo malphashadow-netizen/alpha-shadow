@@ -121,8 +121,17 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  IF NEW.original_qty IS DISTINCT FROM abs(v_quantity_delta) THEN
+  -- A receipt is costed in full: the layer IS the movement.
+  IF v_quantity_delta > 0 AND NEW.original_qty IS DISTINCT FROM v_quantity_delta THEN
     RAISE EXCEPTION 'inventory_cost_ledger original_qty must match stock movement quantity: %', TG_OP
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- A negative movement is a sale into shortage. Only the SHORTFALL becomes a
+  -- provisional layer; the covered part is consumed from existing real layers.
+  -- The shortfall can never exceed the deduction itself.
+  IF v_quantity_delta < 0 AND NEW.original_qty > abs(v_quantity_delta) THEN
+    RAISE EXCEPTION 'inventory_cost_ledger provisional original_qty cannot exceed the stock movement quantity: %', TG_OP
       USING ERRCODE = '42501';
   END IF;
 

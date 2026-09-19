@@ -267,6 +267,15 @@ describe("DD-005 cost ledger append-only barriers", () => {
           () => client.query("DELETE FROM inventory_cost_ledger"),
           "42501",
         );
+        await rejected(
+          () => client.query("UPDATE inventory_cost_layers SET total_cost_minor = 1"),
+          "42501",
+        );
+        const allocated = await client.query(
+          "UPDATE inventory_cost_layers SET remaining_qty = 0, remaining_cost_minor = 0 WHERE id = $1",
+          [f.layer],
+        );
+        expect(allocated.rowCount).toBe(1);
       } finally {
         await client.end();
       }

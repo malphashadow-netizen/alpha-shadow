@@ -136,10 +136,11 @@ describe("DD-005 phase 1 cost ledger structure", () => {
       await expectCode(
         () =>
           client.query(
-            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1, $2, $3, 1, 1, $4, 2)",
+            "INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1, $2, $3, 1, 10, $4, 2)",
             [tenantA, f.item, f.movement, "SAR"],
-          ),
+        ),
         "42501",
+        "movement item must match",
       );
     }));
   it("rejects a second ledger row for the same stock movement", async () =>
@@ -433,6 +434,48 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         [tenantA, f.item, negative],
       );
       expect(result.rowCount).toBe(1);
+    }));
+  it("accepts a provisional layer for part of a negative stock movement", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const negative = randomUUID();
+      const reason = randomUUID();
+      await client.query(
+        "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
+        [reason, tenantA, reason],
+      );
+      await client.query(
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
+        [negative, tenantA, f.branch, f.item, f.user, reason],
+      );
+      const result = await client.query(
+        "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,2500,5,'SAR',2,true)",
+        [tenantA, f.item, negative],
+      );
+      expect(result.rowCount).toBe(1);
+    }));
+  it("rejects a provisional layer larger than its negative stock movement", async () =>
+    transaction(async (client) => {
+      const f = await fixture(client);
+      const negative = randomUUID();
+      const reason = randomUUID();
+      await client.query(
+        "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
+        [reason, tenantA, reason],
+      );
+      await client.query(
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
+        [negative, tenantA, f.branch, f.item, f.user, reason],
+      );
+      await expectCode(
+        () =>
+          client.query(
+            "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,2500,11,'SAR',2,true)",
+            [tenantA, f.item, negative],
+          ),
+        "42501",
+        "cannot exceed",
+      );
     }));
   it("hides another tenant cost ledger rows under RLS", async () =>
     transaction(async (client) => {
