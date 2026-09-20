@@ -74,7 +74,10 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
       await owner.query('GRANT SELECT ON tenants, currencies, permissions_registry TO app_login');
       // B7: the catalog actor + its role/grant/assignment rows (check reads,
       // grantKeys writes; no UPDATE/DELETE needed).
-      await owner.query('GRANT SELECT, INSERT ON users, roles, role_permissions, user_roles TO app_login');
+      await owner.query('GRANT SELECT, INSERT ON users, roles, user_roles TO app_login');
+      // assignRolePermission uses ON CONFLICT DO UPDATE, so PostgreSQL requires
+      // UPDATE even when this invocation inserts a fresh role-permission row.
+      await owner.query('GRANT SELECT, INSERT, UPDATE ON role_permissions TO app_login');
       await owner.query('GRANT SELECT, INSERT, UPDATE, DELETE ON branches TO app_login');
       await owner.query(
         `GRANT SELECT, INSERT, UPDATE, DELETE ON
