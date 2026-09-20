@@ -353,6 +353,7 @@ export class OrderCreationEngine {
             });
           }
         }
+        await scope.postInventoryConsumption(tenantId, { orderId, branchId: input.branchId, postedByUserId: input.cashierUserId, occurredAt });
       }
 
       const order = await scope.loadOrder(tenantId, orderId);
