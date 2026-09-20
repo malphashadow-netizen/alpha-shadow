@@ -456,11 +456,10 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
     await addMenuRecipe(itemMeal, flour, '0.5000');
-    const occurredAt = new Date();
 
     const created = await placeOrder(till.cashier.userId, till, [
       { menuItemId: itemMeal, quantity: 3 },
-    ], { occurredAt });
+    ]);
 
     expect(await stockOf(flour)).toBe('3.5000');
     const movements = await movementsFor(created.order.id);
@@ -472,7 +471,26 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(movement.order_item_id).toBe(created.items[0]?.item.id);
     expect(movement.actor_user_id).toBe(till.cashier.userId);
     expect(movement.manager_override_id).toBeNull();
-    expect(movement.occurred_at.getTime()).toBe(occurredAt.getTime());
+    expect(movement.occurred_at.getTime()).toBe(created.order.placedAt.getTime());
+  });
+
+  it('ignores caller-supplied order occurredAt and stamps stock movements with the server-generated order clock', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+    const callerOccurredAt = new Date('2000-01-01T00:00:00.000Z');
+
+    const before = Date.now();
+    const created = await placeOrder(till.cashier.userId, till, [
+      { menuItemId: itemMeal, quantity: 1 },
+    ], { occurredAt: callerOccurredAt });
+    const after = Date.now();
+
+    const movement = row([...(await movementsFor(created.order.id))]);
+    expect(created.order.placedAt.getTime()).not.toBe(callerOccurredAt.getTime());
+    expect(created.order.placedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(created.order.placedAt.getTime()).toBeLessThanOrEqual(after);
+    expect(movement.occurred_at.getTime()).toBe(created.order.placedAt.getTime());
   });
 
   // ── Case 2: manager override → negative ──────────────────────────────────
