@@ -121,6 +121,7 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
     insertPaymentMethod: async () => unused('insertPaymentMethod'),
     updatePaymentMethod: async () => unused('updatePaymentMethod'),
     insertStockMovement: async () => unused('insertStockMovement'),
+    postInventoryRestoration: async () => unused('postInventoryRestoration'),
     loadNonVoidedOrderItemIds: async () => unused('loadNonVoidedOrderItemIds'),
     loadSaleDeductionsForOrderItems: async () => unused('loadSaleDeductionsForOrderItems'),
     loadWasteRefundKeys: async () => unused('loadWasteRefundKeys'),

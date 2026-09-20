@@ -122,10 +122,11 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
         // pattern phase 6 followed for the order_line_tax_* tables).
         // Phase 9 note: stock_movements, menu_item_recipes and modifier_recipes
         // appended for the same reason (FKs to order_items/menu_items/modifiers).
-        // DD-005 note: consumption_allocations references inventory_cost_layers,
+        // DD-005 note: restoration_allocations references consumption_allocations,
+        // which references inventory_cost_layers,
         // which references inventory_cost_ledger and then stock_movements; all
         // must be truncated in the same statement without CASCADE.
-        `TRUNCATE consumption_allocations, inventory_cost_layers, inventory_cost_ledger, stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
+        `TRUNCATE restoration_allocations, consumption_allocations, inventory_cost_layers, inventory_cost_ledger, stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
       );
       await owner.query('DELETE FROM branches WHERE id = ANY($1::uuid[])', [[BRANCH_A1, BRANCH_A2, BRANCH_B1]]);
     } finally {

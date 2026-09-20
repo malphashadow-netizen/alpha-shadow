@@ -49,6 +49,7 @@ function makeFullScope(overrides: Partial<PaymentsTxScope>): PaymentsTxScope {
     loadWasteRefundKeys: async () => unexpectedCall('loadWasteRefundKeys'),
     loadItemsWithKitchenTicketFired: async () => unexpectedCall('loadItemsWithKitchenTicketFired'),
     insertStockMovement: async () => unexpectedCall('insertStockMovement'),
+    postInventoryRestoration: async () => unexpectedCall('postInventoryRestoration'),
   };
   return { ...base, ...overrides };
 }

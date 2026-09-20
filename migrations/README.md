@@ -291,3 +291,15 @@ stable prefix — the orders store maps it to `InsufficientStockError`).
 
 Run `roles/010_phase9_inventory.sql` separately with DBA authority after 0040
 (same manual provisioning contract as `roles/006`–`roles/009`).
+
+## DD-005 inventory costing: 0067–0071
+
+| Migration | Purpose |
+| --- | --- |
+| 0067 | DD-005 accounting foundation and tenant account seeding |
+| 0068 | Immutable inventory cost ledger and FIFO layers |
+| 0069 | Costed receiving integration |
+| 0070 | FIFO consumption allocations and immediate Cost of Goods in Process posting |
+| 0071 | Immutable restoration allocations, FIFO layer restoration, and movement-scoped restoration/waste journal posting |
+
+Run `roles/021_dd005_phase3.sql` separately with DBA authority after 0071.

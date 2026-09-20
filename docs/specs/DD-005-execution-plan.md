@@ -147,11 +147,11 @@ HAVING count(*) > 1;
 
 ## 5. المرحلة الثالثة — الـVoid والـRefund
 
-حالتان محاسبيتان مختلفتان: الـvoid حصراً قبل الدفع فلا قيد مُرحّل يُعكس، والـrefund بعد الدفع فالعكس مطلوب. `writeRefundStockMovements` مُنفَّذ في `payments-engine.ts` ويُنادى عند `to === 'refunded'`، وهيدر `void-modification-engine.ts` الذي يقول "payments engine is a future phase" **نص بائت يُصحَّح في نفس الكوميت**. `[أعد التحقق]`
+معيار العكس هو وجود تخصيص تكلفة مُرحّل، لا حالة الدفع: المرحلة الثانية ترحّل Cost of Goods in Process فور `sale_deduction`. لذلك `void_restoration` يعكس Inventory Asset / Cost of Goods in Process، سواء كتبته عملية void لخط ملغى أو refund لخط حي، بينما `waste_void` يعيد التصنيف إلى Waste Expense بلا إعادة الطبقة. `[مؤكد — 0070، 0071]`
 
 `void_restoration` يكتب تخصيصات **سالبة جديدة** تشير إلى نفس الطبقات الأصلية — append-only محفوظ والإسقاط قابل لإعادة البناء.
 
-**تحذير جوهري:** `loadWasteRefundKeys` يفلتر `movement_type IN ('waste_refund','void_restoration')` — أي أن `void_restoration` يُكتب من مسارين مختلفين محاسبياً. **عكس التكلفة يجب أن يفرّق بحالة الخط (`is_voided`) لا بنوع الحركة وحده**، وإلا ستعكس مرتين أو تتخطّاها. `[أعد التحقق]`
+**تحذير جوهري:** `loadWasteRefundKeys` يفلتر `movement_type IN ('waste_refund','void_restoration')` — أي أن `void_restoration` يُكتب من مسارين. التنفيذ يثبت `disposition` من حالة الخط الفعلية (`is_voided`) ويمنع معالجة أي `original_consumption_allocation_id` مرتين عبر كل الحركات. `[مؤكد — 0071]`
 
 `waste_void` مدين Waste Expense ودائن Cost of Goods in Process — حساب منفصل لا COGS، لسبب تجاري: أهم رقمين لصاحب مطعم هما نسبة تكلفة الطعام ونسبة الهالك، ودمجهما يحرمك أقوى ميزة تحليلية، وإعادة تصنيف قيود مُرحّلة لاحقاً مشروع مؤلم.
 

@@ -104,6 +104,7 @@ function fakeScope(overrides: {
     loadInventoryItems: async () => unused('loadInventoryItems'),
     insertStockMovement: async () => unused('insertStockMovement'),
     postInventoryConsumption: async () => unused('postInventoryConsumption'),
+    postInventoryRestoration: async () => unused('postInventoryRestoration'),
     insertStockOverrideClaim: async () => unused('insertStockOverrideClaim'),
     loadSaleDeductionsForOrderItems: async () => unused('loadSaleDeductionsForOrderItems'),
     loadItemsWithKitchenTicketFired: async () => unused('loadItemsWithKitchenTicketFired'),

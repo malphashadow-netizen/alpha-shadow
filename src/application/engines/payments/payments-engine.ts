@@ -553,7 +553,7 @@ export class PaymentsEngine {
     for (const deduction of deductions) {
       if (recorded.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
       const restores = !fired.has(deduction.orderItemId);
-      await scope.insertStockMovement(tenantId, {
+      const movement = await scope.insertStockMovement(tenantId, {
         branchId,
         inventoryItemId: deduction.inventoryItemId,
         movementType: restores ? 'void_restoration' : 'waste_refund',
@@ -567,6 +567,13 @@ export class PaymentsEngine {
         adjustmentReasonId: null,
         occurredAt,
       });
+      if (movement.movementType === 'void_restoration') {
+        await scope.postInventoryRestoration(tenantId, {
+          stockMovementId: movement.id,
+          postedByUserId: actorUserId,
+          occurredAt,
+        });
+      }
     }
   }
 }

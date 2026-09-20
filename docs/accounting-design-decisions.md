@@ -271,8 +271,10 @@ arithmetic and money arithmetic must not be mixed implicitly.
 
 ### Status
 
-**مؤجل.** No inventory valuation method, scope, transition rule, or COGS
-recognition policy has been approved.
+**FIFO معتمد وقيد التنفيذ المرحلي.** Migrations 0067–0071 implement the
+accounting foundation, receipt layers, sale-consumption allocations and WIP
+posting, and immutable void/refund restoration or void-waste reclassification.
+Later DD-005 phases remain outside this decision's implemented scope.
 
 ### What future implementation must not assume
 

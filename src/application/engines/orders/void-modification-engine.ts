@@ -12,8 +12,8 @@
  *       approving manager must personally hold order:void:manager and the
  *       challenge timestamp is stored as override_authenticated_at evidence;
  *   (c) an 'open' payment status — a paid/refund_pending/refunded order is
- *       ALWAYS refused with PaymentReversalRequiredError (payments engine is
- *       a future phase; fail-closed, never an implicit allow);
+ *       ALWAYS refused with PaymentReversalRequiredError; payment lifecycle
+ *       changes are handled by the payments engine, never implicitly here;
  *   (d) the optional tenant void time limit (from the ITEM's created_at, not
  *       the order's placed_at) — after it, even a full-permission void is
  *       refused.
@@ -289,7 +289,7 @@ export class VoidModificationEngine {
     for (const deduction of deductions) {
       if (restored.has(`${deduction.orderItemId}:${deduction.inventoryItemId}`)) continue;
       const restores = !fired.has(deduction.orderItemId);
-      await scope.insertStockMovement(tenantId, {
+      const movement = await scope.insertStockMovement(tenantId, {
         branchId: order.branchId,
         inventoryItemId: deduction.inventoryItemId,
         movementType: restores ? 'void_restoration' : 'waste_void',
@@ -301,6 +301,11 @@ export class VoidModificationEngine {
         actorUserId,
         managerOverrideId: null,
         adjustmentReasonId: null,
+        occurredAt,
+      });
+      await scope.postInventoryRestoration(tenantId, {
+        stockMovementId: movement.id,
+        postedByUserId: actorUserId,
         occurredAt,
       });
     }

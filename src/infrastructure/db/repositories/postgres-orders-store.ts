@@ -785,6 +785,10 @@ function buildScope(q: TenantQuery, tax: PostgresTaxResolutionTransaction, _tena
       await q.query('SELECT post_inventory_consumption($1, $2, $3, $4, $5)', [tid, input.orderId, input.branchId, input.postedByUserId, input.occurredAt]);
     },
 
+    async postInventoryRestoration(tid, input): Promise<void> {
+      await q.query('SELECT post_inventory_restoration($1, $2, $3, $4)', [tid, input.stockMovementId, input.postedByUserId, input.occurredAt]);
+    },
+
     async insertStockOverrideClaim(tid: string, claim: ClaimStockOverrideInput): Promise<void> {
       // Single-use claim (0040): the PRIMARY KEY rejects any second claim of
       // the same attempt (23505, fail-closed) — the engine only ever claims
