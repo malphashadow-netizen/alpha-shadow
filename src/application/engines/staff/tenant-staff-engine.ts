@@ -1,5 +1,5 @@
 import type { AuthorizationEngine } from '../rbac/authorization-engine.ts';
-import { ValidationError } from '../../../shared/errors.ts';
+import { NotFoundError, ValidationError } from '../../../shared/errors.ts';
 import type { CreateStaffUserInput, StaffPermissionAssignment, TenantStaffActor, TenantStaffRepository } from '../../../domain/contracts/tenant-staff.ts';
 const context = { hasResource: false, actorBranchId: null, resourceBranchId: null, isSensitivePermission: true } as const;
 export class TenantStaffEngine {
@@ -21,6 +21,10 @@ export class TenantStaffEngine {
   async createStaffUser(actor: TenantStaffActor, input: CreateStaffUserInput): Promise<void> {
     await this.authorize(actor);
     if (input.email.trim() === '') throw new ValidationError('email must be non-empty', 'email');
+    if (input.branchId !== null && input.branchId !== undefined) {
+      const owned = await this.repository.branchBelongsToTenant(actor.tenantId, input.branchId);
+      if (!owned) throw new NotFoundError(`branch ${input.branchId} not found in tenant ${actor.tenantId}`);
+    }
     await this.repository.createStaffUser(actor.tenantId, input);
   }
 
