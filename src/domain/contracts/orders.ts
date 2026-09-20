@@ -514,6 +514,7 @@ export interface OrdersTxScope {
    * 'stock: insufficient quantity' prefix) is mapped to InsufficientStockError.
    */
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  postInventoryConsumption(tenantId: string, input: { orderId: string; branchId: string; postedByUserId: string; occurredAt: Date }): Promise<void>;
   /** Binds one override attempt to exactly one order (single-use claim). */
   insertStockOverrideClaim(tenantId: string, claim: ClaimStockOverrideInput): Promise<void>;
   /** Recorded sale deductions per (order item, component) — restoration mirrors these exactly. */

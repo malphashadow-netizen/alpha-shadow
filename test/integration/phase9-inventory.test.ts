@@ -144,7 +144,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql', '019_dd005_phase1.sql', '020_dd005_phase2.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
