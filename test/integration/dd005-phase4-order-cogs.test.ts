@@ -27,6 +27,7 @@ async function createFixture(client: pg.Client): Promise<Fixture> {
   const tenantId = randomUUID();
   const branchId = randomUUID();
   const userId = randomUUID();
+  const roleId = randomUUID();
   const workflowId = randomUUID();
   const stateId = randomUUID();
   const categoryId = randomUUID();
@@ -47,6 +48,16 @@ async function createFixture(client: pg.Client): Promise<Fixture> {
   await client.query(
     'INSERT INTO users (id, tenant_id, email, pin_hash) VALUES ($1, $2, $3, $4)',
     [userId, tenantId, `${userId}@example.test`, 'fixture'],
+  );
+  await client.query('INSERT INTO roles (id, tenant_id, name) VALUES ($1, $2, $3)', [roleId, tenantId, roleId]);
+  await client.query(
+    "INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, 'inventory:receive')",
+    [tenantId, roleId],
+  );
+  await client.query(
+    `INSERT INTO user_roles (tenant_id, user_id, role_id, scope_type, scope_id)
+     VALUES ($1, $2, $3, 'tenant', NULL)`,
+    [tenantId, userId, roleId],
   );
   await client.query('INSERT INTO tenant_order_workflows (id, tenant_id) VALUES ($1, $2)', [workflowId, tenantId]);
   await client.query(
