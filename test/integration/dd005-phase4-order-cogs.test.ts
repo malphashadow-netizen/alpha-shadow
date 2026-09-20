@@ -128,7 +128,7 @@ async function createFixture(client: pg.Client): Promise<Fixture> {
     if (layerId === undefined) throw new Error('Cost layer fixture insert returned no row');
     return layerId;
   }
-  await receiveLayer(50n);
+  const firstLayerId = await receiveLayer(50n);
   const secondLayerId = await receiveLayer(70n);
 
   const firstSaleMovementId = randomUUID();
@@ -145,9 +145,24 @@ async function createFixture(client: pg.Client): Promise<Fixture> {
       orderId, firstOrderItemId, orderItemId, userId,
     ],
   );
-  await client.query('SELECT post_inventory_consumption($1, $2, $3, $4, now())', [
-    tenantId, orderId, branchId, userId,
-  ]);
+  await client.query(
+    `INSERT INTO consumption_allocations
+       (tenant_id, stock_movement_id, layer_id, order_item_id, qty, allocated_cost_minor)
+     VALUES
+       ($1, $2, $4, $6, 10, 50),
+       ($1, $3, $5, $7, 5, 35)`,
+    [
+      tenantId, firstSaleMovementId, secondSaleMovementId, firstLayerId,
+      secondLayerId, firstOrderItemId, orderItemId,
+    ],
+  );
+  await client.query(
+    `UPDATE inventory_cost_layers
+        SET remaining_qty = CASE WHEN id=$2 THEN 0 ELSE 5 END,
+            remaining_cost_minor = CASE WHEN id=$2 THEN 0 ELSE 35 END
+      WHERE tenant_id=$1 AND id IN ($2, $3)`,
+    [tenantId, firstLayerId, secondLayerId],
+  );
 
   return { tenantId, branchId, userId, orderId, orderItemId, inventoryItemId, secondLayerId };
 }
