@@ -351,6 +351,7 @@ export interface PaymentsTxScope {
   /** Subset of the given items that EVER entered a fires_kitchen_ticket state. */
   loadItemsWithKitchenTicketFired(tenantId: string, orderItemIds: readonly string[]): Promise<readonly string[]>;
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  postInventoryRestoration(tenantId: string, input: { stockMovementId: string; postedByUserId: string; occurredAt: Date }): Promise<void>;
 }
 
 export interface PaymentsStore {

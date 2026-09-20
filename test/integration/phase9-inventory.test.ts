@@ -144,7 +144,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql', '019_dd005_phase1.sql', '020_dd005_phase2.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql', '019_dd005_phase1.sql', '020_dd005_phase2.sql', '021_dd005_phase3.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -456,11 +456,10 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     const till = await setupTill();
     const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
     await addMenuRecipe(itemMeal, flour, '0.5000');
-    const occurredAt = new Date();
 
     const created = await placeOrder(till.cashier.userId, till, [
       { menuItemId: itemMeal, quantity: 3 },
-    ], { occurredAt });
+    ]);
 
     expect(await stockOf(flour)).toBe('3.5000');
     const movements = await movementsFor(created.order.id);
@@ -472,7 +471,26 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(movement.order_item_id).toBe(created.items[0]?.item.id);
     expect(movement.actor_user_id).toBe(till.cashier.userId);
     expect(movement.manager_override_id).toBeNull();
-    expect(movement.occurred_at.getTime()).toBe(occurredAt.getTime());
+    expect(movement.occurred_at.getTime()).toBe(created.order.placedAt.getTime());
+  });
+
+  it('ignores caller-supplied order occurredAt and stamps stock movements with the server-generated order clock', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '5.0000');
+    await addMenuRecipe(itemMeal, flour, '0.5000');
+    const callerOccurredAt = new Date('2000-01-01T00:00:00.000Z');
+
+    const before = Date.now();
+    const created = await placeOrder(till.cashier.userId, till, [
+      { menuItemId: itemMeal, quantity: 1 },
+    ], { occurredAt: callerOccurredAt });
+    const after = Date.now();
+
+    const movement = row([...(await movementsFor(created.order.id))]);
+    expect(created.order.placedAt.getTime()).not.toBe(callerOccurredAt.getTime());
+    expect(created.order.placedAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(created.order.placedAt.getTime()).toBeLessThanOrEqual(after);
+    expect(movement.occurred_at.getTime()).toBe(created.order.placedAt.getTime());
   });
 
   // ── Case 2: manager override → negative ──────────────────────────────────

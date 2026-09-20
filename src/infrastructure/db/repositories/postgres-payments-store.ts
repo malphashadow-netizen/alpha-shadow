@@ -699,5 +699,9 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
       // error mapping.
       return insertStockMovementRow(q, tid, movement);
     },
+
+    async postInventoryRestoration(tid, input): Promise<void> {
+      await q.query('SELECT post_inventory_restoration($1, $2, $3, $4)', [tid, input.stockMovementId, input.postedByUserId, input.occurredAt]);
+    },
   };
 }

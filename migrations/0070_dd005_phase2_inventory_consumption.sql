@@ -33,7 +33,7 @@ DECLARE
   v_allocated_qty numeric(18,4); v_allocated_cost bigint; v_total_cost bigint := 0;
   v_last_cost bigint; v_last_units bigint; v_ledger_id bigint; v_layer_id bigint;
   v_currency text; v_digits smallint; v_debit uuid; v_credit uuid; v_entry uuid;
-  v_stock_net numeric(18,4); v_current numeric(18,4); v_debit_count bigint; v_credit_count bigint;
+  v_debit_count bigint; v_credit_count bigint;
 BEGIN
   IF p_tenant IS DISTINCT FROM current_setting('app.current_tenant_id')::uuid THEN
     RAISE EXCEPTION 'inventory consumption tenant must match current tenant' USING ERRCODE = '42501';
@@ -84,10 +84,12 @@ BEGIN
         v_total_cost := v_total_cost + v_allocated_cost;
       END IF;
     END IF;
+    IF (SELECT COALESCE(sum(qty), 0) FROM consumption_allocations
+         WHERE tenant_id = p_tenant AND stock_movement_id = v_movement.id)
+       IS DISTINCT FROM v_movement.qty THEN
+      RAISE EXCEPTION 'stock quantity and consumption allocations are inconsistent' USING ERRCODE = '23514';
+    END IF;
   END LOOP;
-  SELECT COALESCE(sum(quantity_delta), 0) INTO v_stock_net FROM stock_movements WHERE tenant_id = p_tenant AND branch_id = p_branch;
-  SELECT COALESCE(sum(current_quantity), 0) INTO v_current FROM inventory_items WHERE tenant_id = p_tenant AND branch_id = p_branch;
-  IF v_stock_net IS DISTINCT FROM v_current THEN RAISE EXCEPTION 'stock quantity and consumption allocations are inconsistent' USING ERRCODE = '23514'; END IF;
   IF v_total_cost = 0 THEN
     INSERT INTO audit_log (tenant_id, user_id, action, resource, "after") VALUES
       (p_tenant, p_posted_by, 'inventory:consumption_zero_cost', 'orders:' || p_order::text, jsonb_build_object('order_id', p_order));

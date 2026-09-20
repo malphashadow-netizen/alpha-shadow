@@ -515,6 +515,7 @@ export interface OrdersTxScope {
    */
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
   postInventoryConsumption(tenantId: string, input: { orderId: string; branchId: string; postedByUserId: string; occurredAt: Date }): Promise<void>;
+  postInventoryRestoration(tenantId: string, input: { stockMovementId: string; postedByUserId: string; occurredAt: Date }): Promise<void>;
   /** Binds one override attempt to exactly one order (single-use claim). */
   insertStockOverrideClaim(tenantId: string, claim: ClaimStockOverrideInput): Promise<void>;
   /** Recorded sale deductions per (order item, component) — restoration mirrors these exactly. */
