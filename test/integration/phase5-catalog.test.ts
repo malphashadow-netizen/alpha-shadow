@@ -119,7 +119,10 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
         // pattern phase 6 followed for the order_line_tax_* tables).
         // Phase 9 note: stock_movements, menu_item_recipes and modifier_recipes
         // appended for the same reason (FKs to order_items/menu_items/modifiers).
-        `TRUNCATE stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
+        // DD-005 note: inventory_cost_ledger references stock_movements, while
+        // inventory_cost_layers references that ledger; all must be truncated
+        // in the same statement without CASCADE.
+        `TRUNCATE inventory_cost_layers, inventory_cost_ledger, stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
       );
       await owner.query('DELETE FROM branches WHERE id = ANY($1::uuid[])', [[BRANCH_A1, BRANCH_A2, BRANCH_B1]]);
     } finally {

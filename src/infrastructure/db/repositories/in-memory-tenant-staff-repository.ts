@@ -3,6 +3,10 @@ import type { CreateStaffUserInput, StaffPermissionAssignment, TenantStaffReposi
 import type { InMemoryPermissionStore } from './in-memory-permission-repository.ts';
 export class InMemoryTenantStaffRepository implements TenantStaffRepository {
   constructor(private readonly store: InMemoryPermissionStore) {}
+  branchBelongsToTenant(tenantId: string, branchId: string): Promise<boolean> {
+    const branch = this.store.branches.get(branchId);
+    return Promise.resolve(branch?.tenantId === tenantId);
+  }
   createStaffUser(tenantId: string, input: CreateStaffUserInput): Promise<void> {
     if (!this.store.tenants.has(tenantId)) throw new NotFoundError(`tenant ${tenantId} not found`);
     if (this.store.users.has(input.userId)) throw new ConflictError(`user ${input.userId} already exists`);
