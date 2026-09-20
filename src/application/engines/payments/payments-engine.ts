@@ -567,13 +567,11 @@ export class PaymentsEngine {
         adjustmentReasonId: null,
         occurredAt,
       });
-      if (movement.movementType === 'void_restoration') {
-        await scope.postInventoryRestoration(tenantId, {
-          stockMovementId: movement.id,
-          postedByUserId: actorUserId,
-          occurredAt,
-        });
-      }
+      await scope.postInventoryRestoration(tenantId, {
+        stockMovementId: movement.id,
+        postedByUserId: actorUserId,
+        occurredAt,
+      });
     }
   }
 }

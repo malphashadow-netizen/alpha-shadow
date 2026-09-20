@@ -104,7 +104,7 @@ async function fixture(client: pg.Client, options: { voided?: boolean; withCost?
   return { tenant, branch, user, item, order, orderItem, layer, allocation: allocations.rows[0]?.id ?? '0' };
 }
 
-async function movement(client: pg.Client, f: Fixture, type: 'void_restoration' | 'waste_void'): Promise<string> {
+async function movement(client: pg.Client, f: Fixture, type: 'void_restoration' | 'waste_void' | 'waste_refund'): Promise<string> {
   await client.query("SELECT set_config('app.current_tenant_id', $1, false)", [f.tenant]);
   const id = randomUUID();
   await client.query(
@@ -162,6 +162,27 @@ describe('DD-005 phase 3 inventory restoration', () => {
     ]);
     const layer = await client.query<{ qty: string; cost: string }>('SELECT remaining_qty::text AS qty, remaining_cost_minor::text AS cost FROM inventory_cost_layers WHERE id=$1', [f.layer]);
     expect(layer.rows[0]).toEqual({ qty: '8.0000', cost: '800' });
+  }));
+
+  it('reclassifies waste_refund once without restoring its FIFO layer', () => transaction(async (client) => {
+    const f = await fixture(client);
+    const waste = await movement(client, f, 'waste_refund');
+    await post(client, f, waste);
+    await post(client, f, waste);
+    expect(await lines(client, f.tenant, waste)).toEqual([
+      { system_purpose: 'waste_expense', debit_minor: '200', credit_minor: '0' },
+      { system_purpose: 'cost_of_goods_in_process', debit_minor: '0', credit_minor: '200' },
+    ]);
+    const layer = await client.query<{ qty: string; cost: string }>('SELECT remaining_qty::text AS qty, remaining_cost_minor::text AS cost FROM inventory_cost_layers WHERE id=$1', [f.layer]);
+    expect(layer.rows[0]).toEqual({ qty: '8.0000', cost: '800' });
+    const allocations = await client.query<{ count: string }>('SELECT count(*)::text AS count FROM restoration_allocations WHERE tenant_id=$1 AND restoration_stock_movement_id=$2', [f.tenant, waste]);
+    expect(allocations.rows[0]?.count).toBe('1');
+  }));
+
+  it('rejects waste_refund cost reclassification for a voided order line', () => transaction(async (client) => {
+    const f = await fixture(client, { voided: true });
+    const waste = await movement(client, f, 'waste_refund');
+    await expect(post(client, f, waste)).rejects.toThrow('waste_refund cost reclassification requires a live order line');
   }));
 
   it('does nothing when no cost allocation was posted', () => transaction(async (client) => {
