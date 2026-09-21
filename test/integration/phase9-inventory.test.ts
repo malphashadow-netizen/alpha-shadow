@@ -1666,7 +1666,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     await receiveCostedStock(till, flour, '10.00000000', 1_000n);
 
     // A newer provisional layer is deliberately much more expensive than the
-    // real receipt. A 12-unit adjustment consumes both and leaves one unit of
+    // real receipt. An 11-unit adjustment consumes both and leaves one unit of
     // shortfall, whose new provisional basis must remain the real receipt's 100/unit.
     const provisionalOverride = await authenticator.verifyLiveChallengeWithId(
       T, stockManager.userId, stockManager.pin, adjustUser.userId, 'manual_adjustment',
@@ -1692,7 +1692,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     );
     const shortfall = await inventory.adjustStock(T, actor, {
       branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason,
-      quantityDeltaText: '-12.0000', managerOverrideId: shortfallOverride.attemptId,
+      quantityDeltaText: '-11.0000', managerOverrideId: shortfallOverride.attemptId,
     });
     const cost = await withApp(T, (q) => q.query<{ total_cost_minor: string; is_provisional: boolean }>(
       `SELECT total_cost_minor::text, is_provisional FROM inventory_cost_ledger
