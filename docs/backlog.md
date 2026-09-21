@@ -308,6 +308,13 @@ auth phase owner — deliberately not touched by the Phase 4b branch.
 `test/integration/phase5-catalog.test.ts` fails with "permission denied for table role_permissions". Pre-existing failure, not caused by DD-005.
 Hypothesis: a missing GRANT on role_permissions for app_login in migrations/roles/. Separate task outside DD-005; do not fix here.
 
+DD-005 phase 5 needs an explicit policy for a negative manual adjustment that
+exceeds every real cost layer. Migration 0076 temporarily mirrors the phase-2
+sale-shortage behavior and may chain the latest provisional unit cost into a
+new provisional shortfall. Decide whether the final policy should retain that
+estimate, use only the latest real receipt, require an explicit price, or reject
+the excess; also specify the resulting Inventory Variance reconciliation.
+
 `post_inventory_consumption` in `migrations/0070_dd005_phase2_inventory_consumption.sql:98-99`
 calls `min(id)` where `accounts.id` is `uuid`. PostgreSQL 18.4 reports
 `function min(uuid) does not exist`, so cost-bearing inventory consumption

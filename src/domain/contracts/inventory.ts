@@ -185,6 +185,14 @@ export interface InventoryTxScope {
   loadUnitDefinition(code: string): Promise<UnitDefinition | null>;
 
   insertStockMovement(tenantId: string, movement: InsertStockMovementInput): Promise<StockMovementRecord>;
+  recordInventoryReceiptCost(
+    tenantId: string,
+    input: { stockMovementId: string; inventoryItemId: string; totalCostMinor: bigint },
+  ): Promise<void>;
+  postInventoryAdjustment(
+    tenantId: string,
+    input: { stockMovementId: string; postedByUserId: string; occurredAt: Date },
+  ): Promise<void>;
   /**
    * I1: the coded adjustment reason (tenant_void_reasons mirror — reason
    * enabled + platform-kind enabled, defaulting to true when unset).

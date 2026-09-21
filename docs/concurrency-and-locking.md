@@ -102,9 +102,12 @@ statements only, comments stripped):
 | `0016` (×4) | `menu_items` / `branches` / `tenants` rows | tax-assignment functions |
 | `0040` = `0042` = `0043` | one `inventory_items` row | stock-movement trigger — the X-side of finding F-1 (§4) |
 | `0070` | allocable `inventory_cost_layers` rows in FIFO order | inventory-consumption posting function |
+| `0076` | allocable `inventory_cost_layers` rows in FIFO order | manual-adjustment posting function |
 
 DD-005 phase 2 acquires `orders`, then the movement trigger's
-`inventory_items` row, then FIFO-selected `inventory_cost_layers` rows. Cost
+`inventory_items` row, then FIFO-selected `inventory_cost_layers` rows. Phase 5
+manual adjustments acquire the same inventory-item lock before the same FIFO
+layer locks, without an order lock. Cost
 layers are the terminal leaf: no production path locks them before attempting
 an `orders` or `inventory_items` lock, so there is no reverse edge or new cycle.
 
