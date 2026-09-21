@@ -1619,8 +1619,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
 
     // Make an allocable provisional layer first, then create the real receipt
     // later. The production FIFO path must ignore this creation order.
+    const provisionalOverride = await authenticator.verifyLiveChallengeWithId(
+      T, stockManager.userId, stockManager.pin, adjustUser.userId, 'manual_adjustment',
+    );
     const provisionalMovement = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason,
+      quantityDeltaText: '-1.0000', managerOverrideId: provisionalOverride.attemptId,
     });
     await withApp(T, (q) => q.query(
       `WITH ledger AS (
@@ -1636,8 +1640,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ));
     await receiveCostedStock(till, flour, '2.00000000', 200n);
 
+    const fifoOverride = await authenticator.verifyLiveChallengeWithId(
+      T, stockManager.userId, stockManager.pin, adjustUser.userId, 'manual_adjustment',
+    );
     await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-2.0000',
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason,
+      quantityDeltaText: '-2.0000', managerOverrideId: fifoOverride.attemptId,
     });
     const layers = await withApp(T, (q) => q.query<{ is_provisional: boolean; remaining_qty: string }>(
       `SELECT is_provisional, remaining_qty::text FROM inventory_cost_layers
@@ -1660,8 +1668,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     // A newer provisional layer is deliberately much more expensive than the
     // real receipt. A 12-unit adjustment consumes both and leaves one unit of
     // shortfall, whose new provisional basis must remain the real receipt's 100/unit.
+    const provisionalOverride = await authenticator.verifyLiveChallengeWithId(
+      T, stockManager.userId, stockManager.pin, adjustUser.userId, 'manual_adjustment',
+    );
     const provisionalMovement = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason,
+      quantityDeltaText: '-1.0000', managerOverrideId: provisionalOverride.attemptId,
     });
     await withApp(T, (q) => q.query(
       `WITH ledger AS (
@@ -1675,8 +1687,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
        SELECT $1, $2, id, '1.0000', '1.0000', 999, 999, 'SAR', 2, true FROM ledger`,
       [T, flour, provisionalMovement.id],
     ));
+    const shortfallOverride = await authenticator.verifyLiveChallengeWithId(
+      T, stockManager.userId, stockManager.pin, adjustUser.userId, 'manual_adjustment',
+    );
     const shortfall = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-12.0000',
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason,
+      quantityDeltaText: '-12.0000', managerOverrideId: shortfallOverride.attemptId,
     });
     const cost = await withApp(T, (q) => q.query<{ total_cost_minor: string; is_provisional: boolean }>(
       `SELECT total_cost_minor::text, is_provisional FROM inventory_cost_ledger
