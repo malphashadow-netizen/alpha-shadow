@@ -183,7 +183,7 @@ BEGIN
      WHERE a.id = NEW.manager_override_id AND a.tenant_id = NEW.tenant_id;
     -- IS DISTINCT FROM is NULL-safe: a missing row fails every comparison.
     IF v_attempt.outcome IS DISTINCT FROM 'succeeded'
-       OR v_attempt.context_type IS DISTINCT FROM CASE WHEN NEW.movement_type = 'manual_adjustment' THEN 'manual_adjustment' ELSE 'stock_override' END
+       OR v_attempt.context_type IS DISTINCT FROM (CASE WHEN NEW.movement_type = 'manual_adjustment' THEN 'manual_adjustment' ELSE 'stock_override' END)
        OR v_attempt.initiating_actor_user_id IS DISTINCT FROM NEW.actor_user_id THEN
       RAISE EXCEPTION '% override requires a successful matching-context attempt initiated by the movement actor', NEW.movement_type USING ERRCODE = '23514';
     END IF;
