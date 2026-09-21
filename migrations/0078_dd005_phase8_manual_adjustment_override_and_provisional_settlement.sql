@@ -326,7 +326,7 @@ BEGIN
   -- exactly once to the inserted stock movement below.
   IF NEW.manager_override_id IS NOT NULL THEN
     IF NEW.movement_type NOT IN ('sale_deduction', 'manual_adjustment') THEN
-      RAISE EXCEPTION 'manager override is not valid for this stock movement type' USING ERRCODE = '23514';
+      RAISE EXCEPTION '% override requires a successful stock_override attempt initiated by the movement actor', NEW.movement_type USING ERRCODE = '23514';
     END IF;
     SELECT a.outcome, a.initiating_actor_user_id, a.target_manager_user_id, a.context_type, a.created_at
       INTO v_attempt FROM public.manager_override_attempts a
