@@ -55,7 +55,7 @@ CREATE TRIGGER trg_negative_manual_adjustment_override AFTER INSERT ON stock_mov
   FOR EACH ROW EXECUTE FUNCTION validate_negative_manual_adjustment_override();
 
 CREATE TABLE inventory_provisional_cost_settlements (
-  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, tenant_id uuid NOT NULL REFERENCES tenants (id),
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants (id),
   adjustment_cost_allocation_id bigint NOT NULL UNIQUE, settled_cost_minor bigint NOT NULL CHECK (settled_cost_minor >= 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   FOREIGN KEY (adjustment_cost_allocation_id, tenant_id) REFERENCES adjustment_cost_allocations (id, tenant_id)
