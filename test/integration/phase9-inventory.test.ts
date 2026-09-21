@@ -1564,7 +1564,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     })).rejects.toThrow(/manual_adjustment without a manager override/i);
 
     // Kept compilable before the contract union is extended in the production
-    // change; the database CHECK is intentionally the first red failure.
+    // change; the missing negative-balance rejection above is the first red failure.
     const manualAdjustmentContext = 'manual_adjustment' as unknown as ManagerOverrideContextType;
     const override = await authenticator.verifyLiveChallengeWithId(
       T,
@@ -1613,6 +1613,81 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       { system_purpose: 'inventory_variance', debit_minor: '50', credit_minor: '0', description: 'Inventory variance' },
       { system_purpose: 'inventory_asset', debit_minor: '0', credit_minor: '50', description: 'Inventory asset' },
     ]);
+  });
+
+  it('DD-005 phase 8 consumes a newer real layer before an older provisional layer', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reason = await createAdjustmentReason({ kindCode: 'shrinkage' });
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+
+    // Make an allocable provisional layer first, then create the real receipt
+    // later. The production FIFO path must ignore this creation order.
+    const provisionalMovement = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
+    });
+    await withApp(T, (q) => q.query(
+      `WITH ledger AS (
+         INSERT INTO inventory_cost_ledger
+           (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits, is_provisional)
+         VALUES ($1, $2, $3, 90, '1.0000', 'SAR', 2, true)
+         RETURNING id
+       )
+       INSERT INTO inventory_cost_layers
+         (tenant_id, inventory_item_id, cost_ledger_id, original_qty, remaining_qty, total_cost_minor, remaining_cost_minor, currency_code, minor_unit_digits, is_provisional)
+       SELECT $1, $2, id, '1.0000', '1.0000', 90, 90, 'SAR', 2, true FROM ledger`,
+      [T, flour, provisionalMovement.id],
+    ));
+    await receiveCostedStock(till, flour, '2.00000000', 200n);
+
+    await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-2.0000',
+    });
+    const layers = await withApp(T, (q) => q.query<{ is_provisional: boolean; remaining_qty: string }>(
+      `SELECT is_provisional, remaining_qty::text FROM inventory_cost_layers
+        WHERE tenant_id = $1 AND inventory_item_id = $2 ORDER BY created_at, id`,
+      [T, flour],
+    ));
+    expect(layers.rows).toEqual([
+      { is_provisional: true, remaining_qty: '1.0000' },
+      { is_provisional: false, remaining_qty: '0.0000' },
+    ]);
+  });
+
+  it('DD-005 phase 8 never uses a provisional layer as a new shortfall basis', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reason = await createAdjustmentReason({ kindCode: 'shrinkage' });
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+    await receiveCostedStock(till, flour, '10.00000000', 1_000n);
+
+    // A newer provisional layer is deliberately much more expensive than the
+    // real receipt. A 12-unit adjustment consumes both and leaves one unit of
+    // shortfall, whose new provisional basis must remain the real receipt's 100/unit.
+    const provisionalMovement = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
+    });
+    await withApp(T, (q) => q.query(
+      `WITH ledger AS (
+         INSERT INTO inventory_cost_ledger
+           (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits, is_provisional)
+         VALUES ($1, $2, $3, 999, '1.0000', 'SAR', 2, true)
+         RETURNING id
+       )
+       INSERT INTO inventory_cost_layers
+         (tenant_id, inventory_item_id, cost_ledger_id, original_qty, remaining_qty, total_cost_minor, remaining_cost_minor, currency_code, minor_unit_digits, is_provisional)
+       SELECT $1, $2, id, '1.0000', '1.0000', 999, 999, 'SAR', 2, true FROM ledger`,
+      [T, flour, provisionalMovement.id],
+    ));
+    const shortfall = await inventory.adjustStock(T, actor, {
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-12.0000',
+    });
+    const cost = await withApp(T, (q) => q.query<{ total_cost_minor: string; is_provisional: boolean }>(
+      `SELECT total_cost_minor::text, is_provisional FROM inventory_cost_ledger
+        WHERE tenant_id = $1 AND stock_movement_id = $2`,
+      [T, shortfall.id],
+    ));
+    expect(cost.rows).toEqual([{ total_cost_minor: '100', is_provisional: true }]);
   });
 
   // ── Case 12: modifiers, no-op, mirror ────────────────────────────────────
