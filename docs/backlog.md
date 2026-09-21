@@ -308,6 +308,13 @@ auth phase owner — deliberately not touched by the Phase 4b branch.
 `test/integration/phase5-catalog.test.ts` fails with "permission denied for table role_permissions". Pre-existing failure, not caused by DD-005.
 Hypothesis: a missing GRANT on role_permissions for app_login in migrations/roles/. Separate task outside DD-005; do not fix here.
 
+`post_inventory_consumption` in `migrations/0070_dd005_phase2_inventory_consumption.sql:98-99`
+calls `min(id)` where `accounts.id` is `uuid`. PostgreSQL 18.4 reports
+`function min(uuid) does not exist`, so cost-bearing inventory consumption
+cannot reach its WIP journal posting on that version. This was discovered while
+isolating the DD-005 phase-4 test; fix it in a separate phase-2 corrective
+migration, not by editing migration 0070 or widening phase 4.
+
 ### Payments idempotency fake transaction order (test fixture corrected)
 `test/unit/application/payments/payments-idempotency.test.ts` previously had
 three deterministic fixture failures: U1 (`23505` + probe hit should replay),

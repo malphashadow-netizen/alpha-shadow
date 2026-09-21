@@ -33,6 +33,7 @@ function createEngine() {
     bumpShiftRevision: async () => undefined,
     insertPayment: inserted.mockImplementation(async (tenantId: string, payment: PaymentRecord): Promise<PaymentRecord> => ({ ...payment, tenantId, status: 'completed', voidedById: null, voidedAt: null, voidReason: null, createdAt: new Date(0) })),
     postPaymentJournalEntry: async () => undefined,
+    postOrderCogs: async () => undefined,
     setOrderPaymentStatus: async () => undefined,
   } as unknown as PaymentsTxScope;
   const store: PaymentsStore = { run: async <T>(_tenantId: string, fn: (transactionScope: PaymentsTxScope) => Promise<T>): Promise<T> => fn(scope) };

@@ -33,6 +33,7 @@ function makeFullScope(overrides: Partial<PaymentsTxScope>): PaymentsTxScope {
     loadCouponByCode: async () => unexpectedCall('loadCouponByCode'),
     insertPayment: async () => unexpectedCall('insertPayment'),
     postPaymentJournalEntry: async () => unexpectedCall('postPaymentJournalEntry'),
+    postOrderCogs: async () => unexpectedCall('postOrderCogs'),
     postPaymentJournalReversalEntry: async () => unexpectedCall('postPaymentJournalReversalEntry'),
     voidPayment: async () => unexpectedCall('voidPayment'),
     refundPayment: async () => unexpectedCall('refundPayment'),

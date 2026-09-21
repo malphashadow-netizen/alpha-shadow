@@ -297,6 +297,11 @@ export class PaymentsEngine {
 
       const remainingAfter = totals.remainingBalanceMinor - netBaseMinor;
       if (remainingAfter === 0n) {
+        await scope.postOrderCogs(tenantId, {
+          orderId: input.orderId,
+          postedByUserId: input.cashierUserId,
+          occurredAt: payment.createdAt,
+        });
         await scope.setOrderPaymentStatus(tenantId, input.orderId, 'paid');
       }
       return {

@@ -97,7 +97,7 @@ describe('B1 live acceptance (ISO-scale money storage)', () => {
     for (const file of [
       '001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql',
       '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql',
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '022_dd005_phase4.sql',
     ]) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }

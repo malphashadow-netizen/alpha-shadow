@@ -261,6 +261,12 @@ export interface PostPaymentJournalReversalEntryInput {
   readonly occurredAt: Date;
 }
 
+export interface PostOrderCogsInput {
+  readonly orderId: string;
+  readonly postedByUserId: string;
+  readonly occurredAt: Date;
+}
+
 export interface InsertOrderDiscountInput {
   readonly id: string;
   readonly orderId: string;
@@ -322,6 +328,7 @@ export interface PaymentsTxScope {
   // Payment lifecycle writes.
   insertPayment(tenantId: string, payment: InsertPaymentInput): Promise<PaymentRecord>;
   postPaymentJournalEntry(tenantId: string, input: PostPaymentJournalEntryInput): Promise<void>;
+  postOrderCogs(tenantId: string, input: PostOrderCogsInput): Promise<void>;
   postPaymentJournalReversalEntry(tenantId: string, input: PostPaymentJournalReversalEntryInput): Promise<void>;
   voidPayment(tenantId: string, paymentId: string, evidence: { voidedById: string; voidedAt: Date; voidReason: string }): Promise<PaymentRecord>;
   refundPayment(tenantId: string, paymentId: string): Promise<PaymentRecord>;

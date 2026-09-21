@@ -28,6 +28,7 @@ import type {
   PaymentStatus,
   PaymentsStore,
   PaymentsTxScope,
+  PostOrderCogsInput,
   PostPaymentJournalEntryInput,
   PostPaymentJournalReversalEntryInput,
   ShiftRecord,
@@ -466,6 +467,15 @@ function buildScope(q: TenantQuery): PaymentsTxScope {
           throw new Error(`Payment journal accounts are missing or ambiguous for purpose '${input.debitSystemPurpose}'`);
         }
       }
+    },
+
+    async postOrderCogs(tid, input: PostOrderCogsInput): Promise<void> {
+      await q.query('SELECT post_order_cogs($1, $2, $3, $4)', [
+        tid,
+        input.orderId,
+        input.postedByUserId,
+        input.occurredAt,
+      ]);
     },
 
     async postPaymentJournalReversalEntry(tid, input: PostPaymentJournalReversalEntryInput): Promise<void> {

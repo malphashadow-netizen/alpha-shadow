@@ -107,6 +107,7 @@ function fakeScope(options: FakeScopeOptions): PaymentsTxScope {
     loadCouponByCode: async () => unused('loadCouponByCode'),
     insertPayment: async () => unused('insertPayment'),
     postPaymentJournalEntry: async () => unused('postPaymentJournalEntry'),
+    postOrderCogs: async () => unused('postOrderCogs'),
     postPaymentJournalReversalEntry: async () => unused('postPaymentJournalReversalEntry'),
     voidPayment: async () => unused('voidPayment'),
     refundPayment: async () => unused('refundPayment'),
