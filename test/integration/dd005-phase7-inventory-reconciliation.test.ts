@@ -231,7 +231,79 @@ describe('DD-005 phase 7 inventory reconciliation reporting', () => {
             rebuilt_remaining_cost_minor: '800',
           },
         ]);
+
+        const startedAt = new Date('2026-01-15T12:00:00.000Z');
+        const cutoffAt = new Date('2026-01-15T12:01:00.000Z');
+        const recorded = await client.query<{ readonly run_id: string }>(
+          `SELECT record_inventory_reconciliation($1, $2, $3) AS run_id`,
+          [tenant, startedAt, cutoffAt],
+        );
+        const runId = recorded.rows[0]?.run_id;
+        expect(runId).toBeDefined();
+
+        const run = await client.query<{
+          readonly status: string;
+          readonly quantity_discrepancy_count: string;
+          readonly layer_discrepancy_count: string;
+        }>(
+          `SELECT status, quantity_discrepancy_count::text, layer_discrepancy_count::text
+             FROM inventory_reconciliation_runs
+            WHERE tenant_id = $1 AND id = $2`,
+          [tenant, runId],
+        );
+        expect(run.rows).toEqual([{
+          status: 'completed',
+          quantity_discrepancy_count: '0',
+          layer_discrepancy_count: '1',
+        }]);
+
+        const persisted = await client.query<FindingRow>(
+          `SELECT discrepancy_type, inventory_item_id,
+                  projected_remaining_qty::text,
+                  rebuilt_remaining_qty::text,
+                  projected_remaining_cost_minor::text,
+                  rebuilt_remaining_cost_minor::text
+             FROM inventory_reconciliation_findings
+            WHERE tenant_id = $1 AND run_id = $2
+            ORDER BY id`,
+          [tenant, runId],
+        );
+        expect(persisted.rows).toEqual(report.rows);
         expect(await projection(client, tenant, item)).toEqual(before);
+
+        await expect(
+          client.query('SELECT record_inventory_reconciliation($1, $2, $3)', [randomUUID(), startedAt, cutoffAt]),
+        ).rejects.toThrow('inventory reconciliation tenant must match current tenant');
+
+        await client.query('ROLLBACK');
+        await client.query('BEGIN');
+        const cleanTenant = randomUUID();
+        await client.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [cleanTenant, `phase7-clean-${cleanTenant}`]);
+        await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [cleanTenant]);
+        const cleanRecorded = await client.query<{ readonly run_id: string }>(
+          'SELECT record_inventory_reconciliation($1, $2, $3) AS run_id',
+          [cleanTenant, startedAt, cutoffAt],
+        );
+        const cleanRun = await client.query<{
+          readonly quantity_discrepancy_count: string;
+          readonly layer_discrepancy_count: string;
+          readonly finding_count: string;
+        }>(
+          `SELECT run.quantity_discrepancy_count::text,
+                  run.layer_discrepancy_count::text,
+                  count(finding.id)::text AS finding_count
+             FROM inventory_reconciliation_runs AS run
+             LEFT JOIN inventory_reconciliation_findings AS finding
+               ON finding.tenant_id = run.tenant_id AND finding.run_id = run.id
+            WHERE run.tenant_id = $1 AND run.id = $2
+            GROUP BY run.id`,
+          [cleanTenant, cleanRecorded.rows[0]?.run_id],
+        );
+        expect(cleanRun.rows).toEqual([{
+          quantity_discrepancy_count: '0',
+          layer_discrepancy_count: '0',
+          finding_count: '0',
+        }]);
       } finally {
         await client.query('ROLLBACK');
       }

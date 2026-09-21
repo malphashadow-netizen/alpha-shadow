@@ -29,4 +29,4 @@ GRANT SELECT ON
 TO app_batch;
 
 GRANT EXECUTE ON FUNCTION reconcile_inventory(uuid) TO app_batch;
-
+GRANT EXECUTE ON FUNCTION record_inventory_reconciliation(uuid, timestamptz, timestamptz) TO app_batch;

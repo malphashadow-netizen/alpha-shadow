@@ -311,9 +311,81 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION record_inventory_reconciliation(
+  p_tenant uuid,
+  p_started_at timestamptz,
+  p_cutoff_at timestamptz
+)
+RETURNS uuid
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_now timestamptz := clock_timestamp();
+  v_run_id uuid := gen_random_uuid();
+  v_recorded_run_id uuid;
+BEGIN
+  IF p_tenant IS DISTINCT FROM current_setting('app.current_tenant_id')::uuid THEN
+    RAISE EXCEPTION 'inventory reconciliation tenant must match current tenant' USING ERRCODE = '42501';
+  END IF;
+  IF p_started_at > v_now THEN
+    RAISE EXCEPTION 'inventory reconciliation started_at cannot be in the future' USING ERRCODE = '22007';
+  END IF;
+  IF p_cutoff_at > v_now THEN
+    RAISE EXCEPTION 'inventory reconciliation cutoff_at cannot be in the future' USING ERRCODE = '22007';
+  END IF;
+
+  WITH report AS MATERIALIZED (
+    SELECT * FROM public.reconcile_inventory(p_tenant)
+  ),
+  summary AS (
+    SELECT count(*) FILTER (
+             WHERE discrepancy_type = 'current_quantity_mismatch'
+           )::bigint AS quantity_discrepancy_count,
+           count(*) FILTER (
+             WHERE discrepancy_type <> 'current_quantity_mismatch'
+           )::bigint AS layer_discrepancy_count
+      FROM report
+  ),
+  inserted_run AS (
+    INSERT INTO public.inventory_reconciliation_runs
+      (id, tenant_id, started_at, completed_at, cutoff_at, status,
+       quantity_discrepancy_count, layer_discrepancy_count)
+    SELECT v_run_id, p_tenant, p_started_at, v_now, p_cutoff_at, 'completed',
+           summary.quantity_discrepancy_count, summary.layer_discrepancy_count
+      FROM summary
+    RETURNING id
+  ),
+  inserted_findings AS (
+    INSERT INTO public.inventory_reconciliation_findings
+      (tenant_id, run_id, inventory_item_id, cost_ledger_id, layer_id,
+       discrepancy_type, projected_quantity, rebuilt_quantity,
+       projected_remaining_qty, rebuilt_remaining_qty,
+       projected_remaining_cost_minor, rebuilt_remaining_cost_minor,
+       currency_code, minor_unit_digits)
+    SELECT p_tenant, inserted_run.id, report.inventory_item_id,
+           report.cost_ledger_id, report.layer_id, report.discrepancy_type,
+           report.projected_quantity, report.rebuilt_quantity,
+           report.projected_remaining_qty, report.rebuilt_remaining_qty,
+           report.projected_remaining_cost_minor,
+           report.rebuilt_remaining_cost_minor, report.currency_code,
+           report.minor_unit_digits
+      FROM report
+      CROSS JOIN inserted_run
+    RETURNING id
+  )
+  SELECT inserted_run.id
+    INTO v_recorded_run_id
+    FROM inserted_run
+    LEFT JOIN (SELECT count(*) FROM inserted_findings) AS completed_write ON true;
+
+  RETURN v_recorded_run_id;
+END;
+$$;
+
 REVOKE ALL ON inventory_reconciliation_runs,
   inventory_reconciliation_findings,
   inventory_reconciliation_months,
   inventory_reconciliation_item_snapshots,
   inventory_reconciliation_layer_snapshots FROM PUBLIC;
 REVOKE ALL ON FUNCTION reconcile_inventory(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION record_inventory_reconciliation(uuid, timestamptz, timestamptz) FROM PUBLIC;
