@@ -1,4 +1,9 @@
 -- DD-005 phase 8: controlled negative adjustments and non-chaining provisional cost.
+-- The settlement evidence table references an allocation through the tenant
+-- composite key, matching the repository-wide tenant-scoped FK convention.
+ALTER TABLE adjustment_cost_allocations
+  ADD CONSTRAINT adjustment_cost_allocations_id_tenant_key UNIQUE (id, tenant_id);
+
 ALTER TABLE manager_override_attempts DROP CONSTRAINT IF EXISTS manager_override_attempts_context_type_check;
 ALTER TABLE manager_override_attempts ADD CONSTRAINT manager_override_attempts_context_type_check
   CHECK (context_type IN ('void', 'discount', 'stock_override', 'manual_adjustment'));
