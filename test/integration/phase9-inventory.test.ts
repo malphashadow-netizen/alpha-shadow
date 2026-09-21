@@ -386,7 +386,23 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     return row((await owner.query<{ current_quantity: string }>('SELECT current_quantity::text AS current_quantity FROM inventory_items WHERE id = $1', [inventoryItemId])).rows).current_quantity;
   }
 
+  async function receiveCostedStock(till: Till, inventoryItemId: string): Promise<void> {
+    const receipt = await inventory.receiveStock(T, { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV }, { branchId: till.branchId, inventoryItemId, purchaseUnit: 'kg', quantityText: '1.00000000' });
+    await owner.query("SELECT set_config('app.current_tenant_id', $1, false)", [T]);
+    const ledger = row((await owner.query<{ id: string }>(`INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,200,'1.0000','SAR',2) RETURNING id::text`, [T, inventoryItemId, receipt.id])).rows);
+    await owner.query(`INSERT INTO inventory_cost_layers (tenant_id, inventory_item_id, cost_ledger_id, original_qty, remaining_qty, total_cost_minor, remaining_cost_minor, currency_code, minor_unit_digits) VALUES ($1,$2,$3,'1.0000','1.0000',200,200,'SAR',2)`, [T, inventoryItemId, ledger.id]);
+  }
+
+  async function restorationLines(movementId: string): Promise<readonly { system_purpose: string; debit_minor: string; credit_minor: string; description: string }[]> {
+    return (await withApp(T, (q) => q.query<{ system_purpose: string; debit_minor: string; credit_minor: string; description: string }>(`SELECT a.system_purpose, l.debit_minor::text, l.credit_minor::text, l.description FROM journal_entries e JOIN journal_entry_lines l ON l.tenant_id=e.tenant_id AND l.journal_entry_id=e.id JOIN accounts a ON a.tenant_id=l.tenant_id AND a.id=l.account_id WHERE e.tenant_id=$1 AND e.source_type='inventory_restoration' AND e.source_id=$2 ORDER BY l.line_number`, [T, movementId]))).rows;
+  }
+
+  async function wipNet(orderId: string): Promise<string> {
+    return row((await withApp(T, (q) => q.query<{ net: string }>(`SELECT COALESCE(sum(l.debit_minor-l.credit_minor),0)::text AS net FROM journal_entries e JOIN journal_entry_lines l ON l.tenant_id=e.tenant_id AND l.journal_entry_id=e.id JOIN accounts a ON a.tenant_id=l.tenant_id AND a.id=l.account_id WHERE e.tenant_id=$1 AND e.source_id=$2 AND e.source_type IN ('inventory_consumption','order_cogs','inventory_restoration') AND a.system_purpose='cost_of_goods_in_process'`, [T,orderId]))).rows).net;
+  }
+
   interface MovementRow {
+    readonly id: string;
     readonly movement_type: string;
     readonly inventory_item_id: string;
     readonly order_id: string | null;
@@ -399,7 +415,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
 
   async function movementsFor(orderId: string): Promise<readonly MovementRow[]> {
     const result = await owner.query<MovementRow>(
-      `SELECT movement_type, inventory_item_id, order_id, order_item_id, quantity_delta::text AS quantity_delta,
+      `SELECT id::text AS id, movement_type, inventory_item_id, order_id, order_item_id, quantity_delta::text AS quantity_delta,
               actor_user_id, manager_override_id, occurred_at
          FROM stock_movements WHERE tenant_id = $1 AND order_id = $2 ORDER BY created_at, id`,
       [T, orderId],
@@ -942,6 +958,21 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     ]);
     const paymentStatus = row((await owner.query<{ payment_status: string }>('SELECT payment_status FROM orders WHERE id = $1', [created.order.id])).rows).payment_status;
     expect(paymentStatus).toBe('refunded');
+  });
+
+  it('DD-005 4b: refund after settlement credits COGS and clears WIP', async () => {
+    const till = await setupTill(); const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000'); await receiveCostedStock(till, flour); await addMenuRecipe(itemMeal, flour, '1.0000');
+    const created = await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 1 }]); const itemId = row([...created.items]).item.id;
+    await transitions.transitionItem(T, { orderItemId: itemId, toWorkflowStateId: preparingStateId, actorUserId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }); const totals = await payments.orderTotals(T, created.order.id);
+    const payment = await payments.recordPayment(T, { orderId: created.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: minorToText(totals.totalMinor) }); await payments.refundPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, { paymentId: payment.payment.id });
+    const movement = row([...(await movementsFor(created.order.id)).filter((x) => x.movement_type === 'waste_refund')]); expect(await restorationLines(movement.id)).toEqual([{ system_purpose: 'waste_expense', debit_minor: '200', credit_minor: '0', description: 'Waste expense' }, { system_purpose: 'cost_of_goods_sold', debit_minor: '0', credit_minor: '200', description: 'Cost of goods sold' }]); expect(await wipNet(created.order.id)).toBe('0');
+  });
+
+  it('DD-005 4b: voiding a reopened settled item credits COGS and clears WIP', async () => {
+    const till = await setupTill(); const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000'); await receiveCostedStock(till, flour); await addMenuRecipe(itemMeal, flour, '1.0000');
+    const created = await placeOrder(till.cashier.userId, till, [{ menuItemId: itemMeal, quantity: 1 }]); const itemId = row([...created.items]).item.id; const totals = await payments.orderTotals(T, created.order.id);
+    const payment = await payments.recordPayment(T, { orderId: created.order.id, paymentMethodId: methodCashId, cashierUserId: till.cashier.userId, amountText: minorToText(totals.totalMinor) }); await payments.voidPayment(T, { userId: till.cashier.userId, tokenSecV: till.cashier.tokenSecV }, { paymentId: payment.payment.id, reason: 'reopen' }); await voids.voidOrderItem(T, { userId: voidServerUser.userId, tokenSecV: voidServerUser.tokenSecV }, { orderItemId: itemId, voidReasonId: reasonServer });
+    const movement = row([...(await movementsFor(created.order.id)).filter((x) => x.movement_type === 'void_restoration')]); expect(await restorationLines(movement.id)).toEqual([{ system_purpose: 'inventory_asset', debit_minor: '200', credit_minor: '0', description: 'Inventory asset' }, { system_purpose: 'cost_of_goods_sold', debit_minor: '0', credit_minor: '200', description: 'Cost of goods sold' }]); expect(await wipNet(created.order.id)).toBe('0');
   });
 
   it('6b/ two refunded legs of one order write the restoration row ONCE (dedup), and a corrected payment writes none', async () => {
