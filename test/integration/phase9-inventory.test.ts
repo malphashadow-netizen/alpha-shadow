@@ -49,6 +49,7 @@ import { ShiftEngine } from '../../src/application/engines/shifts/shift-engine.t
 import { PlatformTaxAdminEngine } from '../../src/application/engines/tax/platform-tax-admin-engine.ts';
 import type {
   CreatedOrder,
+  ManagerOverrideContextType,
   ManagerOverrideChallenge,
   NewOrderItemLine,
 } from '../../src/domain/contracts/orders.ts';
@@ -1546,6 +1547,71 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(layers.rows).toEqual([
       { remaining_qty: '0.0000', remaining_cost_minor: '0' },
       { remaining_qty: '5.0000', remaining_cost_minor: '350' },
+    ]);
+  });
+
+  it('DD-005 phase 8 gates negative manual adjustments, uses real FIFO before provisional, and settles a zero-basis shortfall', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reason = await createAdjustmentReason({ kindCode: 'shrinkage' });
+    const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
+
+    await expect(inventory.adjustStock(T, actor, {
+      branchId: till.branchId,
+      inventoryItemId: flour,
+      adjustmentReasonId: reason,
+      quantityDeltaText: '-1.0000',
+    })).rejects.toThrow(/manual_adjustment without a manager override/i);
+
+    // Kept compilable before the contract union is extended in the production
+    // change; the database CHECK is intentionally the first red failure.
+    const manualAdjustmentContext = 'manual_adjustment' as unknown as ManagerOverrideContextType;
+    const override = await authenticator.verifyLiveChallengeWithId(
+      T,
+      stockManager.userId,
+      stockManager.pin,
+      adjustUser.userId,
+      manualAdjustmentContext,
+    );
+    const inputWithOverride = {
+      branchId: till.branchId,
+      inventoryItemId: flour,
+      adjustmentReasonId: reason,
+      quantityDeltaText: '-1.0000',
+      managerOverrideId: override.attemptId,
+    };
+    const adjusted = await inventory.adjustStock(T, actor, inputWithOverride);
+    expect(adjusted.managerOverrideId).toBe(override.attemptId);
+    expect(await stockOf(flour)).toBe('-1.0000');
+
+    const pending = await withApp(T, (q) => q.query<{ qty: string; allocated_cost_minor: string }>(
+      `SELECT qty::text, allocated_cost_minor::text
+         FROM adjustment_cost_allocations
+        WHERE tenant_id = $1 AND stock_movement_id = $2 AND layer_id IS NULL AND is_provisional`,
+      [T, adjusted.id],
+    ));
+    expect(pending.rows).toEqual([{ qty: '1.0000', allocated_cost_minor: '0' }]);
+
+    await receiveCostedStock(till, flour, '10.00000000', 500n);
+    const settlements = await withApp(T, (q) => q.query<{ settled_cost_minor: string }>(
+      `SELECT settled_cost_minor::text
+         FROM inventory_provisional_cost_settlements
+        WHERE tenant_id = $1 AND adjustment_cost_allocation_id = (
+          SELECT id FROM adjustment_cost_allocations WHERE tenant_id = $1 AND stock_movement_id = $2 AND layer_id IS NULL
+        )`,
+      [T, adjusted.id],
+    ));
+    expect(settlements.rows).toEqual([{ settled_cost_minor: '50' }]);
+    const settlementId = row((await withApp(T, (q) => q.query<{ id: string }>(
+      `SELECT id FROM inventory_provisional_cost_settlements
+        WHERE tenant_id = $1 AND adjustment_cost_allocation_id = (
+          SELECT id FROM adjustment_cost_allocations WHERE tenant_id = $1 AND stock_movement_id = $2 AND layer_id IS NULL
+        )`,
+      [T, adjusted.id],
+    ))).rows).id;
+    expect(await restorationLinesForSource('inventory_provisional_settlement', settlementId)).toEqual([
+      { system_purpose: 'inventory_variance', debit_minor: '50', credit_minor: '0', description: 'Inventory variance' },
+      { system_purpose: 'inventory_asset', debit_minor: '0', credit_minor: '50', description: 'Inventory asset' },
     ]);
   });
 
