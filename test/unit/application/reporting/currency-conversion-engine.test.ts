@@ -5,6 +5,8 @@ import type {
   CurrencyRepository,
   ExchangeRateRecord,
   ExchangeRateRepository,
+  ExchangeRateSource,
+  ReportingCurrencyRepository,
 } from '../../../../src/domain/contracts/multi-currency.ts';
 import { MissingExchangeRateError } from '../../../../src/shared/errors.ts';
 import { currencyCode, money, type CurrencyCode } from '../../../../src/shared/money.ts';
@@ -18,8 +20,14 @@ class FakeRates implements ExchangeRateRepository {
   readonly rows: ExchangeRateRecord[] = [];
   readonly findSpy = vi.fn();
 
-  async findAtOrBefore(tenantId: string, fromCurrency: CurrencyCode, toCurrency: CurrencyCode, transactionTime: Date): Promise<ExchangeRateRecord | null> {
-    this.findSpy(tenantId, fromCurrency, toCurrency, transactionTime);
+  async findAtOrBefore(
+    tenantId: string,
+    fromCurrency: CurrencyCode,
+    toCurrency: CurrencyCode,
+    transactionTime: Date,
+    rateSource?: ExchangeRateSource,
+  ): Promise<ExchangeRateRecord | null> {
+    this.findSpy(tenantId, fromCurrency, toCurrency, transactionTime, rateSource);
     return (
       this.rows
         .filter(
@@ -39,8 +47,15 @@ class FakeRates implements ExchangeRateRepository {
     toCurrency: CurrencyCode,
     rate: string,
     effectiveAt: Date,
+    _rateSource?: ExchangeRateSource,
   ): Promise<void> {
     this.rows.push({ tenantId, fromCurrency, toCurrency, rate, effectiveAt });
+  }
+}
+
+class FakeReportingCurrencies implements ReportingCurrencyRepository {
+  async findReportingCurrency(_tenantId: string): Promise<CurrencyCode> {
+    return EUR;
   }
 }
 
@@ -69,6 +84,21 @@ describe('CurrencyConversionEngine', () => {
 
     expect(beforeCurrentRate.amountMinor).toBe(900n);
     expect(afterCurrentRate.amountMinor).toBe(900n);
+  });
+
+  it('restricts reporting-currency conversion to market rates', async () => {
+    const rates = new FakeRates();
+    const transactionTime = new Date('2025-01-10T00:00:00.000Z');
+    await rates.append(TENANT, USD, EUR, '0.90000000', new Date('2025-01-01T00:00:00.000Z'));
+    const engine = new CurrencyConversionEngine({
+      exchangeRates: rates,
+      currencies: new FakeCurrencies(),
+      reportingCurrencies: new FakeReportingCurrencies(),
+    });
+
+    await engine.convertToReportingCurrency(TENANT, money(1000n, USD), transactionTime);
+
+    expect(rates.findSpy).toHaveBeenCalledWith(TENANT, USD, EUR, transactionTime, 'market');
   });
 
   it('returns the exact same Money object without touching either repository', async () => {

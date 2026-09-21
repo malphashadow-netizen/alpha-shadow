@@ -2,6 +2,7 @@ import type {
   CurrencyConversionService,
   CurrencyRepository,
   ExchangeRateRepository,
+  ExchangeRateSource,
   ReportingCurrencyRepository,
 } from '../../../domain/contracts/multi-currency.ts';
 import { MissingExchangeRateError, NotFoundError, ValidationError } from '../../../shared/errors.ts';
@@ -38,6 +39,16 @@ export class CurrencyConversionEngine implements CurrencyConversionService {
     targetCurrency: CurrencyCode,
     transactionTime: Date,
   ): Promise<Money> {
+    return this.convertUsingRateSource(tenantId, amount, targetCurrency, transactionTime);
+  }
+
+  private async convertUsingRateSource(
+    tenantId: string,
+    amount: Money,
+    targetCurrency: CurrencyCode,
+    transactionTime: Date,
+    rateSource?: ExchangeRateSource,
+  ): Promise<Money> {
     // This branch is deliberately before every repository call, including the
     // currencies lookup. Same-currency reporting is an exact identity operation.
     if (amount.currency === targetCurrency) return amount;
@@ -51,6 +62,7 @@ export class CurrencyConversionEngine implements CurrencyConversionService {
       amount.currency,
       targetCurrency,
       transactionTime,
+      rateSource,
     );
     if (rate === null) {
       throw new MissingExchangeRateError(amount.currency, targetCurrency, transactionTime);
@@ -79,7 +91,7 @@ export class CurrencyConversionEngine implements CurrencyConversionService {
     if (targetCurrency === null) {
       throw new NotFoundError(`Tenant ${tenantId} has no reporting currency`);
     }
-    return this.convert(tenantId, amount, targetCurrency, transactionTime);
+    return this.convertUsingRateSource(tenantId, amount, targetCurrency, transactionTime, 'market');
   }
 }
 
