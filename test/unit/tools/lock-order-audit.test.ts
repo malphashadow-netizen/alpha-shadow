@@ -135,6 +135,9 @@ describe('B3 row-lock audit (static)', () => {
         'migrations/0075_dd005_phase4c_fix_min_uuid_aggregate.sql :: WHERE tenant_id = p_tenant AND inventory_item_id = v_movement.inventory_item_id AND remaining_qty > 0 ORDER BY created_at, id FOR UPDATE',
         // Phase 5 uses the identical FIFO layer lock after the movement trigger has locked inventory_items.
         'migrations/0076_dd005_phase5_inventory_adjustments.sql :: ORDER BY created_at, id FOR UPDATE',
+        // Phase 8 preserves the same item-then-layer order while prioritizing real layers.
+        'migrations/0078_dd005_phase8_manual_adjustment_override_and_provisional_settlement.sql :: FOR l IN SELECT * FROM inventory_cost_layers WHERE tenant_id=p_tenant AND inventory_item_id=m.inventory_item_id AND remaining_qty>0 ORDER BY is_provisional, created_at, id FOR UPDATE LOOP',
+        'migrations/0078_dd005_phase8_manual_adjustment_override_and_provisional_settlement.sql :: WHERE id = NEW.inventory_item_id AND tenant_id = NEW.tenant_id FOR UPDATE;',
       ].sort(),
     );
     // 0013's LOCK TABLE is migrate-time DDL serialization, never runtime SQL.
