@@ -76,6 +76,19 @@ async function fixture(client: pg.Client, tenant = tenantA): Promise<Fixture> {
   return { branch, item, movement: movementId, user };
 }
 
+async function manualAdjustmentOverride(
+  client: pg.Client,
+  userId: string,
+): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    "INSERT INTO manager_override_attempts (tenant_id,target_manager_user_id,initiating_actor_user_id,context_type,outcome) VALUES ($1,$2,$2,'manual_adjustment','succeeded') RETURNING id",
+    [tenantA, userId],
+  );
+  const id = result.rows[0]?.id;
+  if (id === undefined) throw new Error("manager override attempt was not returned");
+  return id;
+}
+
 async function ledger(
   client: pg.Client,
   item: string,
@@ -402,9 +415,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
         [reason, tenantA, reason],
       );
+      const override = await manualAdjustmentOverride(client, f.user);
       await client.query(
-        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
-        [negative, tenantA, f.branch, f.item, f.user, reason],
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id,manager_override_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6,$7)",
+        [negative, tenantA, f.branch, f.item, f.user, reason, override],
       );
       await expectCode(
         () =>
@@ -425,9 +439,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
         [reason, tenantA, reason],
       );
+      const override = await manualAdjustmentOverride(client, f.user);
       await client.query(
-        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
-        [negative, tenantA, f.branch, f.item, f.user, reason],
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id,manager_override_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6,$7)",
+        [negative, tenantA, f.branch, f.item, f.user, reason, override],
       );
       const result = await client.query(
         "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,5000,10,'SAR',2,true)",
@@ -444,9 +459,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
         [reason, tenantA, reason],
       );
+      const override = await manualAdjustmentOverride(client, f.user);
       await client.query(
-        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
-        [negative, tenantA, f.branch, f.item, f.user, reason],
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id,manager_override_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6,$7)",
+        [negative, tenantA, f.branch, f.item, f.user, reason, override],
       );
       const result = await client.query(
         "INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES ($1,$2,$3,2500,5,'SAR',2,true)",
@@ -463,9 +479,10 @@ describe("DD-005 phase 1 cost ledger structure", () => {
         "INSERT INTO tenant_adjustment_reasons (id,tenant_id,adjustment_reason_kind_code,label) VALUES ($1,$2,'other',$3)",
         [reason, tenantA, reason],
       );
+      const override = await manualAdjustmentOverride(client, f.user);
       await client.query(
-        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6)",
-        [negative, tenantA, f.branch, f.item, f.user, reason],
+        "INSERT INTO stock_movements (id,tenant_id,branch_id,inventory_item_id,movement_type,quantity_delta,actor_user_id,adjustment_reason_id,manager_override_id) VALUES ($1,$2,$3,$4,'manual_adjustment',-10,$5,$6,$7)",
+        [negative, tenantA, f.branch, f.item, f.user, reason, override],
       );
       await expectCode(
         () =>
