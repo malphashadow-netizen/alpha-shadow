@@ -1462,6 +1462,22 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     expect(await stockOf(flour)).toBe('7.7500');
   });
 
+  it('DD-005 phase 5 rejects a positive count correction without a real cost basis', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    const reason = await createAdjustmentReason({ kindCode: 'count_correction' });
+
+    await expect(inventory.adjustStock(T, {
+      userId: adjustUser.userId,
+      tokenSecV: adjustUser.tokenSecV,
+    }, {
+      branchId: till.branchId,
+      inventoryItemId: flour,
+      adjustmentReasonId: reason,
+      quantityDeltaText: '1.0000',
+    })).rejects.toThrow(/explicit price/i);
+  });
+
   // ── Case 12: modifiers, no-op, mirror ────────────────────────────────────
 
   it('12a/ menu-item and modifier recipes deduct separately and scale with the line quantity', async () => {
