@@ -126,6 +126,11 @@ BEGIN
       v_needed_units := v_needed_units - v_take_units;
     END LOOP;
     IF v_needed_units > 0 THEN
+      -- DD-005 phase 5 requires shortage-layer handling here but does not explicitly
+      -- specify the valuation basis when a negative manual adjustment exceeds every
+      -- real layer. This temporarily mirrors sale-deduction shortages: the latest
+      -- layer may itself be provisional, so its estimated cost can chain into this
+      -- new provisional shortfall. Track the unresolved policy in docs/backlog.md.
       SELECT total_cost_minor, (original_qty * 10000)::bigint, currency_code, minor_unit_digits
         INTO v_basis_cost, v_basis_units, v_currency, v_digits
         FROM inventory_cost_layers
