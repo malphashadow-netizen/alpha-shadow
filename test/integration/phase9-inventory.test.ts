@@ -2154,7 +2154,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       inventoryItemId: itemA,
       quantityDeltaText: '-1.0000',
       adjustmentReasonId: reasonId,
-      managerOverrideId: await manualAdjustmentOverrideId(branchUser.userId),
+      managerOverrideId: await manualAdjustmentOverrideId(actor.userId),
     });
     console.log('[AUTH-BR-02] branch A actual=', adjustA.movementType);
     expect(adjustA.movementType).toBe('manual_adjustment');
