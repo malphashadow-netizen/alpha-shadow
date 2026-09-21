@@ -98,6 +98,39 @@ function buildScope(q: TenantQuery): InventoryTxScope {
       return insertStockMovementRow(q, tid, movement);
     },
 
+    async recordInventoryReceiptCost(tid, input): Promise<void> {
+      await q.query(
+        `WITH ledger AS (
+           INSERT INTO inventory_cost_ledger
+             (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty,
+              currency_code, minor_unit_digits, is_provisional)
+           SELECT $1, $2, $3, $4, sm.quantity_delta, b.base_currency, c.minor_unit_digits, false
+             FROM stock_movements sm
+             JOIN inventory_items i ON i.tenant_id = sm.tenant_id AND i.id = sm.inventory_item_id
+             JOIN branches b ON b.tenant_id = i.tenant_id AND b.id = i.branch_id
+             JOIN currencies c ON c.code = b.base_currency
+            WHERE sm.tenant_id = $1 AND sm.id = $3 AND sm.inventory_item_id = $2
+              AND sm.movement_type = 'manual_receiving'
+           RETURNING id, original_qty, currency_code, minor_unit_digits
+         )
+         INSERT INTO inventory_cost_layers
+           (tenant_id, inventory_item_id, cost_ledger_id, original_qty, remaining_qty,
+            total_cost_minor, remaining_cost_minor, currency_code, minor_unit_digits, is_provisional)
+         SELECT $1, $2, id, original_qty, original_qty, $4, $4, currency_code, minor_unit_digits, false
+           FROM ledger`,
+        [tid, input.inventoryItemId, input.stockMovementId, input.totalCostMinor],
+      );
+    },
+
+    async postInventoryAdjustment(tid, input): Promise<void> {
+      await q.query('SELECT post_inventory_adjustment($1, $2, $3, $4)', [
+        tid,
+        input.stockMovementId,
+        input.postedByUserId,
+        input.occurredAt,
+      ]);
+    },
+
     async loadAdjustmentReason(tid: string, adjustmentReasonId: string) {
       const result = await q.query<{
         id: string;

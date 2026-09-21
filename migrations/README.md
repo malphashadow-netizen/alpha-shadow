@@ -292,7 +292,7 @@ stable prefix — the orders store maps it to `InsufficientStockError`).
 Run `roles/010_phase9_inventory.sql` separately with DBA authority after 0040
 (same manual provisioning contract as `roles/006`–`roles/009`).
 
-## DD-005 inventory costing: 0067–0071
+## DD-005 inventory costing: 0067–0076
 
 | Migration | Purpose |
 | --- | --- |
@@ -301,5 +301,10 @@ Run `roles/010_phase9_inventory.sql` separately with DBA authority after 0040
 | 0069 | Costed receiving integration |
 | 0070 | FIFO consumption allocations and immediate Cost of Goods in Process posting |
 | 0071 | Immutable restoration allocations, FIFO layer restoration, and movement-scoped restoration/waste journal posting |
+| 0072 | Waste-refund cost reclassification |
+| 0073 | Full-settlement COGS posting |
+| 0074 | Post-settlement restoration credit correction |
+| 0075 | PostgreSQL UUID aggregate compatibility correction |
+| 0076 | Manual-adjustment cost basis, FIFO allocations, and Inventory Variance posting |
 
-Run `roles/021_dd005_phase3.sql` separately with DBA authority after 0071.
+Run `roles/023_dd005_phase5.sql` separately with DBA authority after 0076.

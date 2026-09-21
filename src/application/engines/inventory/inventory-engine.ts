@@ -42,6 +42,8 @@ export interface ReceiveStockInput {
   readonly quantityText: string;
   /** The purchase unit (converted to the base unit; equal units skip the lookup). */
   readonly purchaseUnit: string;
+  /** Optional real receipt total in branch-currency minor units. */
+  readonly totalCostMinor?: bigint;
   /**
    * @deprecated Audit F-B: IGNORED. The server clock stamps every movement;
    * any caller-supplied value has no effect. Kept only so existing callers
@@ -159,7 +161,18 @@ export class InventoryEngine {
         // Audit F-B: input.occurredAt is ignored — the server clock stamps every movement.
         occurredAt: new Date(),
       };
-      return scope.insertStockMovement(tenantId, movement);
+      const inserted = await scope.insertStockMovement(tenantId, movement);
+      if (input.totalCostMinor !== undefined) {
+        if (input.totalCostMinor <= 0n) {
+          throw new ValidationError('totalCostMinor must be greater than zero', 'totalCostMinor');
+        }
+        await scope.recordInventoryReceiptCost(tenantId, {
+          stockMovementId: inserted.id,
+          inventoryItemId: item.id,
+          totalCostMinor: input.totalCostMinor,
+        });
+      }
+      return inserted;
     });
   }
 
@@ -204,7 +217,13 @@ export class InventoryEngine {
         // Audit F-B: input.occurredAt is ignored — the server clock stamps every movement.
         occurredAt: new Date(),
       };
-      return scope.insertStockMovement(tenantId, movement);
+      const inserted = await scope.insertStockMovement(tenantId, movement);
+      await scope.postInventoryAdjustment(tenantId, {
+        stockMovementId: inserted.id,
+        postedByUserId: actor.userId,
+        occurredAt: inserted.occurredAt,
+      });
+      return inserted;
     });
   }
 

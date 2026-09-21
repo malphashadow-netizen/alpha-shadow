@@ -144,7 +144,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
   beforeAll(async () => {
     owner = new pg.Pool({ connectionString: testDatabaseUrl(), max: 5 });
     for (const file of ['001_app_login.sql', '002_app_login_rbac.sql', '004_app_login_phase4.sql', '005_app_login_catalog.sql', '006_phase6_tax.sql', '007_phase7_orders.sql', '008_phase7_manager_override_rate_limiting.sql',
-      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '022_dd005_phase4.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql', '019_dd005_phase1.sql', '020_dd005_phase2.sql', '021_dd005_phase3.sql']) {
+      '009_phase8_payments.sql', '010_phase9_inventory.sql', '015_payment_journal.sql', '016_tenant_tax_write.sql', '022_dd005_phase4.sql', '011_backlog_i1_adjustment_reasons.sql', '012_backlog_i3_low_stock.sql', '013_backlog_i4_unit_registry.sql', '019_dd005_phase1.sql', '020_dd005_phase2.sql', '021_dd005_phase3.sql', '023_dd005_phase5.sql']) {
       await owner.query(await readFile(new URL(`../../migrations/roles/${file}`, import.meta.url), 'utf8'));
     }
     const appPassword = randomBytes(24).toString('hex');
@@ -386,15 +386,27 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     return row((await owner.query<{ current_quantity: string }>('SELECT current_quantity::text AS current_quantity FROM inventory_items WHERE id = $1', [inventoryItemId])).rows).current_quantity;
   }
 
-  async function receiveCostedStock(till: Till, inventoryItemId: string): Promise<void> {
-    const receipt = await inventory.receiveStock(T, { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV }, { branchId: till.branchId, inventoryItemId, purchaseUnit: 'kg', quantityText: '1.00000000' });
-    await owner.query("SELECT set_config('app.current_tenant_id', $1, false)", [T]);
-    const ledger = row((await owner.query<{ id: string }>(`INSERT INTO inventory_cost_ledger (tenant_id, inventory_item_id, stock_movement_id, total_cost_minor, original_qty, currency_code, minor_unit_digits) VALUES ($1,$2,$3,200,'1.0000','SAR',2) RETURNING id::text`, [T, inventoryItemId, receipt.id])).rows);
-    await owner.query(`INSERT INTO inventory_cost_layers (tenant_id, inventory_item_id, cost_ledger_id, original_qty, remaining_qty, total_cost_minor, remaining_cost_minor, currency_code, minor_unit_digits) VALUES ($1,$2,$3,'1.0000','1.0000',200,200,'SAR',2)`, [T, inventoryItemId, ledger.id]);
+  async function receiveCostedStock(
+    till: Till,
+    inventoryItemId: string,
+    quantityText = '1.00000000',
+    totalCostMinor = 200n,
+  ): Promise<void> {
+    await inventory.receiveStock(T, { userId: receiverUser.userId, tokenSecV: receiverUser.tokenSecV }, {
+      branchId: till.branchId,
+      inventoryItemId,
+      purchaseUnit: 'kg',
+      quantityText,
+      totalCostMinor,
+    });
   }
 
   async function restorationLines(movementId: string): Promise<readonly { system_purpose: string; debit_minor: string; credit_minor: string; description: string }[]> {
     return (await withApp(T, (q) => q.query<{ system_purpose: string; debit_minor: string; credit_minor: string; description: string }>(`SELECT a.system_purpose, l.debit_minor::text, l.credit_minor::text, l.description FROM journal_entries e JOIN journal_entry_lines l ON l.tenant_id=e.tenant_id AND l.journal_entry_id=e.id JOIN accounts a ON a.tenant_id=l.tenant_id AND a.id=l.account_id WHERE e.tenant_id=$1 AND e.source_type='inventory_restoration' AND e.source_id=$2 ORDER BY l.line_number`, [T, movementId]))).rows;
+  }
+
+  async function restorationLinesForSource(sourceType: string, sourceId: string): Promise<readonly { system_purpose: string; debit_minor: string; credit_minor: string; description: string }[]> {
+    return (await withApp(T, (q) => q.query<{ system_purpose: string; debit_minor: string; credit_minor: string; description: string }>(`SELECT a.system_purpose, l.debit_minor::text, l.credit_minor::text, l.description FROM journal_entries e JOIN journal_entry_lines l ON l.tenant_id=e.tenant_id AND l.journal_entry_id=e.id JOIN accounts a ON a.tenant_id=l.tenant_id AND a.id=l.account_id WHERE e.tenant_id=$1 AND e.source_type=$2 AND e.source_id=$3 ORDER BY l.line_number`, [T, sourceType, sourceId]))).rows;
   }
 
   async function wipNet(orderId: string): Promise<string> {
@@ -1476,6 +1488,65 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       adjustmentReasonId: reason,
       quantityDeltaText: '1.0000',
     })).rejects.toThrow(/explicit price/i);
+  });
+
+  it('DD-005 phase 5 costs a count correction from the oldest real layer and posts inventory variance', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    await receiveCostedStock(till, flour, '10.00000000', 500n);
+    const reason = await createAdjustmentReason({ kindCode: 'count_correction' });
+
+    const movement = await inventory.adjustStock(T, {
+      userId: adjustUser.userId,
+      tokenSecV: adjustUser.tokenSecV,
+    }, {
+      branchId: till.branchId,
+      inventoryItemId: flour,
+      adjustmentReasonId: reason,
+      quantityDeltaText: '2.0000',
+    });
+
+    const layers = await withApp(T, (q) => q.query<{ original_qty: string; total_cost_minor: string }>(
+      `SELECT original_qty::text, total_cost_minor::text FROM inventory_cost_layers
+        WHERE tenant_id=$1 AND inventory_item_id=$2 ORDER BY created_at, id`,
+      [T, flour],
+    ));
+    expect(layers.rows).toEqual([
+      { original_qty: '10.0000', total_cost_minor: '500' },
+      { original_qty: '2.0000', total_cost_minor: '100' },
+    ]);
+    expect(await restorationLinesForSource('inventory_adjustment', movement.id)).toEqual([
+      { system_purpose: 'inventory_asset', debit_minor: '100', credit_minor: '0', description: 'Inventory asset' },
+      { system_purpose: 'inventory_variance', debit_minor: '0', credit_minor: '100', description: 'Inventory variance' },
+    ]);
+  });
+
+  it('DD-005 phase 5 consumes two real layers FIFO for a negative manual adjustment', async () => {
+    const till = await setupTill();
+    const flour = await createComponent(till.branchId, 'دقيق', 'Flour', 'kg', '0.0000');
+    await receiveCostedStock(till, flour, '10.00000000', 500n);
+    await receiveCostedStock(till, flour, '10.00000000', 700n);
+    const reason = await createAdjustmentReason({ kindCode: 'shrinkage' });
+
+    await inventory.adjustStock(T, {
+      userId: adjustUser.userId,
+      tokenSecV: adjustUser.tokenSecV,
+    }, {
+      branchId: till.branchId,
+      inventoryItemId: flour,
+      adjustmentReasonId: reason,
+      quantityDeltaText: '-15.0000',
+    });
+
+    const layers = await withApp(T, (q) => q.query<{ remaining_qty: string; remaining_cost_minor: string }>(
+      `SELECT remaining_qty::text, remaining_cost_minor::text FROM inventory_cost_layers
+        WHERE tenant_id=$1 AND inventory_item_id=$2 ORDER BY created_at, id`,
+      [T, flour],
+    ));
+    expect(layers.rows).toEqual([
+      { remaining_qty: '0.0000', remaining_cost_minor: '0' },
+      { remaining_qty: '5.0000', remaining_cost_minor: '350' },
+    ]);
   });
 
   // ── Case 12: modifiers, no-op, mirror ────────────────────────────────────

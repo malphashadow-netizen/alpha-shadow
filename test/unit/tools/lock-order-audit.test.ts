@@ -133,6 +133,8 @@ describe('B3 row-lock audit (static)', () => {
         'migrations/0070_dd005_phase2_inventory_consumption.sql :: WHERE tenant_id = p_tenant AND inventory_item_id = v_movement.inventory_item_id AND remaining_qty > 0 ORDER BY created_at, id FOR UPDATE',
         // duplicate of the FOR UPDATE lock in migration 0070; reintroduced verbatim by CREATE OR REPLACE FUNCTION in 0075, not a new lock.
         'migrations/0075_dd005_phase4c_fix_min_uuid_aggregate.sql :: WHERE tenant_id = p_tenant AND inventory_item_id = v_movement.inventory_item_id AND remaining_qty > 0 ORDER BY created_at, id FOR UPDATE',
+        // Phase 5 uses the identical FIFO layer lock after the movement trigger has locked inventory_items.
+        'migrations/0076_dd005_phase5_inventory_adjustments.sql :: ORDER BY created_at, id FOR UPDATE',
       ].sort(),
     );
     // 0013's LOCK TABLE is migrate-time DDL serialization, never runtime SQL.
