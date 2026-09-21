@@ -386,6 +386,12 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     return row((await owner.query<{ current_quantity: string }>('SELECT current_quantity::text AS current_quantity FROM inventory_items WHERE id = $1', [inventoryItemId])).rows).current_quantity;
   }
 
+  async function manualAdjustmentOverrideId(actorUserId = adjustUser.userId): Promise<string> {
+    return (await authenticator.verifyLiveChallengeWithId(
+      T, stockManager.userId, stockManager.pin, actorUserId, 'manual_adjustment',
+    )).attemptId;
+  }
+
   async function receiveCostedStock(
     till: Till,
     inventoryItemId: string,
@@ -1156,7 +1162,8 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       branchId: till.branchId, inventoryItemId: sugar, purchaseUnit: 'kg', quantityText: '1.00000000', occurredAt: past,
     });
     const adjusted = await inventory.adjustStock(T, { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV }, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000', occurredAt: future,
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-1.0000',
+      managerOverrideId: await manualAdjustmentOverrideId(), occurredAt: future,
     });
     const after = Date.now();
     for (const [movement, supplied] of [[received, past], [adjusted, future]] as const) {
@@ -1454,7 +1461,8 @@ describe('Phase 9 inventory-backed selling (live)', () => {
     // The keyed path works in both directions and records the actor.
     const actor = { userId: adjustUser.userId, tokenSecV: adjustUser.tokenSecV };
     const down = await inventory.adjustStock(T, actor, {
-      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-2.5000', occurredAt: new Date(),
+      branchId: till.branchId, inventoryItemId: flour, adjustmentReasonId: reason, quantityDeltaText: '-2.5000',
+      managerOverrideId: await manualAdjustmentOverrideId(), occurredAt: new Date(),
     });
     expect(down.movementType).toBe('manual_adjustment');
     expect(down.quantityDelta).toBe('-2.5000');
@@ -1536,6 +1544,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       inventoryItemId: flour,
       adjustmentReasonId: reason,
       quantityDeltaText: '-15.0000',
+      managerOverrideId: await manualAdjustmentOverrideId(),
     });
 
     const layers = await withApp(T, (q) => q.query<{ remaining_qty: string; remaining_cost_minor: string }>(
@@ -1833,6 +1842,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
 
     const movement = await inventory.adjustStock(T, actor, {
       branchId: till.branchId, inventoryItemId: flour, quantityDeltaText: '-2.0000', adjustmentReasonId: reason,
+      managerOverrideId: await manualAdjustmentOverrideId(),
     });
     expect(movement.movementType).toBe('manual_adjustment');
     expect(movement.adjustmentReasonId).toBe(reason);
@@ -2144,6 +2154,7 @@ describe('Phase 9 inventory-backed selling (live)', () => {
       inventoryItemId: itemA,
       quantityDeltaText: '-1.0000',
       adjustmentReasonId: reasonId,
+      managerOverrideId: await manualAdjustmentOverrideId(branchUser.userId),
     });
     console.log('[AUTH-BR-02] branch A actual=', adjustA.movementType);
     expect(adjustA.movementType).toBe('manual_adjustment');
