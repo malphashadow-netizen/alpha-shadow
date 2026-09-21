@@ -21,7 +21,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION settle_zero_basis_adjustments() RETURNS trigger LANGUAGE plpgsql SET search_path = public AS $$
+CREATE FUNCTION settle_zero_basis_adjustments() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE a record; units bigint; settled bigint; entry uuid; variance uuid; asset uuid;
 BEGIN
   IF NEW.is_provisional THEN RETURN NEW; END IF;
@@ -171,9 +171,18 @@ BEGIN
     PERFORM public.assert_tenant_order_permission(NEW.actor_user_id, 'inventory:adjust', NEW.branch_id);
   END IF;
 
-  -- (f) Override evidence: the 0036 evidence shape, adapted to the claim
-  -- design — the attempt (same actor, 'stock_override' context, succeeded,
-  -- fresh) PLUS the single-use claim binding it to THIS order.
+  -- (f) Every negative manual adjustment requires explicit, matching
+  -- manager-override evidence. This is independent of the resulting balance:
+  -- shrinkage is controlled even while sufficient stock remains on hand.
+  IF NEW.movement_type = 'manual_adjustment'
+     AND NEW.quantity_delta < 0
+     AND NEW.manager_override_id IS NULL THEN
+    RAISE EXCEPTION 'negative manual_adjustment without a manager override' USING ERRCODE = '23514';
+  END IF;
+
+  -- Override evidence: the 0036 evidence shape, adapted to both claim
+  -- designs. Sale attempts bind to an order; manual-adjustment attempts bind
+  -- exactly once to the inserted stock movement below.
   IF NEW.manager_override_id IS NOT NULL THEN
     IF NEW.movement_type NOT IN ('sale_deduction', 'manual_adjustment') THEN
       RAISE EXCEPTION 'manager override is not valid for this stock movement type' USING ERRCODE = '23514';
