@@ -91,8 +91,10 @@ BEGIN
    ELSE
      cost := (basis.total_cost_minor*needed)/basis.units;
      INSERT INTO inventory_cost_ledger (tenant_id,inventory_item_id,stock_movement_id,total_cost_minor,original_qty,currency_code,minor_unit_digits,is_provisional) VALUES (p_tenant,m.inventory_item_id,p_movement,cost,needed::numeric/10000,basis.currency_code,basis.minor_unit_digits,true) RETURNING id INTO ledger;
-     INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits,is_provisional) VALUES (p_tenant,m.inventory_item_id,ledger,needed::numeric/10000,0,cost,0,basis.currency_code,basis.minor_unit_digits,true) RETURNING id INTO layer;
-     INSERT INTO adjustment_cost_allocations (tenant_id,stock_movement_id,layer_id,qty,allocated_cost_minor,is_provisional) VALUES (p_tenant,p_movement,layer,needed::numeric/10000,cost,true); total:=total+cost;
+     INSERT INTO inventory_cost_layers (tenant_id,inventory_item_id,cost_ledger_id,original_qty,remaining_qty,total_cost_minor,remaining_cost_minor,currency_code,minor_unit_digits,is_provisional) VALUES (p_tenant,m.inventory_item_id,ledger,needed::numeric/10000,needed::numeric/10000,cost,cost,basis.currency_code,basis.minor_unit_digits,true) RETURNING id INTO layer;
+     INSERT INTO adjustment_cost_allocations (tenant_id,stock_movement_id,layer_id,qty,allocated_cost_minor,is_provisional) VALUES (p_tenant,p_movement,layer,needed::numeric/10000,cost,true);
+     UPDATE inventory_cost_layers SET remaining_qty=0,remaining_cost_minor=0 WHERE tenant_id=p_tenant AND id=layer;
+     total:=total+cost;
    END IF;
  END IF;
  -- Existing phase-5 accounting remains authoritative for non-zero adjustments.
