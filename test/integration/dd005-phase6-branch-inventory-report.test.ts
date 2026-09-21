@@ -55,6 +55,7 @@ describe('DD-005 phase 6 branch inventory reporting', () => {
       BRANCH_CURRENCY,
       REPORTING_CURRENCY,
       CLOSING_TIME,
+      'market',
     );
 
     expect(closingRate).toMatchObject({

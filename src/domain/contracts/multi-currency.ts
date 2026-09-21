@@ -1,5 +1,7 @@
 import type { CurrencyCode, Money } from '../../shared/money.ts';
 
+export type ExchangeRateSource = 'market' | 'till_manual';
+
 export interface ExchangeRateRecord {
   readonly tenantId: string;
   readonly fromCurrency: CurrencyCode;
@@ -15,6 +17,7 @@ export interface ExchangeRateRepository {
     fromCurrency: CurrencyCode,
     toCurrency: CurrencyCode,
     transactionTime: Date,
+    rateSource?: ExchangeRateSource,
   ): Promise<ExchangeRateRecord | null>;
   append(
     tenantId: string,
@@ -22,6 +25,7 @@ export interface ExchangeRateRepository {
     toCurrency: CurrencyCode,
     rate: string,
     effectiveAt: Date,
+    rateSource?: ExchangeRateSource,
   ): Promise<void>;
 }
 

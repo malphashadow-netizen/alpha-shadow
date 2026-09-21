@@ -9,6 +9,7 @@ import type {
   CurrencyRepository,
   ExchangeRateRecord,
   ExchangeRateRepository,
+  ExchangeRateSource,
   ReportingCurrencyRepository,
 } from '../../../domain/contracts/multi-currency.ts';
 import { currencyCode, type CurrencyCode } from '../../../shared/money.ts';
@@ -53,21 +54,35 @@ export class PostgresExchangeRateRepository implements ExchangeRateRepository {
     fromCurrency: CurrencyCode,
     toCurrency: CurrencyCode,
     transactionTime: Date,
+    rateSource?: ExchangeRateSource,
   ): Promise<ExchangeRateRecord | null> {
     return this.withTenantContext(tenantId, async (q) => {
       // The temporal predicate is part of the lookup contract, not an optional
       // caller filter. A future/current rate can never rewrite an old report.
-      const result = await q.query<ExchangeRateRow>(
-        `SELECT tenant_id, from_currency, to_currency, rate, effective_at
-           FROM exchange_rates
-          WHERE tenant_id = $1
-            AND from_currency = $2
-            AND to_currency = $3
-            AND effective_at <= $4
-          ORDER BY effective_at DESC, id DESC
-          LIMIT 1`,
-        [tenantId, fromCurrency, toCurrency, transactionTime],
-      );
+      const result = rateSource === undefined
+        ? await q.query<ExchangeRateRow>(
+            `SELECT tenant_id, from_currency, to_currency, rate, effective_at
+               FROM exchange_rates
+              WHERE tenant_id = $1
+                AND from_currency = $2
+                AND to_currency = $3
+                AND effective_at <= $4
+              ORDER BY effective_at DESC, id DESC
+              LIMIT 1`,
+            [tenantId, fromCurrency, toCurrency, transactionTime],
+          )
+        : await q.query<ExchangeRateRow>(
+            `SELECT tenant_id, from_currency, to_currency, rate, effective_at
+               FROM exchange_rates
+              WHERE tenant_id = $1
+                AND from_currency = $2
+                AND to_currency = $3
+                AND rate_source = $5
+                AND effective_at <= $4
+              ORDER BY effective_at DESC, id DESC
+              LIMIT 1`,
+            [tenantId, fromCurrency, toCurrency, transactionTime, rateSource],
+          );
       const row = result.rows[0];
       return row === undefined ? null : mapExchangeRate(row);
     });
@@ -79,12 +94,13 @@ export class PostgresExchangeRateRepository implements ExchangeRateRepository {
     toCurrency: CurrencyCode,
     rate: string,
     effectiveAt: Date,
+    rateSource?: ExchangeRateSource,
   ): Promise<void> {
     await this.withTenantContext(tenantId, async (q) => {
       await q.query(
-        `INSERT INTO exchange_rates (tenant_id, from_currency, to_currency, rate, effective_at)
-         VALUES ($1, $2, $3, $4::numeric, $5)`,
-        [tenantId, fromCurrency, toCurrency, rate, effectiveAt],
+        `INSERT INTO exchange_rates (tenant_id, from_currency, to_currency, rate, effective_at, rate_source)
+         VALUES ($1, $2, $3, $4::numeric, $5, $6)`,
+        [tenantId, fromCurrency, toCurrency, rate, effectiveAt, rateSource ?? null],
       );
     });
   }

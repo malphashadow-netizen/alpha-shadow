@@ -108,7 +108,7 @@ describe('Phase 4 live acceptance: FX history, audit snapshots, and RLS', () => 
   });
 
   it('converts only at report time to tenants.reporting_currency', async () => {
-    await rates.append(TENANT_A, USD, currencyCode('SAR'), '3.75000000', new Date('2025-01-01T00:00:00.000Z'));
+    await rates.append(TENANT_A, USD, currencyCode('SAR'), '3.75000000', new Date('2025-01-01T00:00:00.000Z'), 'market');
     const result = await engine.convertToReportingCurrency(
       TENANT_A,
       money(100n, USD),
