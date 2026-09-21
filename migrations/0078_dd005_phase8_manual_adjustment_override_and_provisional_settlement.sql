@@ -335,7 +335,7 @@ BEGIN
       IF NEW.movement_type = 'manual_adjustment' THEN
         RAISE EXCEPTION 'manual_adjustment override requires a successful manual_adjustment attempt initiated by the movement actor' USING ERRCODE = '23514';
       ELSE
-        RAISE EXCEPTION 'sale_deduction override requires a successful stock_override attempt initiated by the movement actor' USING ERRCODE = '23514';
+        RAISE EXCEPTION '% override requires a successful stock_override attempt initiated by the movement actor', NEW.movement_type USING ERRCODE = '23514';
       END IF;
     END IF;
     IF v_attempt.created_at <= now() - make_interval(mins => 15) THEN
