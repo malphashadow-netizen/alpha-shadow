@@ -122,7 +122,7 @@ DROP TRIGGER IF EXISTS trg_negative_manual_adjustment_override ON stock_movement
 DROP FUNCTION IF EXISTS validate_negative_manual_adjustment_override();
 
 
-CREATE FUNCTION validate_stock_movement() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION validate_stock_movement() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   v_item_branch uuid;
   v_item_order uuid;
