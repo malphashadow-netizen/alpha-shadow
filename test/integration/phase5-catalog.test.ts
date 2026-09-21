@@ -128,7 +128,7 @@ describe('Phase 5 live acceptance: catalog engine, RLS, soft-delete', () => {
         // which references inventory_cost_layers,
         // which references inventory_cost_ledger and then stock_movements; all
         // must be truncated in the same statement without CASCADE.
-        `TRUNCATE adjustment_cost_allocations, restoration_allocations, consumption_allocations, inventory_cost_layers, inventory_cost_ledger, stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
+        `TRUNCATE inventory_provisional_cost_settlements, manual_adjustment_override_claims, adjustment_cost_allocations, restoration_allocations, consumption_allocations, inventory_cost_layers, inventory_cost_ledger, stock_movements, menu_item_recipes, modifier_recipes, order_voids, order_item_status_events, order_items, station_routing_rules, order_line_tax_snapshots, order_line_tax_contexts, menu_item_excise_confirmations, menu_item_additional_tax_categories, menu_item_modifier_groups, branch_menu_item_overrides, modifiers, menu_items, modifier_groups, menu_categories`,
       );
       await owner.query('DELETE FROM branches WHERE id = ANY($1::uuid[])', [[BRANCH_A1, BRANCH_A2, BRANCH_B1]]);
     } finally {
