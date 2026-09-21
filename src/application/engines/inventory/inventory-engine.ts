@@ -59,6 +59,8 @@ export interface AdjustStockInput {
   readonly quantityDeltaText: string;
   /** I1: MANDATORY coded reason (tenant_adjustment_reasons id, must be enabled). */
   readonly adjustmentReasonId: string;
+  /** Successful manager challenge required when this adjustment lowers stock. */
+  readonly managerOverrideId?: string;
   /**
    * @deprecated Audit F-B: IGNORED. The server clock stamps every movement;
    * any caller-supplied value has no effect. Kept only so existing callers
@@ -212,7 +214,7 @@ export class InventoryEngine {
         orderId: null,
         orderItemId: null,
         actorUserId: actor.userId,
-        managerOverrideId: null,
+        managerOverrideId: input.managerOverrideId ?? null,
         adjustmentReasonId: reason.id,
         // Audit F-B: input.occurredAt is ignored — the server clock stamps every movement.
         occurredAt: new Date(),

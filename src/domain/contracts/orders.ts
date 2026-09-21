@@ -349,7 +349,7 @@ export interface VoidActor {
  * a void, and only a 'stock_override' challenge authorizes a sale into
  * shortage (bound to exactly one order via a single-use claim).
  */
-export type ManagerOverrideContextType = 'void' | 'discount' | 'stock_override';
+export type ManagerOverrideContextType = 'void' | 'discount' | 'stock_override' | 'manual_adjustment';
 
 /** A verified challenge PLUS the attempt row id (for single-use claim binding). */
 export interface VerifiedManagerOverride {
