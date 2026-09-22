@@ -34,7 +34,7 @@ describe('compliance provider adapter', () => {
     expect(result.artifactHash).toBe('sha256:fixed-hash');
     expect(result.submittedAt).toBeInstanceOf(Date);
     expect(putArtifact).toHaveBeenCalledOnce();
-    expect(await adapter.getStatus(result.externalReference)).toEqual({
+    expect(await adapter.getStatus('tenant-1', result.externalReference)).toEqual({
       status: 'SUBMITTED',
       lastError: null,
       settledAt: null,
