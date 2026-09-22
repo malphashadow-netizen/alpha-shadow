@@ -32,3 +32,23 @@
 ### الخطوات القادمة المخطط لها (Not started yet)
 - Layer 4 — Adapter contract: واجهة TypeScript (buildDocument / sign / submit / getStatus) مع اختبارات contract test بواجهات mock.
 - إغلاق الدين التقني الخاص بـ authority_id بعد إنشاء tax_authorities.
+
+## تصحيح معماري — Layer 4 (Adapter Contract) — بتاريخ 2026-09-22
+
+### الفرضية الأصلية المرفوضة
+كان القرار السابق في قسم "الخطوات القادمة" يقول: "Layer 4 — Adapter contract: واجهة TypeScript (buildDocument / sign / submit / getStatus) مع اختبارات contract test بواجهات mock." هذه الفرضية **مرفوضة** بعد فحص عميق للمشروع، للأسباب التالية:
+
+1. **تعارض مباشر مع قاعدة معمارية موجودة صريحة في vitest.config.ts:** مشروع `contract` في هذا المستودع معرّف حرفيًا بأنه "architectural invariants checked against a REAL PostgreSQL catalog (pg_tables / pg_policies) + runtime guards (no InMemory repository in production)"، وينص صراحة: "There is deliberately NO mock database option: the spec forbids validating RLS against anything but a real server." إذن "contract test بواجهة mock" يخالف هذا القيد المعماري المُلزم.
+2. **الأمثلة الفعلية للـ contract tests (test/contract/auth-schema.test.ts وغيرها) كلها تفحص كاتالوج PostgreSQL حقيقي** (pg_class, pg_policies, pg_proc, information_schema.columns)، وليست اختبارات لواجهات TypeScript بمزودين وهميين.
+3. **افتراض تجزيء الواجهة لأربع دوال مستقلة (buildDocument/sign/submit/getStatus) غير مثبت** أنه الشكل الصحيح لكل الجهات التنظيمية؛ بعض الجهات تنفّذ build+sign+submit كنداء واحد. النمط الفعلي في المشروع (PaymentsTxScope, OrderTaxScope) لا يجزّئ العمليات الداخلية للـ port العام؛ كل ما هو "تفصيل تنفيذ داخلي" يبقى خلف الـ port، لا يُعرَّض كدوال مستقلة.
+4. **لا يوجد أي نمط "Adapter" لخدمة SaaS/جهة تنظيمية خارجية في المشروع حاليًا.** كل استخدام لكلمة Adapter في الكود الحالي (مثل postgres-tax-resolution-transaction.ts) يعني "تنفيذ PostgreSQL لِـ port داخلي"، ليس بوابة لخدمة خارجية. هذا القرار سيكون أول سابقة من نوعه.
+5. **مجلد src/application/engines/integrations/index.ts موجود بالفعل كـ placeholder فاضٍ** بنص حرفي: "FUTURE: integrations engine — placeholder only, no implementation until its phase. Every permission registered here later uses the resource:action key format and sets is_sensitive = true for money-affecting actions." هذا يوثّق نية معمارية سابقة بأن التكاملات الخارجية تعيش هنا، وأن أي صلاحية جديدة لها يجب أن تتبع صيغة resource:action وتُصنَّف is_sensitive = true.
+
+### القرار المصحَّح (Decision D-2)
+- الـ port الجديد اسمه `ComplianceProviderAdapter`، يُعرَّف في `src/domain/contracts/compliance.ts` بنفس نمط tax.ts وorder-tax.ts: أنواع + interface فقط، zero dependencies خارج domain/shared، بدون أي تنفيذ.
+- الواجهة تحتوي دالتين فقط على مستوى الـ port العام: `submitDocument(document, artifactStore): Promise<ComplianceSubmissionResult>` و `getStatus(externalReference): Promise<ComplianceStatusResult>`. أي تفاصيل داخلية (build/sign) تبقى تفصيل تنفيذ خاص بكل Adapter فعلي (مثل ZATCA)، لا تُعرَّض في الـ port العام.
+- الاختبارات تُكتب كـ unit test عادي في test/unit/ باستخدام تنفيذ in-memory وهمي (بنفس نمط in-memory-catalog-repository.ts الموجود)، لا باسم "contract test"، حتى لا يتعارض مع تعريف contract المعماري الملزم في هذا المستودع.
+- اسم "contract" يُحجز فقط لاختبارات تفحص schema حقيقي (pg catalog) إذا احتجنا لاحقًا جدول تسجيل مزوّدين (providers registry).
+
+### الحالة
+- 🟢 هذا تصحيح توثيقي فقط في هذه الجلسة. لم يُكتب أي كود بعد لـ compliance.ts. الجلسة القادمة (منفصلة) ستنفّذ الكتابة الفعلية طبقًا لهذا القرار المصحَّح.
