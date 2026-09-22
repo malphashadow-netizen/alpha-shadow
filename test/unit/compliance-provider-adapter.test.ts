@@ -18,6 +18,7 @@ describe('compliance provider adapter', () => {
     const result = await adapter.submitDocument(
       {
         tenantId: 'tenant-1',
+        complianceDocumentId: 'document-1',
         branchId: 'branch-1',
         orderId: 'order-1',
         documentType: 'tax_invoice',
