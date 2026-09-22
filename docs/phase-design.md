@@ -52,3 +52,14 @@
 
 ### الحالة
 - 🟢 هذا تصحيح توثيقي فقط في هذه الجلسة. لم يُكتب أي كود بعد لـ compliance.ts. الجلسة القادمة (منفصلة) ستنفّذ الكتابة الفعلية طبقًا لهذا القرار المصحَّح.
+
+## تنفيذ ComplianceProviderAdapter (D-2) — بتاريخ 2026-09-22
+
+- تم تنفيذ الكود الفعلي لـ `ComplianceProviderAdapter` ودفعه إلى `origin/main` في commit `d4f6236` برسالة `feat: add compliance provider adapter port`.
+- أُضيف `src/domain/contracts/compliance.ts` لتعريف عقد المجال والأنواع والـ ports الخاصة بمزوّد الامتثال.
+- أُضيف `src/infrastructure/db/repositories/in-memory-compliance-provider-adapter.ts` كتطبيق وهمي in-memory لاستخدامه في اختبارات الوحدة.
+- أُضيف `test/unit/compliance-provider-adapter.test.ts` لاختبار سلوك العقد والتطبيق الوهمي على مستوى الوحدة.
+- تحتوي الواجهة العامة فقط على `submitDocument` و`getStatus`، ولا تعرض `buildDocument` أو `sign` كعمليتين منفصلتين، بما يطابق قرار D-2.
+- يستخدم `ComplianceArtifactStore` النوع `Uint8Array` بدلًا من `Buffer` لضمان استقلالية بيئة التشغيل.
+- نتائج الفحص الكامل: typecheck (exit 0)، lint (exit 0)، ومجموعة الاختبارات الكاملة 1008/1008 ناجحة.
+- 🟢 هذا القسم يوثّق تنفيذًا مكتملًا ومدفوعًا؛ لا يوجد كود معلّق من D-2 حاليًا.
