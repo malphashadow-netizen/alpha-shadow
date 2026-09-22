@@ -39,7 +39,7 @@ export class InMemoryComplianceProviderAdapter implements ComplianceProviderAdap
     return result;
   }
 
-  async getStatus(externalReference: string): Promise<ComplianceStatusResult> {
+  async getStatus(_tenantId: string, externalReference: string): Promise<ComplianceStatusResult> {
     const status = this.#statuses.get(externalReference);
     if (status === undefined) {
       throw new Error(`Unknown compliance submission: ${externalReference}`);
