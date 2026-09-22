@@ -84,3 +84,11 @@
 16. لا تُستخدم فحوصات أدوار hardcoded؛ أي عمليات تشغيلية أو يدوية تستخدم atomic permissions بصيغة `resource:action`.
 17. تُعامل جميع القيم المالية عبر `BigInt` و`shared/money.ts`، ولا تُستخدم floating-point أو أرقام JavaScript الضمنية للأسعار أو الأموال.
 18. لا تُسجّل الأسرار أو PII أو signed payloads كاملة في logs أو `last_error`؛ تُحفظ فقط رموز أخطاء ثابتة ورسائل منقحة آمنة.
+
+## تصحيح D-3 — تناقض في توقيع getStatus وقرارات ناقصة — بتاريخ 2026-09-22
+
+- **تصحيح النقطة 13:** النقطة 13 في القسم "Decision D-3" أعلاه تحتوي خطأ توثيقيًا؛ نصّها الصحيح المُعتمد هو: "لا يعتمد `getStatus` على Adapter instance مربوط مسبقًا بمستأجر؛ يُوسّع توقيعه إلى `getStatus(tenantId, externalReference)`، بناءً على غياب أي نمط scoped instance في المشروع والاعتماد الصريح على تمرير `tenantId` في كل استدعاء (نمط `withTenantContext` المعتمد في `src/infrastructure/db/tenant-context.ts`)."
+- **موقع orchestrator لإدارة retry/state machine:** يوضع application orchestrator المسؤول عن إدارة retry وstate machine في `src/application/engines/integrations/`، بوصفه امتدادًا للـ placeholder الموجود في هذا المسار، وبالاستناد إلى نمط claim-then-execute المطبّق فعليًا في `src/application/engines/kds/side-effect-worker.ts`.
+- **مسار أول Adapter فعلي:** يوضع أول reference implementation فعلي لـ `ComplianceProviderAdapter` في `src/infrastructure/compliance/reference/`.
+
+- 🟡 هذا القسم يصحّح النقطة 13 فقط ويكمل نقطتين غائبتين في قسم Decision D-3 أعلاه؛ لا تُعتمد النقطة 13 كما وردت في القسم الأصلي، بل النص المصحَّح هنا.
