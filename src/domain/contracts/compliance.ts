@@ -32,6 +32,7 @@ export interface ComplianceArtifactStore {
 
 export interface ComplianceDocumentInput {
   readonly tenantId: string;
+  readonly complianceDocumentId: string;
   readonly branchId: string;
   readonly orderId: string;
   readonly documentType: ComplianceDocumentType;
@@ -62,5 +63,5 @@ export interface ComplianceProviderAdapter {
     input: ComplianceDocumentInput,
     store: ComplianceArtifactStore,
   ): Promise<ComplianceSubmissionResult>;
-  getStatus(externalReference: string): Promise<ComplianceStatusResult>;
+  getStatus(tenantId: string, externalReference: string): Promise<ComplianceStatusResult>;
 }
