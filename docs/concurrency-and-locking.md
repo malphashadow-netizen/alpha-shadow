@@ -92,6 +92,18 @@ rows no other transaction locks — no cycle possible):
 | `postgres-tenant-tax-admin-repository.ts` | one tax-mapping row | assignment upsert |
 | `postgres-orders-store.ts` `claimSideEffect` | one `side_effect_delivery_log` row | outbox claim-then-execute |
 
+SKIP LOCKED batch claim (D-3 compliance orchestrator, cannot deadlock).
+`postgres-compliance-document-store.ts` `loadClaimableDocuments` takes a
+`SELECT ... FOR UPDATE SKIP LOCKED` batch (up to `limit` rows) over
+`compliance_documents` rows in `SIGNED` or due `RETRY` status. `SKIP LOCKED`
+means a concurrent orchestrator run never waits on a row another run already
+holds — it simply skips it and claims the next eligible one. A lock that
+never waits cannot be one side of a wait-for cycle, so this site sits outside
+the B2 orders-row-first ordering by construction, not by omission. The
+document never leaves this batch's transaction without an explicit
+`compliance_document_transitions` INSERT (trigger-derived status update) or a
+`next_retry_at` UPDATE — no code path holds the lock past that.
+
 Function/trigger locks inside migration SQL (also allowlisted — executable
 statements only, comments stripped):
 

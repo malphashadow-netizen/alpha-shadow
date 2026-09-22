@@ -65,3 +65,73 @@ export interface ComplianceProviderAdapter {
   ): Promise<ComplianceSubmissionResult>;
   getStatus(tenantId: string, externalReference: string): Promise<ComplianceStatusResult>;
 }
+
+/**
+ * Application-layer port for the compliance submission orchestrator
+ * (Decision D-3). document_status, submission_attempt_no, submitted_at,
+ * settled_at and last_error on compliance_documents are ALL derived by a
+ * database trigger (apply_compliance_document_status) from rows inserted
+ * into compliance_document_transitions — this store never writes those
+ * columns directly; it only appends transition rows and manages
+ * next_retry_at, which the trigger does not touch.
+ */
+export interface ComplianceSubmissionCandidate {
+  readonly complianceDocumentId: string;
+  readonly tenantId: string;
+  readonly branchId: string;
+  readonly orderId: string;
+  readonly documentType: ComplianceDocumentType;
+  readonly countryCode: string;
+  readonly authorityId: string;
+  readonly settlementMode: ComplianceSettlementMode;
+  readonly documentStatus: ComplianceDocumentStatus;
+  readonly submissionAttemptNo: number;
+}
+
+export interface ComplianceDocumentTxScope {
+  /**
+   * Rows in SIGNED (first-time send) or RETRY with next_retry_at <= now(),
+   * locked via SELECT ... FOR UPDATE SKIP LOCKED so concurrent orchestrator
+   * runs never claim the same document twice. There is no separate claim
+   * ledger table for compliance documents (unlike side_effect_delivery_log);
+   * document_status itself is the single source of truth.
+   */
+  loadClaimableDocuments(
+    tenantId: string,
+    limit: number,
+  ): Promise<readonly ComplianceSubmissionCandidate[]>;
+
+  /**
+   * Appends ONE row to compliance_document_transitions. The DB trigger
+   * derives document_status, submission_attempt_no (incremented ONLY when
+   * toStatus is 'SUBMITTED'), submitted_at, settled_at and last_error from
+   * this row; this method never updates compliance_documents directly.
+   */
+  recordTransition(
+    tenantId: string,
+    input: {
+      readonly complianceDocumentId: string;
+      readonly orderId: string;
+      readonly fromStatus: ComplianceDocumentStatus;
+      readonly toStatus: ComplianceDocumentStatus;
+      readonly reason?: string;
+      readonly actorUserId?: string | null;
+    },
+  ): Promise<void>;
+
+  /**
+   * Direct UPDATE on compliance_documents.next_retry_at. Permitted because
+   * the derived-status guard trigger only watches document_status; must be
+   * called only after recording a FAILED -> RETRY transition for a
+   * retryable error, never for permanent or ambiguous errors.
+   */
+  scheduleRetry(tenantId: string, complianceDocumentId: string, nextRetryAt: Date): Promise<void>;
+
+  /** Clears next_retry_at on claim or on a successful SUBMITTED transition. */
+  clearRetry(tenantId: string, complianceDocumentId: string): Promise<void>;
+}
+
+export interface ComplianceDocumentStore {
+  /** Runs fn in one tenant-scoped transaction, mirroring OrdersStore.run. */
+  run<T>(tenantId: string, fn: (scope: ComplianceDocumentTxScope) => Promise<T>): Promise<T>;
+}

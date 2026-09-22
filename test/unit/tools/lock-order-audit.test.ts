@@ -69,6 +69,7 @@ describe('B3 row-lock audit (static)', () => {
       // Catalog tax edit: single menu_items row (pre-B2, audited).
       "src/infrastructure/db/repositories/postgres-catalog-repository.ts :: const before = await q.query<{ tax_rule_id: string | null }>('SELECT tax_rule_id FROM menu_items WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [tenantId, item.id]);",
       // Manager override counters: single throttle-row (pre-B2, audited).
+      "src/infrastructure/db/repositories/postgres-compliance-document-store.ts :: FOR UPDATE SKIP LOCKED`,",
       'src/infrastructure/db/repositories/postgres-manager-override-authenticator.ts :: WHERE tenant_id = $1 AND ${idColumn} = $2 FOR UPDATE`,',
       // Super-admin guard: last-admin check, twice with identical text (assignRole + removeRole).
       "src/infrastructure/db/repositories/postgres-permission-repository.ts :: 'SELECT id FROM user_roles WHERE tenant_id = $1 AND role_id = $2 AND is_active = true FOR UPDATE',",
