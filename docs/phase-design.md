@@ -63,3 +63,24 @@
 - يستخدم `ComplianceArtifactStore` النوع `Uint8Array` بدلًا من `Buffer` لضمان استقلالية بيئة التشغيل.
 - نتائج الفحص الكامل: typecheck (exit 0)، lint (exit 0)، ومجموعة الاختبارات الكاملة 1008/1008 ناجحة.
 - 🟢 هذا القسم يوثّق تنفيذًا مكتملًا ومدفوعًا؛ لا يوجد كود معلّق من D-2 حاليًا.
+
+## Decision D-3 — Real Compliance Adapter Execution Boundary
+
+1. يبقى الـ port العام محصورًا في `submitDocument` و`getStatus`.
+2. عمليتا `build` و`sign` تفاصيل داخلية للـ Adapter، وليستا عمليتين في domain port.
+3. أول Adapter فعلي هو reference implementation عام، ولا يدّعي تكاملًا رسميًا مع جهة تنظيمية مسماة.
+4. يحتاج `ComplianceDocumentInput` إلى `complianceDocumentId` لتحميل tax evidence الصحيح، وبناء مفتاح idempotency ثابت، ودعم التدقيق.
+5. لا يكتب الـ Adapter انتقالات الحالة ولا يدير جدولة إعادة المحاولة.
+6. application orchestrator هو مالك state machine و`submission_attempt_no` و`next_retry_at` وأسباب الانتقالات.
+7. يعني `submission_attempt_no` عدد الانتقالات إلى `SUBMITTED` وفق migration 0080، وليس عدد استدعاءات HTTP.
+8. الـ artifact هو exact signed submission bytes، ويُخزّن قبل الاتصال بالجهة الخارجية.
+9. يبقى `ComplianceArtifactStore` مستقلًا عن تقنية التخزين، ولا يفترض filesystem أو object storage أو database blob.
+10. يعتمد التكامل تصنيف أخطاء ثابتًا: `retryable` و`permanent` و`ambiguous`.
+11. يتطلب الخطأ الغامض reconciliation قبل أي إعادة إرسال لمنع إنشاء مستند خارجي مكرر.
+12. تُضبط `next_retry_at` عند الانتقال إلى `RETRY`، وتُصفّر عند claim/نجاح المحاولة أو عند الخروج النهائي من retry.
+13. يكون الـ Adapter scoped إلى tenant/authority وبيانات الاعتماد، لكي يبقى توقيع `getStatus(externalReference)` كما هو.
+14. يعني نجاح `submitDocument` نجاح الاستلام التقني وإرجاع external reference، وليس القبول التنظيمي النهائي؛ وتُقرأ الحالة التنظيمية عبر `getStatus`.
+15. تمر جميع قراءات PostgreSQL اللازمة لبناء المستند عبر `infrastructure/db/tenant-context.ts` و`withTenantContext(tenantId, fn)`، ويُمنع الوصول المباشر إلى pool.
+16. لا تُستخدم فحوصات أدوار hardcoded؛ أي عمليات تشغيلية أو يدوية تستخدم atomic permissions بصيغة `resource:action`.
+17. تُعامل جميع القيم المالية عبر `BigInt` و`shared/money.ts`، ولا تُستخدم floating-point أو أرقام JavaScript الضمنية للأسعار أو الأموال.
+18. لا تُسجّل الأسرار أو PII أو signed payloads كاملة في logs أو `last_error`؛ تُحفظ فقط رموز أخطاء ثابتة ورسائل منقحة آمنة.
